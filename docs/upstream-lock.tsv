@@ -1,0 +1,4 @@
+# name	origin	commit
+phabricator	https://github.com/phacility/phabricator.git	51cb7a3db9e8e510d564f6b37297111f7a690c91
+arcanist	https://github.com/phacility/arcanist.git	246e604a070f7539838fd246c0405db2752da8d2
+libphutil	https://github.com/phacility/libphutil.git	ce63d5b45049a0c3d634e338a701fe750a1e8cea

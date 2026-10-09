@@ -1,0 +1,214 @@
+import { DatabaseSync } from 'node:sqlite';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import type { Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDocument } from '../shared/types.ts';
+import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
+
+type Entity = Project | Repository | Revision | Task | WikiDocument;
+type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
+export interface MutationResponse { status: number; body: unknown }
+export interface StoredResponse extends MutationResponse { fingerprint: string }
+export interface StoreOptions { path?: string }
+type JsonRow = { data: string };
+
+export function contentHash(sourceFiles: SourceFile[]): string {
+  const canonical = [...sourceFiles].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map(({ path, content }) => ({ path, content }));
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+export class Store {
+  readonly database: DatabaseSync;
+  readonly fresh: boolean;
+  constructor(options: StoreOptions = {}) {
+    const path = options.path ?? '.data/phabricator.sqlite';
+    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    this.database = new DatabaseSync(path);
+    this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
+    const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+    if (version > 1) throw new Error(`Database schema ${version} is newer than this application supports.`);
+    this.fresh = version === 0;
+    if (version === 0) this.database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE entities (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('project','repository','revision','task','document')), data TEXT NOT NULL CHECK(json_valid(data)));
+      CREATE INDEX entities_kind ON entities(kind);
+      CREATE UNIQUE INDEX documents_slug ON entities(json_extract(data, '$.slug')) WHERE kind = 'document';
+      CREATE TABLE versions (id TEXT PRIMARY KEY, revision_id TEXT NOT NULL REFERENCES entities(id), number INTEGER NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)), UNIQUE(revision_id, number));
+      CREATE TABLE comments (id TEXT PRIMARY KEY, revision_id TEXT NOT NULL REFERENCES entities(id), version_id TEXT NOT NULL REFERENCES versions(id), data TEXT NOT NULL CHECK(json_valid(data)));
+      CREATE TABLE reviews (id TEXT PRIMARY KEY, revision_id TEXT NOT NULL REFERENCES entities(id), version_id TEXT NOT NULL REFERENCES versions(id), data TEXT NOT NULL CHECK(json_valid(data)));
+      CREATE TABLE activity (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, object_id TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)));
+      CREATE INDEX activity_object ON activity(object_id, sequence);
+      CREATE TABLE sequences (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+      CREATE TABLE idempotency (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL CHECK(json_valid(body)), created_at TEXT NOT NULL);
+      PRAGMA user_version = 1;
+      COMMIT;
+    `);
+  }
+
+  close(): void { this.database.close(); }
+  transaction<T>(work: () => T): T {
+    this.database.exec('BEGIN IMMEDIATE');
+    try { const result = work(); this.database.exec('COMMIT'); return result; }
+    catch (error) { this.database.exec('ROLLBACK'); throw error; }
+  }
+  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse): MutationResponse {
+    return this.transaction(() => {
+      if (key) {
+        const existing = this.replay(key, fingerprint);
+        if (existing) return existing;
+      }
+      const response = work();
+      if (key) this.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(key, fingerprint, response.status, JSON.stringify(response.body), new Date().toISOString());
+      return response;
+    });
+  }
+  replay(key: string, fingerprint: string): MutationResponse | undefined {
+    const row = this.database.prepare('SELECT fingerprint, status, body FROM idempotency WHERE key = ?').get(key) as { fingerprint: string; status: number; body: string } | undefined;
+    if (!row) return undefined;
+    if (row.fingerprint !== fingerprint) throw new HttpError(409, 'This idempotency key was already used for a different request.');
+    return { status: row.status, body: JSON.parse(row.body) as unknown };
+  }
+  private nextId(name: string, prefix: string): string {
+    const row = this.database.prepare('INSERT INTO sequences (name, value) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET value = value + 1 RETURNING value').get(name) as { value: number };
+    return `${prefix}${row.value}`;
+  }
+  private get<T extends Entity>(kind: Kind, id: string): T {
+    const row = this.database.prepare('SELECT data FROM entities WHERE kind = ? AND id = ?').get(kind, id) as JsonRow | undefined;
+    if (!row) throw new HttpError(404, `${kind} ${id} was not found.`);
+    return JSON.parse(row.data) as T;
+  }
+  private all<T extends Entity>(kind: Kind): T[] {
+    return (this.database.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid DESC').all(kind) as JsonRow[]).map(row => JSON.parse(row.data) as T);
+  }
+  private save(kind: Kind, value: Entity): void {
+    this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data').run(value.id, kind, JSON.stringify(value));
+  }
+  private reference(value: unknown, kind: 'project' | 'repository'): string | null {
+    if (value === null || value === undefined) return null;
+    const id = string(value, `${kind} ID`, 50);
+    try { this.get(kind, id); } catch { throw new HttpError(400, `Unknown ${kind}: ${id}.`); }
+    return id;
+  }
+  event(objectId: string, action: string, detail: string, actor = 'You'): void {
+    const value: Activity = { id: randomUUID(), objectId, actor, action, detail, createdAt: new Date().toISOString() };
+    this.database.prepare('INSERT INTO activity (id, object_id, data) VALUES (?, ?, ?)').run(value.id, objectId, JSON.stringify(value));
+  }
+  activities(objectId?: string): Activity[] {
+    const rows = objectId
+      ? this.database.prepare('SELECT data FROM activity WHERE object_id = ? ORDER BY sequence DESC LIMIT 200').all(objectId)
+      : this.database.prepare('SELECT data FROM activity ORDER BY sequence DESC LIMIT 200').all();
+    return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity);
+  }
+  state(ai: AppState['ai']): AppState {
+    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), ai, mode: 'local-single-user' };
+  }
+  createProject(input: unknown): Project {
+    const data = object(input, ['name', 'description', 'color']);
+    const color = data.color === undefined ? '#5b83b5' : string(data.color, 'Color', 7);
+    if (!/^#[a-f\d]{6}$/i.test(color)) throw new HttpError(400, 'Color must be a six-digit hexadecimal color.');
+    const project: Project = { id: this.nextId('project', 'PROJ'), name: string(data.name, 'Name'), description: optionalString(data.description, 'Description'), color };
+    this.save('project', project); this.event(project.id, 'created', `Created project ${project.name}.`); return project;
+  }
+  createRepository(input: unknown): Repository {
+    const data = object(input, ['name', 'remoteUrl', 'description', 'defaultBranch']);
+    const repository: Repository = { id: this.nextId('repository', 'R'), name: string(data.name, 'Name'), remoteUrl: remoteUrl(data.remoteUrl), description: optionalString(data.description, 'Description'), defaultBranch: data.defaultBranch === undefined ? 'main' : string(data.defaultBranch, 'Default branch') };
+    this.save('repository', repository); this.event(repository.id, 'registered', `Registered ${repository.name}; no remote content fetched.`); return repository;
+  }
+  createTask(input: unknown): Task { return this.writeTask(input); }
+  updateTask(id: string, input: unknown): Task { return this.writeTask(input, this.get<Task>('task', id)); }
+  private writeTask(input: unknown, current?: Task): Task {
+    const data = object(input, ['title', 'description', 'status', 'priority', 'projectId']);
+    if (current && Object.keys(data).length === 0) throw new HttpError(400, 'At least one task field is required.');
+    const now = new Date().toISOString();
+    const task: Task = {
+      id: current?.id ?? this.nextId('task', 'T'), title: data.title === undefined && current ? current.title : string(data.title, 'Title'),
+      description: data.description === undefined && current ? current.description : optionalString(data.description, 'Description'),
+      status: data.status === undefined ? current?.status ?? 'open' : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
+      priority: data.priority === undefined ? current?.priority ?? 'normal' : choice(data.priority, 'priority', ['low', 'normal', 'high', 'urgent']),
+      projectId: data.projectId === undefined && current ? current.projectId : this.reference(data.projectId, 'project'),
+      createdAt: current?.createdAt ?? now, updatedAt: now,
+    };
+    this.save('task', task); this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`); return task;
+  }
+  createDocument(input: unknown): WikiDocument { return this.writeDocument(input); }
+  updateDocument(id: string, input: unknown): WikiDocument { return this.writeDocument(input, this.get<WikiDocument>('document', id)); }
+  private writeDocument(input: unknown, current?: WikiDocument): WikiDocument {
+    const data = object(input, ['title', 'slug', 'content', 'expectedVersion']);
+    if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This document changed. Reload before saving.');
+    if (!current && data.expectedVersion !== undefined) throw new HttpError(400, 'expectedVersion is only used when updating a document.');
+    const slug = string(data.slug, 'Slug', 160);
+    if (!/^[a-z0-9]+(?:[-/][a-z0-9]+)*$/.test(slug)) throw new HttpError(400, 'Slug must contain lowercase letters, numbers, hyphens, or slash-separated paths.');
+    if (this.all<WikiDocument>('document').some(doc => doc.slug === slug && doc.id !== current?.id)) throw new HttpError(409, 'A document with this slug already exists.');
+    const now = new Date().toISOString();
+    const document: WikiDocument = { id: current?.id ?? this.nextId('document', 'W'), title: string(data.title, 'Title'), slug, content: string(data.content, 'Content', 500_000, true), version: (current?.version ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now };
+    this.save('document', document); this.event(document.id, current ? 'updated' : 'created', `Saved document ${document.title}, version ${document.version}.`); return document;
+  }
+  createRevision(input: unknown): RevisionDetail {
+    const data = object(input, ['title', 'summary', 'kind', 'files', 'repositoryId', 'projectId']);
+    const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
+    const source = files(data.files);
+    const now = new Date().toISOString();
+    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
+    this.save('revision', revision); this.saveVersion(revision, source, 'Initial version'); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`); return this.detail(revision.id);
+  }
+  private saveVersion(revision: Revision, source: SourceFile[], message: string): RevisionVersion {
+    const version: RevisionVersion = { id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source), createdAt: new Date().toISOString() };
+    this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version)); return version;
+  }
+  requireVersion(id: string, expected: unknown): RevisionDetail {
+    const version = integer(expected, 'expectedVersion'); const detail = this.detail(id);
+    if (detail.revision.currentVersion !== version) throw new HttpError(409, 'This revision changed. Reload before continuing.');
+    return detail;
+  }
+  createVersion(id: string, input: unknown): RevisionDetail {
+    const data = object(input, ['files', 'message', 'expectedVersion']);
+    const { revision } = this.requireVersion(id, data.expectedVersion);
+    const source = files(data.files); const message = string(data.message, 'Message', 10_000);
+    revision.currentVersion += 1; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+    this.save('revision', revision); this.saveVersion(revision, source, message); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`); return this.detail(id);
+  }
+  updateRevision(id: string, input: unknown): Revision {
+    const data = object(input, ['status', 'expectedVersion']);
+    const detail = this.requireVersion(id, data.expectedVersion);
+    const status = choice(data.status, 'status', ['draft', 'needs_review', 'changes_requested', 'accepted', 'closed']);
+    const version = detail.versions.find(item => item.number === detail.revision.currentVersion)!;
+    if (status === 'accepted') {
+      const reviews = detail.reviews.filter(review => review.versionId === version.id && review.contentHash === version.contentHash);
+      if (!reviews.length || reviews.some(review => review.findings.some(finding => finding.severity === 'error'))) throw new HttpError(409, 'Acceptance requires current-version review evidence with no error findings.');
+    }
+    const revision = { ...detail.revision, status, updatedAt: new Date().toISOString() };
+    this.save('revision', revision); this.event(id, status, `${status === 'closed' ? 'Manually closed' : `Set status to ${status.replaceAll('_', ' ')}`} at version ${revision.currentVersion}.`); return revision;
+  }
+  createComment(id: string, input: unknown): ReviewComment {
+    const data = object(input, ['body', 'versionId', 'filePath', 'line']); const detail = this.detail(id);
+    const versionId = string(data.versionId, 'Version ID', 100); const version = detail.versions.find(item => item.id === versionId);
+    if (!version) throw new HttpError(400, 'Comment version does not belong to this revision.');
+    const filePath = data.filePath === undefined || data.filePath === null ? null : string(data.filePath, 'File path', 240);
+    const file = filePath ? version.files.find(item => item.path === filePath) : undefined;
+    if (filePath && !file) throw new HttpError(400, 'Comment file does not exist in the selected version.');
+    const line = data.line === undefined || data.line === null ? null : integer(data.line, 'Line');
+    if (line !== null && (!file || line > file.content.split('\n').length)) throw new HttpError(400, 'Comment line must exist in the selected file and version.');
+    const comment: ReviewComment = { id: randomUUID(), revisionId: id, versionId, filePath, line, body: string(data.body, 'Comment', 20_000), author: 'You', createdAt: new Date().toISOString() };
+    this.database.prepare('INSERT INTO comments (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(comment.id, id, versionId, JSON.stringify(comment));
+    this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`); return comment;
+  }
+  saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis): ReviewRun {
+    const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
+    const review: ReviewRun = { ...analysis, id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
+    this.database.prepare('INSERT INTO reviews (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(review.id, id, version.id, JSON.stringify(review));
+    if (detail.revision.status === 'accepted' && analysis.findings.some(finding => finding.severity === 'error')) {
+      this.save('revision', { ...detail.revision, status: 'changes_requested', updatedAt: new Date().toISOString() });
+      this.event(id, 'acceptance_invalidated', `New review errors invalidated acceptance of version ${expectedVersion}.`);
+    }
+    this.event(id, 'reviewed', `${analysis.provider === 'local' ? 'Local checks' : 'AI review'} completed for version ${expectedVersion}: ${analysis.findings.length} findings.`, analysis.provider === 'local' ? 'Local checks' : 'AI reviewer'); return review;
+  }
+  detail(id: string): RevisionDetail {
+    const revision = this.get<Revision>('revision', id);
+    const versions = (this.database.prepare('SELECT data FROM versions WHERE revision_id = ? ORDER BY number').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as RevisionVersion);
+    const comments = (this.database.prepare('SELECT data FROM comments WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewComment);
+    const reviews = (this.database.prepare('SELECT data FROM reviews WHERE revision_id = ? ORDER BY rowid DESC').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewRun);
+    return { revision, versions, comments, reviews, activity: this.activities(id) };
+  }
+}
+
+export function createStore(options: StoreOptions = {}): Store { return new Store(options); }

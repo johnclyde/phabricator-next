@@ -1,0 +1,19 @@
+Phabricator Next
+Copyright 2026 John Clyde and contributors.
+
+This project is licensed under the Apache License, Version 2.0.
+See LICENSE for the full terms.
+
+This is an independent implementation inspired by Phabricator, Arcanist,
+and libphutil. Their historical reference sources are maintained by
+Phacility and other contributors and are available under Apache 2.0.
+They are downloaded separately for research and are not included in this
+source distribution. Exact source revisions and original license/notice
+links are recorded in docs/upstream.md.
+
+The original upstream notices identify Phabricator and Phacility as
+trademarks of Phacility, Inc. This project is not affiliated with or
+endorsed by Phacility. The Apache license grants no trademark rights.
+
+Third-party dependencies retain their respective copyright notices and
+licenses, available in their distributed packages.
