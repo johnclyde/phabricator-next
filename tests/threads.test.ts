@@ -217,7 +217,7 @@ test('schema 4 migration preserves legacy comment bytes, provenance and replay w
   const directory = mkdtempSync(join(tmpdir(), 'phab-thread-migration-')); const path = join(directory, 'workspace.sqlite');
   const legacy = legacyDatabase(path); let store = new Store({ path });
   try {
-    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
+    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
     const detail = store.detail(legacy.revision.id);
     assert.deepEqual(detail.revision, legacy.revision); assert.deepEqual(detail.versions, [legacy.version]); assert.deepEqual(detail.comments, legacy.comments);
     assert.deepEqual((raw(store, 'comments') as { data: string }[]).map(row => row.data), legacy.commentJson);

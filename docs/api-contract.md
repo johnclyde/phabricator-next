@@ -6,7 +6,11 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 
 - `GET /api/health` → `{ok:true}`
 - `GET /api/state` → AppState; includes visible objects and filtered recent activity, visible Spaces, a member directory, object access descriptions, access epoch and creation capability
-- `POST /api/tasks` TaskInput → Task; `PATCH /api/tasks/:id` partial TaskInput → Task
+- `POST /api/tasks` TaskInput → Task; `PATCH /api/tasks/:id` UpdateTaskInput (expectedVersion required) → Task
+- `GET /api/tasks/:id` → TaskDetail; current fields, first history page, visible dependencies and inverse links
+- `GET /api/tasks/:id/history?before=N&limit=N` → TaskHistory; newest-first exclusive sequence cursor, default 50, maximum 100, visibility filtering before pagination
+- `POST /api/tasks/:id/comments` `{body}` → TaskTransaction (201); append-only discussion with interact permission
+- `POST /api/tasks/:id/dependencies` TaskDependencyInput → TaskDetail; online-only directed edge change, source edit and destination view, atomic inverse history and cycle rejection
 - `POST /api/projects` `{name,description?,color?}` → Project
 - `POST /api/repositories` `{name,remoteUrl,description?,defaultBranch?}` → Repository (registry only; no remote fetch)
 - `POST /api/documents` DocumentInput → WikiDocument; `PUT /api/documents/:id` DocumentInput (expectedVersion required) → WikiDocument. Optional `message` records an edit summary; every edit appends immutable content history.
@@ -41,7 +45,7 @@ Schema 2 migrates each pre-history wiki document into one `legacy` snapshot at i
 
 All protected cookie requests, including GETs, require `X-Session-Context`; mutations also require `X-CSRF-Token` and an exact matching Origin. CLI requests use `Authorization: Bearer …` with independent read/write/review scopes. Authentication, scopes and current object permissions are evaluated before any idempotency replay. Authenticated replay keys include workspace and principal; asynchronous reviews revalidate credentials and object permissions before committing under the write lock. Session and token secrets are never content-API fields. Auth responses are no-store.
 
-Schema 4 introduced object and Space policies. Schema 5 adds review threads and immutable resolution events while preserving existing comment records. Schema 6 adds immutable suggestion applications. Revision details include threads, their events and suggestion applications; see [passage review](review-threads.md) and [suggested edits](suggested-edits.md) for their contracts. Previous binaries refuse the newer database. The separate durable authentication latch prevents a password-to-local downgrade. Account/session/token metadata is persisted separately from immutable document records.
+Schema 4 introduced object and Space policies. Schema 5 adds review threads and immutable resolution events while preserving existing comment records. Schema 6 adds immutable suggestion applications. Schema 7 adds task versions, immutable transactions and directed dependencies; see [task contracts](tasks.md). Revision details include threads, their events and suggestion applications; see [passage review](review-threads.md) and [suggested edits](suggested-edits.md) for their contracts. Previous binaries refuse the newer database. The separate durable authentication latch prevents a password-to-local downgrade. Account/session/token metadata is persisted separately from immutable document records.
 
 ## Access endpoints
 

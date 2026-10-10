@@ -22,6 +22,9 @@ export interface WorkspaceSession {
   quarantineWarning: string;
   readonly quarantinedDrafts: Map<string, QuarantinedDraft>;
   readonly accessListeners: Set<(objectIds: string[]) => void>;
+  readonly taskSnapshotListeners: Set<() => void>;
+  readonly taskReadControllers: Set<AbortController>;
+  taskSnapshotGeneration: number;
   visibleObjects: Set<string> | null;
   accessEpoch: number;
   accessGeneration: number;
@@ -43,7 +46,7 @@ export function lockSession(reason = 'Your session changed. Please sign in again
     for (const cleanup of previous.cleanupCallbacks) cleanup(); previous.cleanupCallbacks.clear();
     for (const controller of previous.controllers) controller.abort();
     previous.controllers.clear(); previous.memory.clear(); previous.objectControllers.clear();
-    previous.quarantinedDrafts.clear(); previous.accessListeners.clear();
+    previous.quarantinedDrafts.clear(); previous.accessListeners.clear(); previous.taskSnapshotListeners.clear(); previous.taskReadControllers.clear();
   }
   if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
   for (const listener of listeners) listener(reason);
@@ -51,7 +54,7 @@ export function lockSession(reason = 'Your session changed. Please sign in again
 export function activateSession(state: SessionState): WorkspaceSession {
   if (state.mode === 'password' && (!state.account || !state.sessionContext || !state.csrfToken)) throw new SessionChangedError();
   if (active) lockSession();
-  const session: WorkspaceSession = { generation: ++generation, state, memory: new Map(), controllers: new Set(), objectControllers: new Map(), objectCapabilities: new Map(), objectGenerations: new Map(), unavailableObjects: new Set(), cleanupCallbacks: new Set(), quarantinePersisted: new Set(), quarantineLoaded: new Set(), quarantinePending: new Set(), quarantineWarning: '', quarantinedDrafts: new Map(), accessListeners: new Set(), visibleObjects: null, accessEpoch: -1, accessGeneration: 0, active: true };
+  const session: WorkspaceSession = { generation: ++generation, state, memory: new Map(), controllers: new Set(), objectControllers: new Map(), objectCapabilities: new Map(), objectGenerations: new Map(), unavailableObjects: new Set(), cleanupCallbacks: new Set(), quarantinePersisted: new Set(), quarantineLoaded: new Set(), quarantinePending: new Set(), quarantineWarning: '', quarantinedDrafts: new Map(), accessListeners: new Set(), taskSnapshotListeners: new Set(), taskReadControllers: new Set(), taskSnapshotGeneration: 0, visibleObjects: null, accessEpoch: -1, accessGeneration: 0, active: true };
   active = session;
   return session;
 }

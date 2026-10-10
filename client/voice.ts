@@ -8,11 +8,11 @@ export function parseCommand(input: string): VoiceCommand {
   const aliases: Record<string, WorkspaceView> = { home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces' };
   const destination = text.replace(/^(open|show|go to)\s+(the\s+)?/, '');
   if (aliases[destination]) return { type: 'navigate', view: aliases[destination] };
-  const object = text.match(/^(?:open|show|go to)\s+(?:the\s+)?([dplw])\s*([1-9]\d*)$/);
+  const object = text.match(/^(?:open|show|go to)\s+(?:the\s+)?([dplwt])\s*([1-9]\d*)$/);
   if (object && Number.isSafeInteger(Number(object[2]))) return { type: 'openObject', id: `${object[1].toUpperCase()}${object[2]}` };
-  const namedObject = text.match(/^(?:open|show|go to)\s+(?:the\s+)?(wiki(?: page)?|paper|draft|code revision)\s+([1-9]\d*)$/);
+  const namedObject = text.match(/^(?:open|show|go to)\s+(?:the\s+)?(wiki(?: page)?|paper|draft|code revision|task)\s*([1-9]\d*)$/);
   if (namedObject && Number.isSafeInteger(Number(namedObject[2]))) {
-    const prefix = namedObject[1].startsWith('wiki') ? 'W' : namedObject[1] === 'paper' ? 'P' : namedObject[1] === 'draft' ? 'L' : 'D';
+    const prefix = namedObject[1].startsWith('wiki') ? 'W' : namedObject[1] === 'paper' ? 'P' : namedObject[1] === 'draft' ? 'L' : namedObject[1] === 'task' ? 'T' : 'D';
     return { type: 'openObject', id: `${prefix}${namedObject[2]}` };
   }
   const search = original.match(/^(?:search(?: for)?|find)\s+(.+)$/i);

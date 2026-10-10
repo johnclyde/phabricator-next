@@ -170,7 +170,7 @@ test('hidden references are redacted on reads, preserved by unrelated edits, and
       assert.equal(response.status, 200);
       assert.equal(response.body.revision.projectId, null); assert.equal(response.body.revision.repositoryId, null);
     }
-    const editBody = { title: 'Edited without changing the project' };
+    const editBody = { title: 'Edited without changing the project', expectedVersion: task.version };
     const editHeaders = { 'Idempotency-Key': 'redact-reference-on-replay' };
     const edited = await app.request<Task>('bob', `/api/tasks/${task.id}`, 'PATCH', editBody, editHeaders);
     assert.equal(edited.status, 200); assert.equal(edited.body.projectId, null);
@@ -243,7 +243,7 @@ test('permission changes block create and mutation replay without granting an im
     const after = (await app.request<AppState>('alice', '/api/state')).body;
     assert.notEqual(after.accessEpoch, beforeEpoch); assert.equal(after.tasks.length, 0);
     const editable = await app.create<Task>('alice', '/api/tasks', { title: 'Edit authority later removed' });
-    const editBody = { title: 'Previously committed edit' };
+    const editBody = { title: 'Previously committed edit', expectedVersion: editable.version };
     const editHeaders = { 'Idempotency-Key': 'edit-no-longer-authorized' };
     assert.equal((await app.request('alice', `/api/tasks/${editable.id}`, 'PATCH', editBody, editHeaders)).status, 200);
     await app.setPolicy('bob', editable.id, { edit: members(app.bob.id) });
@@ -289,7 +289,7 @@ test('a competing SQLite policy revocation prevents writes and replay disclosure
     for (const phase of ['write', 'replay'] as const) {
       const task = await app.create<Task>('alice', '/api/tasks', { title: `Concurrent policy ${phase}` });
       const path = `/api/tasks/${task.id}`;
-      const body = { title: `A ${phase} requiring current authority` };
+      const body = { title: `A ${phase} requiring current authority`, expectedVersion: task.version };
       const headers = { 'Idempotency-Key': `policy-lock-${phase}` };
       let replay: { key: string; fingerprint: string; status: number; body: string; created_at: string } | undefined;
       if (phase === 'replay') {

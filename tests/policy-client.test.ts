@@ -95,7 +95,7 @@ test('local cache reconciliation removes formerly visible snapshots on a fresh s
     first.writeStored('state', { access: { W1: access('W1'), T1: access('T1'), T2: access('T2') }, spaces: [{ id: 'S1' }] });
     first.writeStored('wiki:W1:version:1', { content: 'Previously readable' });
     first.writeStored('draft:document:W1:v1', { content: 'Previously saved draft' });
-    const item = (id: string): PendingMutation => ({ id, path: `/api/tasks/${id}`, method: 'PATCH', body: { status: 'resolved' }, label: id, createdAt: '2026-10-10' });
+    const item = (id: string): PendingMutation => ({ id, path: `/api/tasks/${id}`, method: 'PATCH', body: { status: 'resolved', expectedVersion: 1 }, label: id, createdAt: '2026-10-10' });
     first.writeStored('outbox', [item('T1'), item('T2')]);
     const reopened = createWorkspaceClient(activateSession(local()));
     reopened.reconcileAccess({ T1: access('T1', false), T2: access('T2') }, 2, ['S1']);
@@ -141,7 +141,7 @@ function localStorageFixture() {
   const state: SessionState = { mode: 'local', workspaceId: 'quarantine-test', account: null, sessionContext: null, csrfToken: null, expiresAt: null };
   return { stored, reopen: () => createWorkspaceClient(activateSession(state)), failWrites: (value: boolean) => { rejectWrites = value; }, close: () => { lockSession(); if (previous) Object.defineProperty(globalThis, 'localStorage', previous); else Reflect.deleteProperty(globalThis, 'localStorage'); } };
 }
-const queuedTask = (id: string): PendingMutation => ({ id, path: `/api/tasks/${id}`, method: 'PATCH', body: { status: 'resolved' }, label: id, createdAt: '2026-10-10' });
+const queuedTask = (id: string): PendingMutation => ({ id, path: `/api/tasks/${id}`, method: 'PATCH', body: { status: 'resolved', expectedVersion: 1 }, label: id, createdAt: '2026-10-10' });
 
 test('quota failures retain original bytes and durably hold them through reload and permission restoration until explicit recovery', async () => {
   const storage = localStorageFixture();
@@ -326,5 +326,159 @@ test('suggestion drafts with an empty explanation or deletion remain exportable 
     assert.deepEqual(reopened.quarantinedDrafts().map(item => item.value), [draft]);
     assert.equal(reopened.readStored(key, null), null);
     assert.equal(canQueue('/api/revisions/D1/suggestions/root-comment/apply', 'POST'), false, 'applying a proposal is never offline replay');
+  } finally { storage.close(); }
+});
+
+test('task relation snapshots are invalidated across epoch changes while unrelated drafts survive and late histories cannot restore them', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity()));
+    client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 1, ['S1']);
+    client.writeStored('task:T1', { dependsOn: [{ id: 'T2', title: 'Hidden next epoch' }], accessEpoch: 1 });
+    client.writeStored('task-draft:T1', { title: 'Keep my edit', expectedVersion: 1 });
+    client.writeStored('task-comment:T1', { body: 'Keep my comment' });
+    let release!: (response: Response) => void; let signal: AbortSignal | null | undefined; let changed = 0;
+    client.onTaskSnapshotChange(() => { changed++; });
+    globalThis.fetch = async (_path, options) => { signal = options?.signal; return new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/tasks/T1/history?before=10');
+    client.reconcileAccess({ T1: access('T1') }, 2, ['S1']);
+    assert.equal(signal?.aborted, true);
+    assert.ok(changed > 0, 'mounted task pages must be told to drop previously rendered relation history');
+    assert.equal(client.readStored('task:T1', null), null);
+    assert.deepEqual(client.readStored('task-draft:T1', null), { title: 'Keep my edit', expectedVersion: 1 });
+    assert.deepEqual(client.readStored('task-comment:T1', null), { body: 'Keep my comment' });
+    release(Response.json({ transactions: [{ dependency: { taskId: 'T2' } }], accessEpoch: 1 }));
+    await assert.rejects(pending, withCode('ACCESS_CHANGED'));
+    assert.equal(client.writeStored('task:T1', { accessEpoch: 1, dependsOn: ['T2'] }), false);
+  } finally { globalThis.fetch = fetch; lockSession(); }
+});
+
+test('task visibility invalidation drops delayed mutation responses without aborting mutations and quarantines task drafts by capability', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity()));
+    client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 1, ['S1']);
+    client.writeStored('task-draft:T1', { title: 'Field edit', expectedVersion: 1 });
+    client.writeStored('task-comment:T1', { body: 'Comment draft' });
+    let release!: (response: Response) => void; let signal: AbortSignal | null | undefined;
+    globalThis.fetch = async (_path, options) => { signal = options?.signal; return new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/tasks/T1/dependencies', { method: 'POST', body: { taskId: 'T2', action: 'add', expectedVersion: 1 } });
+    client.reconcileAccess({ T1: access('T1', false, true), T2: access('T2') }, 2, ['S1']);
+    assert.equal(signal?.aborted, false, 'unknown committed writes must not be canceled by related-visibility refresh');
+    assert.deepEqual(client.quarantinedDrafts().map(item => item.key), ['task-draft:T1']);
+    assert.deepEqual(client.readStored('task-comment:T1', null), { body: 'Comment draft' });
+    release(Response.json({ accessEpoch: 1, dependsOn: ['T2'] }));
+    await assert.rejects(pending, withCode('ACCESS_CHANGED'));
+    client.reconcileAccess({ T1: access('T1', false, false), T2: access('T2') }, 3, ['S1']);
+    assert.deepEqual(new Set(client.quarantinedDrafts().map(item => item.key)), new Set(['task-draft:T1', 'task-comment:T1']));
+    assert.equal(client.draftRecords().length, 2);
+  } finally { globalThis.fetch = fetch; lockSession(); }
+});
+
+test('legacy task updates without an expected version are durably held before replay without affecting versioned edits or comments', async () => {
+  const storage = localStorageFixture(); const fetch = globalThis.fetch;
+  try {
+    const client = storage.reopen();
+    const legacy = { ...queuedTask('T1'), body: { status: 'resolved' } };
+    const versioned = queuedTask('T2');
+    const comment: PendingMutation = { id: 'comment', path: '/api/tasks/T1/comments', method: 'POST', body: { body: 'Independent discussion' }, label: 'Comment', createdAt: '2026-10-10' };
+    client.writeStored('outbox', [legacy, versioned, comment]);
+    assert.deepEqual(client.readStored<PendingMutation[]>('outbox', []).map(item => item.id), ['T2', 'comment']);
+    assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [legacy]);
+    assert.match(client.quarantinedDrafts()[0]!.reason, /no source version/);
+    const reopened = storage.reopen();
+    let sent = 0; globalThis.fetch = async () => { sent++; return Response.json({}); };
+    await assert.rejects(reopened.request(legacy.path, { method: legacy.method, body: legacy.body, id: legacy.id, queued: true }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(sent, 0);
+    assert.deepEqual(reopened.readStored<PendingMutation[]>('outbox', []).map(item => item.id), ['T2', 'comment']);
+  } finally { globalThis.fetch = fetch; storage.close(); }
+});
+
+test('failed local task draft writes retain a separate memory recovery copy without overwriting another durable draft', () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ T1: access('T1') }, 1, ['S1']);
+    client.writeStored('task-draft:T1', { title: 'Durable previous copy', expectedVersion: 1 });
+    storage.failWrites(true);
+    assert.equal(client.writeStored('task-draft:T1', { title: 'Newest unsaved words', expectedVersion: 1 }), false);
+    assert.deepEqual(client.readStored('task-draft:T1', null), { title: 'Newest unsaved words', expectedVersion: 1 });
+    client.reconcileAccess({ T1: access('T1', false) }, 2, ['S1']);
+    assert.deepEqual(new Set(client.quarantinedDrafts().map(item => (item.value as { title: string }).title)), new Set(['Durable previous copy', 'Newest unsaved words']));
+    assert.match(client.quarantineWarning(), /Export the drafts now/);
+    storage.failWrites(false);
+    assert.equal(client.retryQuarantineStorage(), true);
+    const reopened = storage.reopen();
+    assert.deepEqual(new Set(reopened.quarantinedDrafts().map(item => (item.value as { title: string }).title)), new Set(['Durable previous copy', 'Newest unsaved words']));
+  } finally { storage.close(); }
+});
+
+test('successful task submission cleanup compares durable and memory copies independently', () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen();
+    const key = 'task-draft:T1';
+    const first = { title: 'Submitted draft', expectedVersion: 1 };
+    const other = { title: 'Another tab draft', expectedVersion: 1 };
+    client.writeStored(key, other);
+    storage.failWrites(true);
+    client.writeStored(key, first);
+    assert.deepEqual(client.readStored(key, null), first);
+    assert.equal(client.removeStoredIfEqual(key, first), true);
+    assert.equal(client.session?.memory.has(`${key}:unsaved-memory`), false);
+    assert.deepEqual(JSON.parse(storage.stored.get(client.storageKey(key))!), other, 'a matching memory copy cannot authorize deletion of different durable bytes');
+    storage.failWrites(false);
+    client.writeStored(key, first);
+    storage.failWrites(true);
+    client.writeStored(key, other);
+    assert.equal(client.removeStoredIfEqual(key, first), true);
+    assert.equal(storage.stored.has(client.storageKey(key)), false);
+    assert.deepEqual(client.readStored(key, null), other, 'a matching durable copy cannot authorize deletion of newer memory bytes');
+    const commentKey = 'task-comment:T1';
+    storage.failWrites(false); client.writeStored(commentKey, { body: 'Different durable comment' });
+    storage.failWrites(true); client.writeStored(commentKey, { body: 'Saved comment' });
+    assert.equal(client.removeStoredIfEqual(commentKey, { body: 'Saved comment' }), true);
+    assert.deepEqual(client.readStored(commentKey, null), { body: 'Different durable comment' });
+  } finally { storage.close(); }
+});
+
+test('a quarantined first failed task write holds its base editor through regrant and reload until explicit discard', async () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ T1: access('T1') }, 1, ['S1']);
+    const key = 'task-comment:T1'; const draft = { body: 'First write could not reach storage' };
+    storage.failWrites(true);
+    assert.equal(client.writeStored(key, draft), false);
+    assert.equal(storage.stored.has(client.storageKey(key)), false);
+    client.reconcileAccess({ T1: access('T1', true, false) }, 2, ['S1']);
+    client.reconcileAccess({ T1: access('T1') }, 3, ['S1']);
+    assert.equal(client.quarantinedDrafts().some(item => item.key === `${key}:unsaved-memory`), true);
+    assert.equal(client.draftIsHeld(key), true);
+    assert.equal(client.readStored(key, null), null);
+    assert.equal(client.writeStored(key, { body: 'Should not replace recovery' }), false);
+    assert.equal(client.removeStoredIfEqual(key, draft), false, 'a late successful callback cannot clear a recovery copy');
+    storage.failWrites(false); assert.equal(client.retryQuarantineStorage(), true);
+    const reopened = storage.reopen();
+    assert.equal(reopened.draftIsHeld(key), true);
+    assert.equal(reopened.readStored(key, null), null);
+    await reopened.discardQuarantinedDraft(`${key}:unsaved-memory`);
+    assert.equal(reopened.draftIsHeld(key), false);
+    assert.equal(reopened.readStored(key, null), null);
+  } finally { storage.close(); }
+});
+
+test('discarding a task recovery record preserves a different draft subsequently stored by another tab', async () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ T1: access('T1') }, 1, ['S1']);
+    const key = 'task-draft:T1';
+    client.writeStored(key, { title: 'Old quarantined draft', expectedVersion: 1 });
+    client.reconcileAccess({ T1: access('T1', false) }, 2, ['S1']);
+    client.reconcileAccess({ T1: access('T1') }, 3, ['S1']);
+    const newer = { title: 'Newer bytes saved elsewhere', expectedVersion: 2 };
+    storage.stored.set(client.storageKey(key), JSON.stringify(newer));
+    await client.discardQuarantinedDraft(key);
+    assert.deepEqual(client.readStored(key, null), newer);
+    assert.deepEqual(JSON.parse(storage.stored.get(client.storageKey(key))!), newer);
+    assert.equal(client.quarantinedDrafts().length, 0);
   } finally { storage.close(); }
 });

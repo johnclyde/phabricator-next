@@ -45,6 +45,8 @@ test('spoken discussion preserves original-version provenance, groups replies an
 test('offline queue permits only supported idempotent mutation routes', () => {
   assert.equal(canQueue('/api/tasks', 'POST'), true);
   assert.equal(canQueue('/api/tasks/T1', 'PATCH'), true);
+  assert.equal(canQueue('/api/tasks/T1/comments', 'POST'), true);
+  assert.equal(canQueue('/api/tasks/T1/dependencies', 'POST'), false);
   assert.equal(canQueue('/api/revisions/P1/comments', 'POST'), true);
   assert.equal(canQueue('/api/revisions/L3/versions', 'POST'), true);
   assert.equal(canQueue('/api/documents/W1', 'PUT'), true);
@@ -171,4 +173,10 @@ test('observing password mode invalidates a prior offline-local grant even when 
     rememberMode({ mode: 'password', workspaceId: 'existing', account: null, sessionContext: null, csrfToken: 'challenge', expiresAt: null });
     assert.equal(rememberedLocalSession(), null);
   } finally { if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else Reflect.deleteProperty(globalThis, 'localStorage'); }
+});
+
+
+test('voice opens numbered tasks without performing implicit mutations', () => {
+  for (const input of ['open T12', 'open T 12', 'open task 12', 'open task12', 'show the task 12']) assert.deepEqual(parseCommand(input), { type: 'openObject', id: 'T12' });
+  for (const input of ['resolve task 12', 'close T12', 'add dependency T12', 'open task 0']) assert.equal(parseCommand(input).type, 'unknown');
 });

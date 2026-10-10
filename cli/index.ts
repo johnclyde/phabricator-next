@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { analyzeLocally } from '../shared/review';
 import { mountPath, normalizeBasePath } from '../shared/mount';
-import type { AppState, RevisionDetail, RevisionKind, SourceFile } from '../shared/types';
+import type { AppState, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -14,7 +14,8 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- diff --title "Title" --kind paper FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
-  npm run arc -- show P2
+  npm run arc -- tasks [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
+  npm run arc -- show P2|T1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
 
@@ -23,6 +24,8 @@ of text files as a complete snapshot; omitted files are removed in that version.
 export writes a JSON snapshot to stdout. --server defaults to
 http://127.0.0.1:4310 (or PHABRICATOR_URL); include any application path prefix.
 Hosted review is always explicit.
+tasks lists visible tasks (open by default); assignment filters are not yet supported.
+show T1 includes the current task, visible dependencies, and the first history page.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -36,6 +39,7 @@ async function main() {
       revision: { type: 'string' }, message: { type: 'string' }, provider: { type: 'string', default: 'local' },
       server: { type: 'string', default: process.env.PHABRICATOR_URL || 'http://127.0.0.1:4310' },
       version: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+      status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -98,7 +102,23 @@ async function main() {
     for (const revision of state.revisions) console.log(`${revision.id}\tv${revision.currentVersion}\t${revision.status}\t${revision.title}`);
     return;
   }
-  if (command === 'show') return console.log(JSON.stringify(await getDetail(args[0]), null, 2));
+  if (command === 'tasks') {
+    if (args.length) throw new Error('tasks accepts options, not positional task IDs. Use show T1 for one task.');
+    const status = values.status || 'open'; const order = values.order || 'priority';
+    if (!['open', 'closed', 'all'].includes(status)) throw new Error('--status must be open, closed or all. Open includes tasks in progress.');
+    if (!['priority', 'created', 'modified'].includes(order)) throw new Error('--order must be priority, created or modified.');
+    const limit = values.limit === undefined ? undefined : Number(values.limit);
+    if (limit !== undefined && (!/^[1-9]\d*$/.test(values.limit!) || !Number.isSafeInteger(limit))) throw new Error('--limit must be a positive integer.');
+    const state = await request<AppState>('/api/state');
+    const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
+    const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? task.status === 'resolved' : task.status !== 'resolved'))
+      .sort((left, right) => (order === 'priority' ? ranks[right.priority] - ranks[left.priority] : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))
+      .slice(0, limit);
+    if (values.json) console.log(JSON.stringify(tasks, null, 2));
+    else for (const task of tasks) console.log(`${task.id}\tv${task.version}\t${task.status}\t${task.priority}\t${task.title}`);
+    return;
+  }
+  if (command === 'show') return console.log(JSON.stringify(args[0] && /^T[1-9]\d*$/.test(args[0]) ? await request<TaskDetail>(`/api/tasks/${args[0]}`) : await getDetail(args[0]), null, 2));
   if (command === 'review') {
     if (!['local', 'openai', 'ollama'].includes(values.provider!)) throw new Error('--provider must be local, openai or ollama.');
     const detail = await getDetail(args[0]);

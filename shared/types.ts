@@ -9,7 +9,13 @@ export interface ActorAttribution { principalId: string; displayName: string; cr
 export interface SourceFile { path: string; content: string }
 export interface Project { id: string; name: string; description: string; color: string }
 export interface Repository { id: string; name: string; remoteUrl: string; description: string; defaultBranch: string }
-export interface Task { id: string; title: string; description: string; status: TaskStatus; priority: Priority; projectId: string | null; createdAt: string; updatedAt: string }
+export interface Task { id: string; title: string; description: string; status: TaskStatus; priority: Priority; projectId: string | null; version: number; createdAt: string; updatedAt: string }
+export type TaskField = 'title' | 'description' | 'status' | 'priority' | 'projectId';
+export interface TaskFieldChange { field: TaskField; oldValue: string | null; newValue: string | null; oldValueHidden?: boolean; newValueHidden?: boolean }
+export interface TaskTransaction { attribution?: ActorAttribution; id: string; taskId: string; sequence: number; taskVersion: number; kind: 'create' | 'legacy' | 'edit' | 'comment' | 'dependency' | 'dependency_status'; actor: string | null; createdAt: string; snapshot?: Task; changes?: TaskFieldChange[]; comment?: string; dependency?: { taskId: string; action: 'added' | 'removed'; direction: 'depends_on' | 'blocks' }; dependencyStatus?: { taskId: string; oldStatus: TaskStatus; newStatus: TaskStatus } }
+export interface TaskHistory { transactions: TaskTransaction[]; nextBefore: number | null; firstAvailableSequence: number | null; accessEpoch?: number }
+export type TaskReference = Pick<Task, 'id' | 'title' | 'status' | 'priority' | 'version'>;
+export interface TaskDetail { task: Task; history: TaskHistory; dependsOn: TaskReference[]; blocks: TaskReference[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface WikiDocument { id: string; title: string; slug: string; content: string; version: number; createdAt: string; updatedAt: string }
 export interface WikiVersion { attribution?: ActorAttribution; id: string; documentId: string; number: number; title: string; slug: string; content: string; author: string | null; createdAt: string; message: string; kind: 'create' | 'edit' | 'restore' | 'legacy'; restoredFrom: number | null }
 export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
@@ -40,5 +46,8 @@ export interface CreateReplyInput { body: string; viewedVersionId: string }
 export interface UpdateThreadInput { status: 'open' | 'resolved'; expectedThreadVersion: number; versionId: string }
 export interface ApplySuggestionInput { expectedVersion: number; expectedVersionId: string; expectedContentHash: string; expectedThreadVersion: number }
 export interface TaskInput { title: string; description?: string; status?: TaskStatus; priority?: Priority; projectId?: string | null }
+export type UpdateTaskInput = Partial<TaskInput> & { expectedVersion: number };
+export interface TaskCommentInput { body: string }
+export interface TaskDependencyInput { taskId: string; action: 'add' | 'remove'; expectedVersion: number }
 export interface DocumentInput { title: string; slug: string; content: string; expectedVersion?: number; message?: string }
 export interface RestoreDocumentInput { version: number; expectedVersion: number; message?: string }

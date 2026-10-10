@@ -1,5 +1,5 @@
 import type { AuthContext } from '../shared/auth.ts';
-import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, WikiDetail } from '../shared/types.ts';
+import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskTransaction, WikiDetail } from '../shared/types.ts';
 import type { Capability, ObjectAccess, Space } from '../shared/policy.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
@@ -42,12 +42,51 @@ export class AccessLayer {
     this.require(id);
     return { ...this.store.documentDetail(id), access: this.describe(id), accessEpoch: this.policies.epoch() };
   }
+  task(id: string): TaskDetail {
+    this.require(id);
+    const detail = this.store.taskDetail(id);
+    detail.history = this.taskHistory(id);
+    return this.taskSnapshot(detail);
+  }
+  taskHistory(id: string, before?: number, limit?: number): TaskHistory {
+    this.require(id);
+    return this.redact({ ...this.store.taskHistory(id, before, limit, related => this.canView(related)), accessEpoch: this.policies.epoch() });
+  }
+  private visibleTaskTransaction(transaction: TaskTransaction): boolean {
+    const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId;
+    return !related || this.canView(related);
+  }
+  /** Filter only this response's evidence; retries must never borrow live history. */
+  private taskSnapshot(detail: TaskDetail): TaskDetail {
+    const transactions = detail.history.transactions.filter(transaction => this.visibleTaskTransaction(transaction));
+    const first = detail.history.firstAvailableSequence;
+    return this.redact({
+      ...detail,
+      dependsOn: detail.dependsOn.filter(task => this.canView(task.id)),
+      blocks: detail.blocks.filter(task => this.canView(task.id)),
+      history: {
+        ...detail.history, transactions, accessEpoch: this.policies.epoch(),
+        nextBefore: detail.history.nextBefore === null ? null : transactions.at(-1)?.sequence ?? null,
+        firstAvailableSequence: first !== null && detail.history.transactions.some(transaction => transaction.sequence === first && !this.visibleTaskTransaction(transaction)) ? null : first,
+      },
+      access: this.describe(detail.task.id), accessEpoch: this.policies.epoch(),
+    });
+  }
   /** Structured references are hidden without modifying the stored relationship. */
   redact<T>(value: T): T {
     const visit = (item: unknown): unknown => {
       if (Array.isArray(item)) return item.map(visit);
       const object = record(item);
       if (!object) return item;
+      if (object.field === 'projectId') {
+        const change = { ...object };
+        for (const name of ['oldValue', 'newValue'] as const) {
+          if (typeof change[name] === 'string' && !this.canView(change[name] as string)) {
+            change[name] = null; change[`${name}Hidden`] = true;
+          }
+        }
+        return change;
+      }
       return Object.fromEntries(Object.entries(object).map(([key, child]) => [key,
         (key === 'projectId' || key === 'repositoryId') && typeof child === 'string' && !this.canView(child) ? null : visit(child),
       ]));
@@ -78,6 +117,10 @@ export class AccessLayer {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
     if ((method === 'POST' && CREATES.has(path)) || (method === 'PATCH' && path.startsWith('/api/tasks/'))) this.references(input);
+    if (method === 'POST' && /^\/api\/tasks\/T\d+\/dependencies$/.test(path)) {
+      const id = record(input)?.taskId;
+      if (typeof id !== 'string' || !/^T[1-9]\d*$/.test(id) || !this.canView(id)) throw new HttpError(400, 'Reference unavailable.');
+    }
     if (method === 'POST' && CREATES.has(path)) {
       const access = record(record(input)?.access);
       const id = access?.spaceId ?? 'S1';
@@ -152,6 +195,7 @@ export class AccessLayer {
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
     const result = this.redact(response.body);
     const detail = record(result);
+    if (detail && record(detail.task)) return { status: response.status, body: this.taskSnapshot(result as TaskDetail) };
     const revisionId = record(detail?.revision)?.id;
     const id = revisionId ?? record(detail?.document)?.id;
     if (detail && typeof id === 'string') {

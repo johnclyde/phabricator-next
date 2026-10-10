@@ -192,6 +192,15 @@ export function createApp(options: AppOptions = {}): App {
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
+        const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies)$/.exec(path);
+        if (method === 'POST' && taskAction?.[2] === 'comments') return { status: 201, body: store.createTaskComment(taskAction[1]!, input, attribution) };
+        if (method === 'POST' && taskAction?.[2] === 'dependencies') {
+          const detail = store.updateTaskDependencies(taskAction[1]!, input, attribution);
+          // Fill the initial visible page before saving this historical response.
+          // Later replays may filter it further, but must not fetch newer history.
+          detail.history = store.taskHistory(taskAction[1]!, undefined, undefined, related => access.canView(related));
+          return { status: 200, body: detail };
+        }
         const document = /^\/api\/documents\/(W\d+)$/.exec(path);
         if (method === 'PUT' && document) return { status: 200, body: store.updateDocument(document[1]!, input, attribution) };
         const restore = /^\/api\/documents\/(W\d+)\/restore$/.exec(path);
@@ -265,6 +274,24 @@ export function createApp(options: AppOptions = {}): App {
           if (space) { send(res, 200, access.space(policies.getSpace(space[1]!, context.principalId))); return; }
           const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
           if (policy) { send(res, 200, access.describe(policy[1]!)); return; }
+          const task = /^\/api\/tasks\/(T\d+)(\/history)?$/.exec(path);
+          if (task) {
+            access.require(task[1]!);
+            if (task[2]) {
+              for (const name of url.searchParams.keys()) {
+                if (!['before', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'History accepts only one before cursor and one limit.');
+              }
+              const parameter = (name: string): number | undefined => {
+                const value = url.searchParams.get(name);
+                if (value === null) return undefined;
+                if (!/^[1-9]\d*$/.test(value)) throw new HttpError(400, `${name} must be a positive integer.`);
+                return integer(Number(value), name);
+              };
+              send(res, 200, access.taskHistory(task[1]!, parameter('before'), parameter('limit'))); return;
+            }
+            if (url.search) throw new HttpError(400, 'Task read URLs may not contain query parameters.');
+            send(res, 200, access.task(task[1]!)); return;
+          }
           const document = /^\/api\/documents\/(W\d+)(?:\/(history)|\/versions\/([^/]+))?$/.exec(path);
           if (document) {
             access.require(document[1]!);

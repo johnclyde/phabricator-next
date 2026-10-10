@@ -122,6 +122,50 @@ test('CLI rejects ambiguous server URLs before sending requests', async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('CLI task reads preserve mounts, filters and current object visibility with a read-only token', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'phab-cli-tasks-'));
+  const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+  const alice = await provision.createAccount({ username: 'alice', displayName: 'Alice', password: 'test-only-task-cli-password' });
+  const bob = await provision.createAccount({ username: 'bob', displayName: 'Bob', password: 'test-only-task-cli-password' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/tools/tasks/' });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/tools/tasks/`;
+  const token = app.auth.createToken(bob.id, { name: 'Task read fixture', scopes: ['read'] });
+  try {
+    const normal = store.createTask({ title: 'A visible normal task', priority: 'normal' });
+    const urgent = store.createTask({ title: 'A visible urgent task', priority: 'urgent', status: 'in_progress' });
+    const closed = store.createTask({ title: 'A resolved task', status: 'resolved' });
+    const hidden = store.createTask({ title: 'Private task marker' });
+    app.policies.configureNew(hidden.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
+    store.updateTaskDependencies(normal.id, { taskId: hidden.id, action: 'add', expectedVersion: normal.version });
+    // Distinct fixture timestamps make each sort mode observable without sleeps.
+    for (const [id, createdAt, updatedAt] of [[normal.id, '2024-01-01', '2027-01-01'], [urgent.id, '2026-01-01', '2025-01-01'], [closed.id, '2025-01-01', '2026-01-01']]) {
+      store.database.prepare("UPDATE entities SET data = json_set(data, '$.createdAt', ?, '$.updatedAt', ?) WHERE id = ?").run(createdAt!, updatedAt!, id!);
+    }
+    const read = (args: string[]) => runCommand(root, [...args, '--server', server], token.token);
+    const open = await read(['tasks', '--json']);
+    assert.equal(open.code, 0, open.stderr); assert.deepEqual(JSON.parse(open.stdout).map((task: { id: string }) => task.id), [urgent.id, normal.id]);
+    const resolved = await read(['tasks', '--status', 'closed', '--json']);
+    assert.equal(resolved.code, 0, resolved.stderr); assert.deepEqual(JSON.parse(resolved.stdout).map((task: { id: string }) => task.id), [closed.id]);
+    const limited = await read(['tasks', '--status', 'all', '--order', 'priority', '--limit', '1', '--json']);
+    assert.equal(limited.code, 0, limited.stderr); assert.equal(JSON.parse(limited.stdout)[0].id, urgent.id);
+    const newest = await read(['tasks', '--status', 'all', '--order', 'created', '--json']);
+    assert.equal(newest.code, 0, newest.stderr); assert.deepEqual(JSON.parse(newest.stdout).map((task: { id: string }) => task.id), [urgent.id, closed.id, normal.id]);
+    const modified = await read(['tasks', '--status', 'all', '--order', 'modified', '--json']);
+    assert.equal(modified.code, 0, modified.stderr); assert.deepEqual(JSON.parse(modified.stdout).map((task: { id: string }) => task.id), [normal.id, closed.id, urgent.id]);
+    const shown = await read(['show', normal.id]);
+    assert.equal(shown.code, 0, shown.stderr); const detail = JSON.parse(shown.stdout);
+    assert.equal(detail.task.id, normal.id); assert.equal(detail.task.version, 2); assert.deepEqual(detail.dependsOn, []);
+    assert.ok(!shown.stdout.includes(hidden.id)); assert.ok(!shown.stdout.includes(hidden.title));
+    const denied = await read(['show', hidden.id]); assert.equal(denied.code, 1); assert.ok(!denied.stderr.includes(hidden.title));
+    for (const args of [['tasks', '--status', 'invalid'], ['tasks', '--order', 'invalid'], ['tasks', '--limit', '0'], ['tasks', '--limit', '1.5']]) {
+      const invalid = await read(args); assert.equal(invalid.code, 1, args.join(' '));
+    }
+    for (const output of [open, resolved, limited, shown, denied]) assert.ok(!`${output.stdout}${output.stderr}`.includes(token.token));
+  } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('CLI authenticates with scoped environment tokens without following redirects or exposing credentials', async () => {
   const root = await mkdtemp(join(tmpdir(), 'phab-cli-auth-'));
   const store = createStore({ path: ':memory:' });

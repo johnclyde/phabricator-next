@@ -6,7 +6,7 @@ export { RequestError } from './session';
 export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
 export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
 export function canQueue(path: string, method: MutationMethod): boolean {
-  return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
+  return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+\/comments$/.test(path) && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
 }
 export function isNetworkError(error: unknown): boolean { return error instanceof TypeError; }
 function objectFromPath(path: string): string | null { return /^\/api\/(?:revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
@@ -16,9 +16,10 @@ function queuedObject(item: PendingMutation): string | null {
   const body = item.body as { access?: { spaceId?: unknown } } | null;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:revision|wiki|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:'); }
-function hasSavedWork(key: string, value: unknown): boolean { return !key.startsWith('comment-source:') || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
+function objectFromKey(key: string): string | null { return /^(?:revision|wiki|task|task-draft|task-comment|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:'); }
+function isTaskDraftKey(key: string): boolean { return key.startsWith('task-draft:') || key.startsWith('task-comment:'); }
+function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function unavailable(): RequestError { return new RequestError('This object is unavailable or you no longer have access. Unsaved drafts have been set aside for export.', 404, 'OBJECT_UNAVAILABLE'); }
 
 
@@ -37,18 +38,32 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const contentKey = (key: string) => storageKey(prefix + key);
   const blockedDraft = (key: string): boolean => {
     const id = objectFromKey(key); const capabilities = id ? session?.objectCapabilities.get(id) : null;
-    return Boolean(id && isDraftKey(key) && capabilities && !(key.startsWith('comment-source:') ? capabilities.interact : capabilities.edit));
+    return Boolean(id && isDraftKey(key) && capabilities && !((key.startsWith('comment-source:') || key.startsWith('task-comment:')) ? capabilities.interact : capabilities.edit));
   };
   const savedEntries = (): [string, string][] => {
     if (!sessionIsActive(session)) return [];
     if (!durable) return [...session.memory];
     const entries: [string, string][] = [];
     try { for (let i = 0; i < localStorage.length; i++) { const key = localStorage.key(i); if (key?.startsWith(contentKey(''))) entries.push([key.slice(contentKey('').length), localStorage.getItem(key) || 'null']); } } catch { /* Unavailable storage stays unreadable. */ }
+    // Keep failed task writes separately from durable bytes: another tab may
+    // have saved a different draft, and both copies must remain recoverable.
+    for (const [key, value] of session.memory) if (isTaskDraftKey(key)) entries.push([key, value]);
     return entries;
   };
-  const rawRead = (key: string): string | null => { try { return durable ? localStorage.getItem(contentKey(key)) : session?.memory.get(key) || null; } catch { return null; } };
-  const rawWrite = (key: string, value: unknown): boolean => { try { const json = JSON.stringify(value); if (durable) localStorage.setItem(contentKey(key), json); else session?.memory.set(key, json); return true; } catch { return false; } };
-  const rawRemove = (key: string): boolean => { try { if (durable) localStorage.removeItem(contentKey(key)); else session?.memory.delete(key); return true; } catch { return false; } };
+  const rawRead = (key: string): string | null => { if (durable && isTaskDraftKey(key)) { const retained = session?.memory.get(`${key}:unsaved-memory`) || session?.memory.get(key); if (retained) return retained; } try { return durable ? localStorage.getItem(contentKey(key)) : session?.memory.get(key) || null; } catch { return null; } };
+  const rawWrite = (key: string, value: unknown): boolean => { try { const json = JSON.stringify(value); if (durable) { localStorage.setItem(contentKey(key), json); if (isTaskDraftKey(key)) session?.memory.delete(`${key}:unsaved-memory`); } else session?.memory.set(key, json); return true; } catch { if (durable && isTaskDraftKey(key) && !key.endsWith(':unsaved-memory')) session?.memory.set(`${key}:unsaved-memory`, JSON.stringify(value)); return false; } };
+  const rawRemove = (key: string): boolean => { try { if (durable) { localStorage.removeItem(contentKey(key)); if (isTaskDraftKey(key)) { session?.memory.delete(key); session?.memory.delete(`${key}:unsaved-memory`); } } else session?.memory.delete(key); return true; } catch { return false; } };
+  const rawRemoveMatching = (key: string, expected: unknown): boolean => {
+    const expectedJson = JSON.stringify(expected);
+    try {
+      // Compare each physical copy separately. rawRead can prefer an unsaved
+      // memory copy over a different durable draft saved by another tab.
+      if (durable && localStorage.getItem(contentKey(key)) === expectedJson) localStorage.removeItem(contentKey(key));
+      if (session?.memory.get(key) === expectedJson) session.memory.delete(key);
+      if (durable && isTaskDraftKey(key) && !key.endsWith(':unsaved-memory') && session?.memory.get(`${key}:unsaved-memory`) === expectedJson) session.memory.delete(`${key}:unsaved-memory`);
+      return true;
+    } catch { return false; }
+  };
   const rawOutbox = (): PendingMutation[] => { try { return JSON.parse(rawRead('outbox') || '[]') as PendingMutation[]; } catch { return []; } };
   const recordKey = (key: string) => `quarantined-drafts:${encodeURIComponent(key)}`;
   const quarantineChanged = () => { if (sessionIsActive(session)) for (const listener of session.accessListeners) listener([]); };
@@ -107,6 +122,24 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (durable) session.quarantinePending.add(draft.key);
     const saved = persistQuarantine(); quarantineChanged(); return saved;
   };
+  const invalidateTaskSnapshots = (except?: AbortController, remove = true) => {
+    if (!sessionIsActive(session)) return;
+    session.taskSnapshotGeneration += 1;
+    for (const controller of session.taskReadControllers) if (controller !== except) controller.abort();
+    if (remove) for (const [key] of savedEntries()) if (key.startsWith('task:')) rawRemove(key);
+    for (const listener of session.taskSnapshotListeners) listener();
+  };
+  let holdingLegacy = false;
+  const holdLegacyTaskUpdates = () => {
+    if (!sessionIsActive(session) || holdingLegacy) return;
+    holdingLegacy = true;
+    try {
+      for (const item of rawOutbox()) if (item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
+        const body = item.body as { expectedVersion?: unknown } | null;
+        if (!body || !Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 1) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older task change has no source version. Export it, inspect the current task, and make a new edit explicitly. Automatic submission is stopped.' });
+      }
+    } finally { holdingLegacy = false; }
+  };
   if (durable && sessionIsActive(session) && !session.quarantineLoaded.has(contentKey('quarantined-drafts'))) {
     session.quarantineLoaded.add(contentKey('quarantined-drafts')); syncDurableQuarantine();
     if (rawRead('quarantine-format') !== '2' || rawRead('quarantine-ready') !== '1') {
@@ -116,21 +149,31 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const changed = (event: StorageEvent) => {
         if (!sessionIsActive(session)) return;
         if (event.key === null || event.key === contentKey('quarantine-ready') || event.key?.startsWith(contentKey('quarantined-drafts:'))) { syncDurableQuarantine(); quarantineChanged(); }
+        if (event.key === null || (event.key?.startsWith(contentKey('task:')) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
       };
       window.addEventListener('storage', changed);
       session.cleanupCallbacks.add(() => window.removeEventListener('storage', changed));
     }
   }
+  const hasDraftHold = (key: string): boolean => {
+    if (session?.quarantinedDrafts.has(key)) return true;
+    if (!isTaskDraftKey(key)) return false;
+    const base = key.replace(/:unsaved-memory$/, '');
+    return Boolean(session?.quarantinedDrafts.has(base) || session?.quarantinedDrafts.has(`${base}:unsaved-memory`));
+  };
+  const draftIsHeld = (key: string): boolean => { syncDurableQuarantine(); return sessionIsActive(session) && hasDraftHold(key); };
   const readStored = <T,>(key: string, fallback: T): T => {
     syncDurableQuarantine();
-    if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || blockedDraft(key) || session.quarantinedDrafts.has(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    if (key === 'outbox') holdLegacyTaskUpdates();
+    if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || blockedDraft(key) || hasDraftHold(key)) return fallback;
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (key.startsWith('task:') && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '')) return false;
+    if (key.startsWith('task:') && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
     if (blockedDraft(key)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); }
-    if (session.quarantinedDrafts.has(key)) return false;
+    if (hasDraftHold(key)) return false;
     if (key === 'outbox' && Array.isArray(value)) {
       const held = rawOutbox().filter(item => session.quarantinePending.has(`outbox:${item.id}`));
       value = [...held, ...(value as PendingMutation[]).filter(item => !held.some(saved => saved.id === item.id) && !session.quarantinedDrafts.has(`outbox:${item.id}`))];
@@ -140,6 +183,11 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const removeStored = (key: string): void => {
     if (!sessionIsActive(session) || session.quarantinePending.has(key)) return;
     rawRemove(key);
+  };
+  const removeStoredIfEqual = (key: string, expected: unknown): boolean => {
+    syncDurableQuarantine();
+    if (!sessionIsActive(session) || hasDraftHold(key)) return false;
+    return rawRemoveMatching(key, expected);
   };
   const unavailableObject = (id: string) => session?.unavailableObjects.has(id) ?? false;
   const onAccessChange = (listener: (ids: string[]) => void) => {
@@ -151,6 +199,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const changed = ids.filter(id => !session.unavailableObjects.has(id));
     if (!changed.length) return;
     session.accessGeneration += 1;
+    invalidateTaskSnapshots();
     for (const id of changed) {
       session.unavailableObjects.add(id);
       session.objectGenerations.set(id, (session.objectGenerations.get(id) || 0) + 1);
@@ -190,6 +239,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     for (const item of forbidden) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'Permission or destination Space changed; automatic submission stopped' }); draftsChanged = true; }
     if (draftsChanged) for (const listener of session.accessListeners) listener([]);
     session.visibleObjects = visible;
+    if (epoch !== session.accessEpoch) invalidateTaskSnapshots();
     session.accessEpoch = epoch;
     for (const id of visible) session.unavailableObjects.delete(id);
   };
@@ -200,10 +250,11 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     assertSession(session);
     const commit = () => {
       assertSession(session); syncDurableQuarantine();
-      if (!session.quarantinedDrafts.has(key)) return;
+      const recovery = session.quarantinedDrafts.get(key);
+      if (!recovery) return;
       // Use the same lock as normal outbox changes, then reread the latest queue.
       // Quarantine itself never rewrites this shared aggregate.
-      const removed = key.startsWith('outbox:') ? rawWrite('outbox', rawOutbox().filter(item => `outbox:${item.id}` !== key)) : rawRemove(key);
+      const removed = key.startsWith('outbox:') ? rawWrite('outbox', rawOutbox().filter(item => `outbox:${item.id}` !== key)) : rawRemoveMatching(key, recovery.value);
       if (!removed) throw new Error('Could not remove the original saved change. Export it and free browser storage before trying again.');
       if (durable && !rawRemove(recordKey(key))) throw new Error('Could not discard the recovery copy. Export it before trying again.');
       session.quarantinedDrafts.delete(key); session.quarantinePending.delete(key); session.quarantinePersisted.delete(key);
@@ -215,21 +266,26 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }): Promise<T> => {
     assertSession(session);
     syncDurableQuarantine();
+    if (options?.queued) holdLegacyTaskUpdates();
     if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     const objectId = objectFromPath(path);
     const accessGeneration = session.accessGeneration;
     if (objectId && !objectId.startsWith('S') && !session.objectGenerations.has(objectId)) session.objectGenerations.set(objectId, 0);
     const objectGeneration = objectId ? session.objectGenerations.get(objectId) || 0 : 0;
+    const taskRequest = /^\/api\/tasks\/T\d+(?:[/?]|$)/.test(path);
+    let taskGeneration = session.taskSnapshotGeneration;
     if (objectId && session.unavailableObjects.has(objectId)) throw unavailable();
     const capabilities = objectId ? session.objectCapabilities.get(objectId) : null;
     if (options && capabilities && !(/\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit)) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
+      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError('Task visibility changed while loading. Reload the task; unsaved drafts are retained.', 409, 'ACCESS_CHANGED');
     };
     const controller = new AbortController();
     session.controllers.add(controller);
+    if (taskRequest && !options) session.taskReadControllers.add(controller);
     if (objectId) session.objectControllers.set(controller, objectId);
     const headers: Record<string, string> = {};
     if (session.state.sessionContext) headers['X-Session-Context'] = session.state.sessionContext;
@@ -252,12 +308,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (typeof data === 'object' && data !== null && 'accessEpoch' in data && typeof data.accessEpoch === 'number') {
         if (data.accessEpoch < session.accessEpoch) throw new RequestError('Access changed while loading. Reload the workspace.', 409, 'ACCESS_CHANGED');
         if (path === '/api/state' && 'access' in data && data.access && typeof data.access === 'object') reconcileAccess(data.access as Record<string, ObjectAccess>, data.accessEpoch, 'spaces' in data && Array.isArray(data.spaces) ? data.spaces.flatMap((space: unknown) => space && typeof space === 'object' && 'id' in space && typeof space.id === 'string' ? [space.id] : []) : [], 'spaces' in data && Array.isArray(data.spaces) ? data.spaces.flatMap((space: unknown) => space && typeof space === 'object' && 'id' in space && typeof space.id === 'string' && 'archived' in space && space.archived === true ? [space.id] : []) : []);
-        else session.accessEpoch = data.accessEpoch;
+        else { if (data.accessEpoch !== session.accessEpoch) { invalidateTaskSnapshots(controller); taskGeneration = session.taskSnapshotGeneration; } session.accessEpoch = data.accessEpoch; }
       }
       assertObject();
       return data as T;
     } catch (error) { assertObject(); throw error; }
-    finally { session.controllers.delete(controller); session.objectControllers.delete(controller); }
+    finally { session.controllers.delete(controller); session.objectControllers.delete(controller); session.taskReadControllers.delete(controller); }
   };
   const changeOutbox = async (change: (current: PendingMutation[]) => PendingMutation[]): Promise<PendingMutation[]> => {
     assertSession(session);
@@ -274,12 +330,13 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const draftRecords = (): { key: string; value: unknown }[] => {
     if (!sessionIsActive(session) || durable) return [];
     const ordinary = [...session.memory].filter(([key, value]) => {
-      if (key.startsWith('comment-source:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return key.startsWith('draft:') || key.startsWith('version-draft:');
+      if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
+      return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value }))];
   };
-  return { session, durable, unavailableObject, onAccessChange, reconcileAccess, quarantinedDrafts, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, request, changeOutbox, draftRecords, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
+  return { session, durable, unavailableObject, onAccessChange, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.

@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
+import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 import { initializePolicies, registerDefaultPolicy } from './policy.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
@@ -29,7 +29,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 6) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 7) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -101,6 +101,28 @@ export class Store {
             CREATE TRIGGER suggestion_applications_no_delete BEFORE DELETE ON suggestion_applications BEGIN SELECT RAISE(ABORT, 'Suggestion applications are immutable'); END;
             PRAGMA user_version = 6;
           `);
+        });
+      } catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 7) {
+      try {
+        this.transaction(() => {
+          this.database.exec(`
+            CREATE TABLE task_transactions (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES entities(id), sequence INTEGER NOT NULL CHECK(sequence > 0), task_version INTEGER NOT NULL CHECK(task_version > 0), data TEXT NOT NULL CHECK(json_valid(data)), UNIQUE(task_id, sequence));
+            CREATE TRIGGER task_transactions_no_update BEFORE UPDATE ON task_transactions BEGIN SELECT RAISE(ABORT, 'Task transactions are immutable'); END;
+            CREATE TRIGGER task_transactions_no_delete BEFORE DELETE ON task_transactions BEGIN SELECT RAISE(ABORT, 'Task transactions are immutable'); END;
+            CREATE TABLE task_dependencies (task_id TEXT NOT NULL REFERENCES entities(id), dependency_id TEXT NOT NULL REFERENCES entities(id), PRIMARY KEY(task_id, dependency_id), CHECK(task_id <> dependency_id));
+            CREATE INDEX task_dependencies_inverse ON task_dependencies(dependency_id, task_id);
+          `);
+          const migratedAt = new Date().toISOString();
+          // Earlier schemas kept only the current task. Record an explicitly
+          // unknown-author baseline at migration time, not invented edits.
+          for (const old of this.all<Task>('task')) {
+            const task = { ...old, version: 1 };
+            this.save('task', task);
+            this.appendTaskTransaction(task, { kind: 'legacy', snapshot: task }, undefined, migratedAt);
+          }
+          this.database.exec('PRAGMA user_version = 7');
         });
       } catch (error) { this.database.close(); throw error; }
     }
@@ -185,21 +207,129 @@ export class Store {
     const repository: Repository = { id: this.nextId('repository', 'R'), name: string(data.name, 'Name'), remoteUrl: remoteUrl(data.remoteUrl), description: optionalString(data.description, 'Description'), defaultBranch: data.defaultBranch === undefined ? 'main' : string(data.defaultBranch, 'Default branch') };
     this.save('repository', repository); this.event(repository.id, 'registered', `Registered ${repository.name}; no remote content fetched.`, attribution); return repository;
   }
-  createTask(input: unknown, attribution?: ActorAttribution): Task { return this.writeTask(input, undefined, attribution); }
-  updateTask(id: string, input: unknown, attribution?: ActorAttribution): Task { return this.writeTask(input, this.get<Task>('task', id), attribution); }
+  private taskMutation<T>(work: () => T): T {
+    this.database.exec('SAVEPOINT task_write');
+    try {
+      // Lock before loading task versions or traversing the dependency graph.
+      this.database.prepare("UPDATE sequences SET value = value WHERE name = 'task'").run();
+      const result = work(); this.database.exec('RELEASE task_write'); return result;
+    } catch (error) { this.database.exec('ROLLBACK TO task_write; RELEASE task_write'); throw error; }
+  }
+  private advanceTask(task: Task, now: string): Task {
+    if (!Number.isSafeInteger(task.version) || task.version < 1 || !Number.isSafeInteger(task.version + 1)) throw new HttpError(409, 'This task has reached the supported version limit.');
+    return { ...task, version: task.version + 1, updatedAt: now };
+  }
+  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
+    const last = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id) as { sequence: number };
+    const sequence = last.sequence + 1;
+    if (!Number.isSafeInteger(sequence) || sequence < 1) throw new HttpError(409, 'This task has reached the supported history limit.');
+    const transaction: TaskTransaction = { id: randomUUID(), taskId: task.id, sequence, taskVersion: task.version, actor: data.kind === 'legacy' ? null : attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: now, ...data };
+    this.database.prepare('INSERT INTO task_transactions (id, task_id, sequence, task_version, data) VALUES (?, ?, ?, ?, ?)').run(transaction.id, task.id, sequence, task.version, JSON.stringify(transaction));
+    return transaction;
+  }
+  createTask(input: unknown, attribution?: ActorAttribution): Task { return this.taskMutation(() => this.writeTask(input, undefined, attribution)); }
+  updateTask(id: string, input: unknown, attribution?: ActorAttribution): Task { return this.taskMutation(() => this.writeTask(input, this.get<Task>('task', id), attribution)); }
   private writeTask(input: unknown, current?: Task, attribution?: ActorAttribution): Task {
-    const data = object(input, ['title', 'description', 'status', 'priority', 'projectId']);
-    if (current && Object.keys(data).length === 0) throw new HttpError(400, 'At least one task field is required.');
+    const fields: TaskField[] = ['title', 'description', 'status', 'priority', 'projectId'];
+    const data = object(input, current ? [...fields, 'expectedVersion'] : fields);
+    if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before saving.');
+    if (current && !fields.some(field => data[field] !== undefined)) throw new HttpError(400, 'At least one task field is required.');
     const now = new Date().toISOString();
-    const task: Task = {
-      id: current?.id ?? this.nextId('task', 'T'), title: data.title === undefined && current ? current.title : string(data.title, 'Title'),
+    const values = {
+      title: data.title === undefined && current ? current.title : string(data.title, 'Title'),
       description: data.description === undefined && current ? current.description : optionalString(data.description, 'Description'),
       status: data.status === undefined ? current?.status ?? 'open' : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
       priority: data.priority === undefined ? current?.priority ?? 'normal' : choice(data.priority, 'priority', ['low', 'normal', 'high', 'urgent']),
       projectId: data.projectId === undefined && current ? current.projectId : this.reference(data.projectId, 'project'),
-      createdAt: current?.createdAt ?? now, updatedAt: now,
     };
-    this.save('task', task); this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`, attribution); return task;
+    const changes: TaskFieldChange[] = current ? fields.filter(field => values[field] !== current[field]).map(field => ({ field, oldValue: current[field], newValue: values[field] })) : [];
+    if (current && changes.length === 0) return current;
+    const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, version: 1, createdAt: now, updatedAt: now };
+    const parents = current && task.status !== current.status
+      ? (this.database.prepare('SELECT task_id FROM task_dependencies WHERE dependency_id = ? ORDER BY task_id').all(task.id) as { task_id: string }[]).map(row => this.advanceTask(this.get<Task>('task', row.task_id), now)) : [];
+    this.save('task', task);
+    this.appendTaskTransaction(task, current ? { kind: 'edit', changes } : { kind: 'create', snapshot: task }, attribution, now);
+    this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`, attribution);
+    for (const parent of parents) {
+      this.save('task', parent);
+      this.appendTaskTransaction(parent, { kind: 'dependency_status', dependencyStatus: { taskId: task.id, oldStatus: current!.status, newStatus: task.status } }, attribution, now);
+      this.event(parent.id, 'dependency_status_changed', 'A dependency changed status.', attribution);
+    }
+    return task;
+  }
+  taskHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): TaskHistory {
+    this.get<Task>('task', id);
+    const cursor = before === undefined ? null : integer(before, 'before');
+    const size = integer(limit, 'limit');
+    if (size > 100) throw new HttpError(400, 'limit must be at most 100.');
+    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)));
+    const pageStatement = this.database.prepare(cursor === null
+      ? 'SELECT data FROM task_transactions WHERE task_id = ? ORDER BY sequence DESC'
+      : 'SELECT data FROM task_transactions WHERE task_id = ? AND sequence < ? ORDER BY sequence DESC');
+    const rows = cursor === null ? pageStatement.iterate(id) : pageStatement.iterate(id, cursor);
+    const available: TaskTransaction[] = [];
+    for (const row of rows) {
+      const item = JSON.parse((row as JsonRow).data) as TaskTransaction;
+      if (canSee(item)) available.push(item);
+      if (available.length > size) break;
+    }
+    let firstAvailableSequence: number | null = null;
+    const firstStatement = this.database.prepare('SELECT data FROM task_transactions WHERE task_id = ? ORDER BY sequence ASC');
+    for (const row of firstStatement.iterate(id)) {
+      const item = JSON.parse((row as JsonRow).data) as TaskTransaction;
+      if (canSee(item)) { firstAvailableSequence = item.sequence; break; }
+    }
+    const page = available.slice(0, size);
+    return { transactions: page, nextBefore: available.length > size ? page[page.length - 1]!.sequence : null, firstAvailableSequence };
+  }
+  taskDetail(id: string): TaskDetail {
+    const task = this.get<Task>('task', id);
+    const references = (direction: 'depends_on' | 'blocks'): TaskReference[] => {
+      const rows = direction === 'depends_on'
+        ? this.database.prepare('SELECT e.data FROM task_dependencies d JOIN entities e ON e.id = d.dependency_id WHERE d.task_id = ? ORDER BY d.dependency_id').all(id)
+        : this.database.prepare('SELECT e.data FROM task_dependencies d JOIN entities e ON e.id = d.task_id WHERE d.dependency_id = ? ORDER BY d.task_id').all(id);
+      return (rows as JsonRow[]).map(row => { const value = JSON.parse(row.data) as Task; return { id: value.id, title: value.title, status: value.status, priority: value.priority, version: value.version }; });
+    };
+    return { task, history: this.taskHistory(id), dependsOn: references('depends_on'), blocks: references('blocks'), activity: this.activities(id) };
+  }
+  createTaskComment(id: string, input: unknown, attribution?: ActorAttribution): TaskTransaction {
+    return this.taskMutation(() => {
+      const data = object(input, ['body']); const body = string(data.body, 'Comment', 20_000);
+      const task = this.get<Task>('task', id);
+      const transaction = this.appendTaskTransaction(task, { kind: 'comment', comment: body }, attribution);
+      this.event(id, 'commented', 'Commented on this task.', attribution);
+      return transaction;
+    });
+  }
+  updateTaskDependencies(id: string, input: unknown, attribution?: ActorAttribution): TaskDetail {
+    return this.taskMutation(() => {
+      const data = object(input, ['taskId', 'action', 'expectedVersion']);
+      const dependencyId = string(data.taskId, 'Dependency task ID', 50);
+      if (!/^T[1-9]\d*$/.test(dependencyId)) throw new HttpError(400, 'Choose a valid dependency task.');
+      const action = choice(data.action, 'action', ['add', 'remove']);
+      const current = this.get<Task>('task', id);
+      if (integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before changing dependencies.');
+      if (dependencyId === id) throw new HttpError(400, 'A task cannot depend on itself.');
+      const row = this.database.prepare("SELECT data FROM entities WHERE kind = 'task' AND id = ?").get(dependencyId) as JsonRow | undefined;
+      if (!row) throw new HttpError(404, 'Dependency task was not found.', 'TASK_UNAVAILABLE');
+      const dependency = JSON.parse(row.data) as Task;
+      const exists = Boolean(this.database.prepare('SELECT 1 FROM task_dependencies WHERE task_id = ? AND dependency_id = ?').get(id, dependencyId));
+      if ((action === 'add') === exists) throw new HttpError(409, action === 'add' ? 'This dependency already exists.' : 'This dependency no longer exists.');
+      if (action === 'add' && this.database.prepare(`WITH RECURSIVE reachable(id) AS (
+        SELECT dependency_id FROM task_dependencies WHERE task_id = ?
+        UNION SELECT d.dependency_id FROM task_dependencies d JOIN reachable r ON d.task_id = r.id
+      ) SELECT 1 FROM reachable WHERE id = ? LIMIT 1`).get(dependencyId, id)) throw new HttpError(409, 'This dependency would create a cycle.');
+      const now = new Date().toISOString(); const task = this.advanceTask(current, now); const other = this.advanceTask(dependency, now);
+      if (action === 'add') this.database.prepare('INSERT INTO task_dependencies (task_id, dependency_id) VALUES (?, ?)').run(id, dependencyId);
+      else this.database.prepare('DELETE FROM task_dependencies WHERE task_id = ? AND dependency_id = ?').run(id, dependencyId);
+      this.save('task', task); this.save('task', other);
+      const change = action === 'add' ? 'added' : 'removed';
+      this.appendTaskTransaction(task, { kind: 'dependency', dependency: { taskId: other.id, action: change, direction: 'depends_on' } }, attribution, now);
+      this.appendTaskTransaction(other, { kind: 'dependency', dependency: { taskId: task.id, action: change, direction: 'blocks' } }, attribution, now);
+      this.event(task.id, `dependency_${change}`, `${action === 'add' ? 'Added' : 'Removed'} a task dependency.`, attribution);
+      this.event(other.id, `dependency_${change}`, `${action === 'add' ? 'Added' : 'Removed'} a task blocked by this task.`, attribution);
+      return this.taskDetail(id);
+    });
   }
   private documentMutation(work: () => WikiDocument): WikiDocument {
     // A savepoint preserves atomic history even for callers outside mutate(),
