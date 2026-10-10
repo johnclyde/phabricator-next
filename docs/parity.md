@@ -4,7 +4,7 @@ This document is the project's internal feature tracker for parity with the late
 
 **Product priority: document iteration first.** Academic papers, legal motions, and other long-form arguments are central, especially word/structure diffs, stable review anchors, and claim/citation provenance. Incremental code review remains part of historical parity but is a secondary initial workflow. Phabricator's durable revision and transaction model is the foundation for both.
 
-**Current stage: bootstrap. No application has full parity.** The running application is an initial local, single-user slice; consult the [README](../README.md) for the features actually implemented and verified. Every baseline item below remains a planned parity target unless a smaller verified slice is explicitly recorded. A visible navigation item, fixture, simulated reviewer, static document, or successful build is not feature parity.
+**Current stage: bootstrap. No application has full parity.** The running application offers local mode and a password-authenticated shared workspace; consult the [README](../README.md) for the features actually implemented and verified. Every baseline item below remains a planned parity target unless a smaller verified slice is explicitly recorded. A visible navigation item, fixture, simulated reviewer, static document, or successful build is not feature parity.
 
 ## Baseline and completion rule
 
@@ -76,7 +76,9 @@ These identifiers are internal tracking keys. The rows describe required accepta
 | PROJECT-03 | Real workboards | Ordered per-project columns and card positions are independent of task status. Move cards through a touch/keyboard action, survive reload, handle concurrent ordering, and support a task on multiple boards. |
 | PROJECT-04 | Board administration | Column edit/hide, WIP limits, triggers, board enable/disable, filtering, bulk moves and policy failures are visible and attributable. |
 
-The current task-status columns and project tag list do not establish workboard parity. The WIKI-01 local slice now stores immutable snapshots, edit summaries, paged history and comparisons; restore-as-new is distinct from upstream publication-pointer semantics. Authenticated authorship, hierarchy, drafts/publication, policies and interoperability remain gaps. See the roadmap for verified implementation slices.
+The AUTH-01/02 slice implements terminal-provisioned password accounts, expiring/revocable sessions, CSRF/context checks and scoped CLI tokens. All enabled members share one workspace; invitations, account lifecycle parity, object/Space policies and durable authenticated offline work remain gaps.
+
+The current task-status columns and project tag list do not establish workboard parity. The WIKI-01 local slice now stores immutable snapshots, edit summaries, paged history and comparisons; restore-as-new is distinct from upstream publication-pointer semantics. New authenticated writes now retain principal/credential attribution. Hierarchy, drafts/publication, policies and interoperability remain gaps. See the roadmap for verified implementation slices.
 
 ## Every active and historical upstream application directory
 
@@ -191,7 +193,7 @@ The objective is to make useful automated work normal. A reviewer agent is a nam
 - Model credentials stay on the server/worker side. Source text, comments, bibliography, PDFs and repository files are untrusted task data; they cannot expand tool permissions.
 - Local/offline model providers are first-class. An Ollama-compatible adapter can keep document content on the user's machine; provider reachability, selected model, limitations and failed runs remain visible. Remote calls must be explicit in provider configuration rather than silently substituting for a local model.
 
-These are product contracts with only an initial implementation slice. The application has explicit hosted and local model adapters, but scoped authorization, isolated workers, evaluation datasets and automatic landing remain acceptance gaps. Configured real-provider success must be verified separately from deterministic checks and mocked adapter tests.
+These are product contracts with only an initial implementation slice. The application has explicit hosted and local model adapters, with separate local/hosted review token scopes; object/Space authorization, isolated workers, evaluation datasets and automatic landing remain acceptance gaps. Configured real-provider success must be verified separately from deterministic checks and mocked adapter tests.
 
 ## Academic papers and LaTeX
 

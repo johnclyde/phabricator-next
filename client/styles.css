@@ -95,3 +95,41 @@
   .wiki-activity li{font-size:12px}
 }
 .wiki-comparison .diff-legend i{display:inline-block;width:10px;height:10px;margin-right:4px;border-radius:2px}.wiki-comparison .legend-add{background:#c3e3bc}.wiki-comparison .legend-remove{background:#efc3bd}
+/* Session verification is a separate screen: private views never render beneath it. */
+.session-gate{min-height:100dvh;padding:55px 20px;display:flex;flex-direction:column;align-items:center;background:#edf1f5}
+.session-brand{display:flex;align-items:center;gap:9px;font-size:24px;font-weight:600;color:#36495a;margin-bottom:30px;letter-spacing:-.6px}
+.session-brand img{width:35px;height:41px}
+.session-brand>span{font-size:9px;letter-spacing:1px;padding:5px;background:#465665;border-radius:3px;color:#fff}
+.session-card{width:min(100%,430px);background:#fff;border:1px solid #ccd6de;border-radius:4px;padding:30px;box-shadow:0 4px 15px #26374609}
+.session-emblem{color:#5b839f;background:#edf4f9;border-radius:50%;width:52px;height:52px;display:flex;align-items:center;justify-content:center;margin-bottom:20px}
+.session-card h1{font-size:23px;line-height:1.4}
+.session-card>p{font-size:13px;line-height:1.75;margin-top:10px;color:#6c8090}
+.session-card .session-notice{background:#f1f6fa;padding:10px 12px;border-left:3px solid #87a9c1}
+.session-card .banner{margin-top:17px;font-size:12px}
+.session-card form{margin-top:25px}
+.session-card .field{font-size:13px}
+.session-card input{min-height:44px;font-size:16px}
+.session-card .button.primary{width:100%;min-height:44px;font-size:14px}
+.session-card>.button{margin-top:22px}
+.session-explanation{display:flex;gap:10px;margin-top:25px;padding-top:20px;border-top:1px solid #e6edf2;font-size:11px;line-height:1.8;color:#7a8e9e}
+.session-explanation svg{flex-shrink:0;margin-top:2px}
+.session-confirm .modal-body{font-size:14px;line-height:1.8;color:#5b7183}
+.session-confirm .modal-footer{justify-content:flex-end}
+.signed-in-user{font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0e6eb}
+.sign-out-button{background:#3c4653;border-color:#657181;color:#e3e9ee;box-shadow:none;font-size:10px;margin-left:7px}
+.sign-out-button:hover:not(:disabled){background:#4b5969}
+.protected-workspace-note{margin-bottom:18px;border:1px solid #d9e4ed;border-radius:3px;font-size:11px;line-height:1.7}
+@media(max-width:760px){
+ .session-gate{padding:35px 14px}
+ .session-brand{font-size:23px;margin-bottom:24px}
+ .session-card{padding:24px 20px}
+ .session-card h1{font-size:23px}
+ .session-card>p{font-size:14px}
+ .session-card .field{font-size:14px}
+ .session-explanation{font-size:12px}
+ .signed-in-user{display:none}
+ .sign-out-button{min-height:44px;padding:5px 8px;margin-left:3px;font-size:11px}
+ .protected-workspace-note{font-size:11px;margin-bottom:15px}
+ .session-confirm .modal-footer>.button{min-height:44px;white-space:normal}
+ .comment-form-footer{flex-wrap:wrap;gap:8px}
+}

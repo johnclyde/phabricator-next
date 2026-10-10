@@ -1,0 +1,293 @@
+import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
+import type { DatabaseSync } from 'node:sqlite';
+import type { AuthContext, AuthMode, AuthScope, AuthToken, PublicAccount, SessionState } from '../shared/auth.ts';
+import { normalizeBasePath } from '../shared/mount.ts';
+import { HttpError, string } from './validation.ts';
+
+export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; provisioning?: boolean; now?: () => number }
+type AccountRow = { id: string; username: string; display_name: string; disabled: number; salt: string; password_hash: string; password_scheme: string };
+type SessionRow = { id: string; account_id: string; context: string; expires_at: number };
+type TokenRow = { id: string; account_id: string; name: string; scopes: string; created_at: number; expires_at: number; revoked: number };
+type ChallengeRow = { hash: string; context: string; expires_at: number };
+const SCOPES: AuthScope[] = ['read', 'write', 'review:local', 'review:hosted'];
+const SESSION_LIFETIME = 12 * 60 * 60 * 1000;
+const CHALLENGE_LIFETIME = 10 * 60 * 1000;
+const LOGIN_WINDOW = 15 * 60 * 1000;
+const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+const secret = () => randomBytes(32).toString('base64url');
+const same = (left: string, right: string) => {
+  const a = Buffer.from(left); const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+const publicAccount = (row: AccountRow): PublicAccount => ({ id: row.id, username: row.username, displayName: row.display_name, disabled: Boolean(row.disabled) });
+
+export class Auth {
+  readonly workspaceId: string;
+  readonly mode: AuthMode;
+  private readonly database: DatabaseSync;
+  private readonly basePath: string;
+  private readonly now: () => number;
+  private readonly sessionCookie: string;
+  private readonly challengeCookie: string;
+  private deriving = 0;
+  constructor(options: AuthOptions) {
+    this.database = options.database;
+    this.mode = options.mode;
+    this.basePath = normalizeBasePath(options.basePath);
+    this.now = options.now ?? Date.now;
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS auth_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS auth_accounts (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0, salt TEXT NOT NULL, password_hash TEXT NOT NULL, password_scheme TEXT NOT NULL DEFAULT 'scrypt-v1');
+      CREATE TABLE IF NOT EXISTS auth_sessions (id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL REFERENCES auth_accounts(id), context TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS auth_tokens (id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL REFERENCES auth_accounts(id), name TEXT NOT NULL, scopes TEXT NOT NULL CHECK(json_valid(scopes)), created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS auth_challenges (hash TEXT PRIMARY KEY, context TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS auth_login_limits (name TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+    `);
+    if (!(this.database.prepare('PRAGMA table_info(auth_accounts)').all() as { name: string }[]).some(column => column.name === 'password_scheme')) this.database.exec("ALTER TABLE auth_accounts ADD COLUMN password_scheme TEXT NOT NULL DEFAULT 'scrypt-v1'");
+    this.database.prepare('INSERT OR IGNORE INTO auth_meta (name, value) VALUES (?, ?)').run('workspace_id', randomUUID());
+    this.workspaceId = this.meta('workspace_id')!;
+    const suffix = hash(`${this.workspaceId}:${this.basePath}`).slice(0, 20);
+    this.sessionCookie = `phab_session_${suffix}`;
+    this.challengeCookie = `phab_challenge_${suffix}`;
+    if (this.mode === 'password') {
+      const active = this.database.prepare('SELECT id FROM auth_accounts WHERE disabled = 0 LIMIT 1').get();
+      if (!active && !options.provisioning) throw new Error('Password authentication is not initialized. Provision an account from the terminal before starting.');
+      if (active) {
+        this.database.exec('SAVEPOINT auth_activation');
+        try {
+          this.database.prepare("INSERT INTO auth_meta (name, value) VALUES ('require_auth', 'true') ON CONFLICT(name) DO UPDATE SET value = excluded.value").run();
+          // Older binaries know no authentication boundary. Raise the schema
+          // floor so they refuse this database instead of exposing its data.
+          const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+          if (version < 3) this.database.exec('PRAGMA user_version = 3');
+          this.database.exec('RELEASE auth_activation');
+        } catch (error) { this.database.exec('ROLLBACK TO auth_activation; RELEASE auth_activation'); throw error; }
+      }
+    } else if (this.meta('require_auth') === 'true' && !options.provisioning) {
+      throw new Error('This workspace requires password authentication. Start with APP_AUTH_MODE=password.');
+    }
+  }
+  private meta(name: string): string | undefined { return (this.database.prepare('SELECT value FROM auth_meta WHERE name = ?').get(name) as { value: string } | undefined)?.value; }
+  private writeTransaction<T>(work: () => T): T {
+    this.database.exec('SAVEPOINT auth_credentials_write');
+    try {
+      // Acquire a write lock before reading credential state: another process
+      // may be resetting a password or disabling an account from the terminal.
+      this.database.prepare("UPDATE auth_meta SET value = value WHERE name = 'workspace_id'").run();
+      const result = work(); this.database.exec('RELEASE auth_credentials_write'); return result;
+    } catch (error) { this.database.exec('ROLLBACK TO auth_credentials_write; RELEASE auth_credentials_write'); throw error; }
+  }
+  private account(id: string): AccountRow | undefined { return this.database.prepare('SELECT * FROM auth_accounts WHERE id = ?').get(id) as AccountRow | undefined; }
+  private cookie(req: IncomingMessage, name: string): string | undefined {
+    const values = (req.headers.cookie ?? '').split(';').map(part => part.trim()).filter(part => part.startsWith(`${name}=`)).map(part => part.slice(name.length + 1));
+    if (values.length > 1) throw new HttpError(401, 'Ambiguous session cookie. Sign in again.');
+    return values[0];
+  }
+  private setCookie(name: string, value: string, seconds: number): string {
+    // HTTP is permitted only because the server remains bound to loopback.
+    // A network hosting mode must require TLS and add Secure explicitly.
+    return `${name}=${value}; Path=${this.basePath}; HttpOnly; SameSite=Strict; Max-Age=${seconds}`;
+  }
+  private sameOrigin(req: IncomingMessage): void {
+    if (!req.headers.host || req.headers.origin !== `http://${req.headers.host}`) throw new HttpError(403, 'A same-origin browser request is required.');
+  }
+  private header(req: IncomingMessage, name: string): string | undefined {
+    const value = req.headers[name];
+    return typeof value === 'string' ? value : undefined;
+  }
+  private requireHeader(req: IncomingMessage, name: string, expected: string, status = 403): void {
+    const actual = this.header(req, name);
+    if (!actual || !same(actual, expected)) throw new HttpError(status, 'The session context changed. Sign in again.');
+  }
+  private sessionRow(req: IncomingMessage): SessionRow | undefined {
+    const value = this.cookie(req, this.sessionCookie);
+    if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) return undefined;
+    return this.database.prepare('SELECT id, account_id, context, expires_at FROM auth_sessions WHERE secret_hash = ?').get(hash(value)) as SessionRow | undefined;
+  }
+  private sessionState(row: SessionRow): SessionState {
+    const account = this.account(row.account_id);
+    if (!account || account.disabled || row.expires_at <= this.now()) throw new HttpError(401, 'This session has expired. Sign in again.');
+    return { mode: this.mode, workspaceId: this.workspaceId, account: publicAccount(account), sessionContext: row.context, csrfToken: row.context, expiresAt: new Date(row.expires_at).toISOString() };
+  }
+  private local(): AuthContext {
+    const context: AuthContext = { workspaceId: this.workspaceId, principalId: `local:${this.workspaceId}`, displayName: 'You', credentialId: null, kind: 'local', sessionContext: null, scopes: [...SCOPES] };
+    this.revalidate(context); return context;
+  }
+  session(req: IncomingMessage): { session: SessionState; cookie?: string } {
+    if (this.mode === 'local') {
+      const context = this.local();
+      return { session: { mode: 'local', workspaceId: this.workspaceId, account: { id: context.principalId, username: 'local', displayName: 'You', disabled: false }, sessionContext: null, csrfToken: null, expiresAt: null } };
+    }
+    const current = this.sessionRow(req);
+    if (current && current.expires_at > this.now()) {
+      const account = this.account(current.account_id);
+      if (account && !account.disabled) return { session: this.sessionState(current) };
+    }
+    const now = this.now();
+    this.database.prepare('DELETE FROM auth_challenges WHERE expires_at <= ?').run(now);
+    const challengeSecret = this.cookie(req, this.challengeCookie);
+    const existing = challengeSecret ? this.database.prepare('SELECT * FROM auth_challenges WHERE hash = ?').get(hash(challengeSecret)) as ChallengeRow | undefined : undefined;
+    if (existing) return { session: { mode: 'password', workspaceId: this.workspaceId, account: null, sessionContext: null, csrfToken: existing.context, expiresAt: null } };
+    const count = (this.database.prepare('SELECT count(*) AS count FROM auth_challenges').get() as { count: number }).count;
+    if (count >= 1000) throw new HttpError(429, 'Too many sign-in attempts. Try again later.');
+    const value = secret(); const context = secret();
+    this.database.prepare('INSERT INTO auth_challenges (hash, context, expires_at) VALUES (?, ?, ?)').run(hash(value), context, now + CHALLENGE_LIFETIME);
+    return { session: { mode: 'password', workspaceId: this.workspaceId, account: null, sessionContext: null, csrfToken: context, expiresAt: null }, cookie: this.setCookie(this.challengeCookie, value, CHALLENGE_LIFETIME / 1000) };
+  }
+  private async derive(password: string, salt: string): Promise<Buffer> {
+    if (this.deriving >= 2) throw new HttpError(429, 'Authentication is busy. Try again later.');
+    this.deriving += 1;
+    try {
+      return await new Promise<Buffer>((resolve, reject) => scrypt(password, Buffer.from(salt, 'hex'), 32, { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
+    } finally { this.deriving -= 1; }
+  }
+  private password(value: unknown): string {
+    if (typeof value !== 'string' || [...value].length < 15 || Buffer.byteLength(value) > 1024 || value.includes('\0')) throw new HttpError(400, 'Use a password of at least 15 characters and at most 1024 UTF-8 bytes.');
+    return value;
+  }
+  private throttle(username: string): void {
+    const now = this.now();
+    this.database.prepare('DELETE FROM auth_login_limits WHERE expires_at <= ?').run(now);
+    for (const [name, maximum] of [['global', 50], [`account:${hash(username)}`, 10]] as const) {
+      const row = this.database.prepare('SELECT count FROM auth_login_limits WHERE name = ?').get(name) as { count: number } | undefined;
+      if ((row?.count ?? 0) >= maximum) throw new HttpError(429, 'Too many sign-in attempts. Try again later.');
+    }
+    for (const name of ['global', `account:${hash(username)}`]) this.database.prepare('INSERT INTO auth_login_limits (name, count, expires_at) VALUES (?, 1, ?) ON CONFLICT(name) DO UPDATE SET count = count + 1').run(name, now + LOGIN_WINDOW);
+  }
+  async login(req: IncomingMessage, username: unknown, password: unknown): Promise<{ cookie: string; session: SessionState }> {
+    if (this.mode !== 'password') throw new HttpError(400, 'Password sign-in is not enabled.');
+    this.sameOrigin(req);
+    const challengeSecret = this.cookie(req, this.challengeCookie);
+    const challenge = challengeSecret ? this.database.prepare('SELECT * FROM auth_challenges WHERE hash = ?').get(hash(challengeSecret)) as ChallengeRow | undefined : undefined;
+    if (!challenge || challenge.expires_at <= this.now()) throw new HttpError(403, 'Reload the sign-in form before trying again.');
+    this.requireHeader(req, 'x-csrf-token', challenge.context);
+    const name = typeof username === 'string' ? username.toLowerCase() : '';
+    if (name.length > 64 || typeof password !== 'string' || Buffer.byteLength(password) > 1024) throw new HttpError(401, 'The username or password is incorrect.');
+    this.throttle(name);
+    const row = this.database.prepare('SELECT * FROM auth_accounts WHERE username = ?').get(name) as AccountRow | undefined;
+    const derived = await this.derive(password, row?.password_scheme === 'scrypt-v1' ? row.salt : '00'.repeat(32));
+    if (!row || row.disabled || row.password_scheme !== 'scrypt-v1' || !same(derived.toString('hex'), row.password_hash)) throw new HttpError(401, 'The username or password is incorrect.');
+    return this.writeTransaction(() => {
+      // Account state and challenge can change while the password KDF is running.
+      const current = this.account(row.id);
+      const liveChallenge = this.database.prepare('SELECT * FROM auth_challenges WHERE hash = ?').get(challenge.hash) as ChallengeRow | undefined;
+      if (!current || current.disabled || current.password_hash !== row.password_hash || current.password_scheme !== row.password_scheme || !liveChallenge || liveChallenge.expires_at <= this.now() || liveChallenge.context !== challenge.context) throw new HttpError(401, 'Sign-in could not be completed. Reload the sign-in form.');
+      // Preserve the browser's challenge-cookie identity across login/logout.
+      // Rotating only its one-use CSRF token prevents concurrent anonymous
+      // bootstraps in other tabs from replacing one another's cookies.
+      this.database.prepare('UPDATE auth_challenges SET context = ?, expires_at = ? WHERE hash = ?').run(secret(), this.now() + CHALLENGE_LIFETIME, challenge.hash);
+      const previous = this.sessionRow(req);
+      if (previous) this.database.prepare('DELETE FROM auth_sessions WHERE id = ?').run(previous.id);
+      this.database.prepare('DELETE FROM auth_login_limits WHERE name = ?').run(`account:${hash(name)}`);
+      this.database.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(this.now());
+      const value = secret();
+      const session: SessionRow = { id: randomUUID(), account_id: row.id, context: secret(), expires_at: this.now() + SESSION_LIFETIME };
+      this.database.prepare('INSERT INTO auth_sessions (id, secret_hash, account_id, context, expires_at) VALUES (?, ?, ?, ?, ?)').run(session.id, hash(value), row.id, session.context, session.expires_at);
+      return { cookie: this.setCookie(this.sessionCookie, value, SESSION_LIFETIME / 1000), session: this.sessionState(session) };
+    });
+  }
+  authenticate(req: IncomingMessage, scope: AuthScope = 'read'): AuthContext {
+    if (this.mode === 'local') return this.local();
+    const authorization = this.header(req, 'authorization');
+    if (authorization !== undefined) {
+      if (this.cookie(req, this.sessionCookie)) throw new HttpError(401, 'Use one authentication method per request.');
+      const match = /^Bearer (phab_[A-Za-z0-9_-]{43})$/.exec(authorization);
+      const row = match ? this.database.prepare('SELECT * FROM auth_tokens WHERE secret_hash = ?').get(hash(match[1]!)) as TokenRow | undefined : undefined;
+      if (!row) throw new HttpError(401, 'A valid access token is required.');
+      const account = this.account(row.account_id);
+      const context: AuthContext = { workspaceId: this.workspaceId, principalId: row.account_id, displayName: account?.display_name ?? '', credentialId: row.id, kind: 'token', sessionContext: null, scopes: JSON.parse(row.scopes) as AuthScope[] };
+      this.revalidate(context, scope); return context;
+    }
+    const row = this.sessionRow(req);
+    if (!row) throw new HttpError(401, 'Sign in to this workspace.');
+    const state = this.sessionState(row);
+    this.requireHeader(req, 'x-session-context', row.context, 401);
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method ?? 'GET')) { this.sameOrigin(req); this.requireHeader(req, 'x-csrf-token', row.context); }
+    const context: AuthContext = { workspaceId: this.workspaceId, principalId: row.account_id, displayName: state.account!.displayName, credentialId: row.id, kind: 'session', sessionContext: row.context, scopes: [...SCOPES] };
+    this.revalidate(context, scope); return context;
+  }
+  revalidate(context: AuthContext, scope?: AuthScope): void {
+    if (context.workspaceId !== this.workspaceId) throw new HttpError(401, 'This credential belongs to another workspace.');
+    if (context.kind === 'local') {
+      if (this.mode !== 'local' || context.principalId !== `local:${this.workspaceId}` || this.meta('require_auth') === 'true') throw new HttpError(401, 'This workspace requires password authentication. Restart the server in password mode.');
+      return;
+    }
+    const account = this.account(context.principalId);
+    if (!account || account.disabled) throw new HttpError(401, 'This account is unavailable.');
+    if (context.kind === 'session') {
+      const row = this.database.prepare('SELECT * FROM auth_sessions WHERE id = ?').get(context.credentialId) as SessionRow | undefined;
+      if (!row || row.account_id !== context.principalId || row.expires_at <= this.now() || context.sessionContext !== row.context) throw new HttpError(401, 'This session has expired. Sign in again.');
+    } else {
+      const row = this.database.prepare('SELECT * FROM auth_tokens WHERE id = ?').get(context.credentialId) as TokenRow | undefined;
+      if (!row || row.account_id !== context.principalId || row.revoked || row.expires_at <= this.now()) throw new HttpError(401, 'This access token is expired or revoked.');
+      if (scope && !(JSON.parse(row.scopes) as AuthScope[]).includes(scope)) throw new HttpError(403, `This access token does not permit ${scope}.`);
+    }
+  }
+  logout(context: AuthContext): { cookie: string } {
+    this.revalidate(context);
+    if (context.kind !== 'session') throw new HttpError(400, 'Only browser sessions can sign out here.');
+    this.database.prepare('DELETE FROM auth_sessions WHERE id = ?').run(context.credentialId);
+    return { cookie: this.setCookie(this.sessionCookie, '', 0) };
+  }
+  async createAccount(input: { username: string; displayName: string; password: string }): Promise<PublicAccount> {
+    const username = string(input.username, 'Username', 64).toLowerCase();
+    if (!/^[a-z][a-z0-9._-]{2,63}$/.test(username)) throw new HttpError(400, 'Username must use 3–64 lowercase letters, numbers, dots, underscores or hyphens, starting with a letter.');
+    const displayName = string(input.displayName, 'Display name', 120);
+    const password = this.password(input.password);
+    if (this.database.prepare('SELECT id FROM auth_accounts WHERE username = ?').get(username)) throw new HttpError(409, 'This username is already registered.');
+    const salt = randomBytes(32).toString('hex'); const derived = await this.derive(password, salt);
+    const id = randomUUID();
+    try { this.database.prepare('INSERT INTO auth_accounts (id, username, display_name, salt, password_hash) VALUES (?, ?, ?, ?, ?)').run(id, username, displayName, salt, derived.toString('hex')); }
+    catch (error) { if (this.database.prepare('SELECT id FROM auth_accounts WHERE username = ?').get(username)) throw new HttpError(409, 'This username is already registered.'); throw error; }
+    return { id, username, displayName, disabled: false };
+  }
+  listAccounts(): PublicAccount[] { return (this.database.prepare('SELECT * FROM auth_accounts ORDER BY username').all() as AccountRow[]).map(publicAccount); }
+  setAccountDisabled(accountId: string, disabled: boolean): void {
+    if (!this.account(accountId)) throw new HttpError(404, 'Account not found.');
+    this.database.exec('SAVEPOINT auth_account_status');
+    try {
+      this.database.prepare('UPDATE auth_accounts SET disabled = ? WHERE id = ?').run(disabled ? 1 : 0, accountId);
+      if (disabled) this.invalidateCredentials(accountId);
+      this.database.exec('RELEASE auth_account_status');
+    } catch (error) { this.database.exec('ROLLBACK TO auth_account_status; RELEASE auth_account_status'); throw error; }
+  }
+  private invalidateCredentials(accountId: string): void {
+    this.database.prepare('DELETE FROM auth_sessions WHERE account_id = ?').run(accountId);
+    this.database.prepare('UPDATE auth_tokens SET revoked = 1 WHERE account_id = ?').run(accountId);
+  }
+  async resetPassword(accountId: string, password: string): Promise<void> {
+    if (!this.account(accountId)) throw new HttpError(404, 'Account not found.');
+    const value = this.password(password); const salt = randomBytes(32).toString('hex'); const derived = await this.derive(value, salt);
+    this.database.exec('SAVEPOINT auth_password_reset');
+    try {
+      this.database.prepare("UPDATE auth_accounts SET salt = ?, password_hash = ?, password_scheme = 'scrypt-v1' WHERE id = ?").run(salt, derived.toString('hex'), accountId);
+      this.invalidateCredentials(accountId);
+      this.database.exec('RELEASE auth_password_reset');
+    } catch (error) { this.database.exec('ROLLBACK TO auth_password_reset; RELEASE auth_password_reset'); throw error; }
+  }
+  createToken(accountId: string, input: { name: string; scopes: AuthScope[]; expiresInDays?: number }): { token: string; record: AuthToken } {
+    const name = string(input.name, 'Token name', 120);
+    if (!Array.isArray(input.scopes) || !input.scopes.length || input.scopes.length > SCOPES.length || new Set(input.scopes).size !== input.scopes.length || input.scopes.some(scope => !SCOPES.includes(scope))) throw new HttpError(400, 'Choose valid, nonduplicate token scopes.');
+    const days = input.expiresInDays ?? 30;
+    if (!Number.isSafeInteger(days) || days < 1 || days > 90) throw new HttpError(400, 'Token lifetime must be 1–90 days.');
+    return this.writeTransaction(() => {
+      const account = this.account(accountId);
+      if (!account || account.disabled) throw new HttpError(404, 'Active account not found.');
+      const now = this.now(); const token = `phab_${secret()}`;
+      const record: AuthToken = { id: randomUUID(), name, accountId, scopes: [...input.scopes], createdAt: new Date(now).toISOString(), expiresAt: new Date(now + days * 86_400_000).toISOString(), revoked: false };
+      this.database.prepare('INSERT INTO auth_tokens (id, secret_hash, account_id, name, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(record.id, hash(token), accountId, name, JSON.stringify(input.scopes), now, now + days * 86_400_000);
+      return { token, record };
+    });
+  }
+  listTokens(accountId: string): AuthToken[] {
+    if (!this.account(accountId)) throw new HttpError(404, 'Account not found.');
+    return (this.database.prepare('SELECT * FROM auth_tokens WHERE account_id = ? ORDER BY created_at DESC').all(accountId) as TokenRow[]).map(row => ({ id: row.id, name: row.name, accountId: row.account_id, scopes: JSON.parse(row.scopes) as AuthScope[], createdAt: new Date(row.created_at).toISOString(), expiresAt: new Date(row.expires_at).toISOString(), revoked: Boolean(row.revoked) }));
+  }
+  revokeToken(accountId: string, tokenId: string): void {
+    const result = this.database.prepare('UPDATE auth_tokens SET revoked = 1 WHERE id = ? AND account_id = ?').run(tokenId, accountId);
+    if (!result.changes) throw new HttpError(404, 'Access token not found.');
+  }
+}
+
+export function createAuth(options: AuthOptions): Auth { return new Auth(options); }

@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
+import type { ActorAttribution, Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
@@ -26,7 +26,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 2) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 3) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -68,8 +68,11 @@ export class Store {
     try { const result = work(); this.database.exec('COMMIT'); return result; }
     catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
-  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse): MutationResponse {
+  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse, authorize?: () => void): MutationResponse {
     return this.transaction(() => {
+      // Credential revocation in another process may commit while BEGIN waits.
+      // Check authority after acquiring the write lock and before replay/writes.
+      authorize?.();
       if (key) {
         const existing = this.replay(key, fingerprint);
         if (existing) return existing;
@@ -106,8 +109,8 @@ export class Store {
     try { this.get(kind, id); } catch { throw new HttpError(400, `Unknown ${kind}: ${id}.`); }
     return id;
   }
-  event(objectId: string, action: string, detail: string, actor = 'You'): void {
-    const value: Activity = { id: randomUUID(), objectId, actor, action, detail, createdAt: new Date().toISOString() };
+  event(objectId: string, action: string, detail: string, attribution?: ActorAttribution): void {
+    const value: Activity = { id: randomUUID(), objectId, actor: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), action, detail, createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO activity (id, object_id, data) VALUES (?, ?, ?)').run(value.id, objectId, JSON.stringify(value));
   }
   activities(objectId?: string): Activity[] {
@@ -116,24 +119,24 @@ export class Store {
       : this.database.prepare('SELECT data FROM activity ORDER BY sequence DESC LIMIT 200').all();
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity);
   }
-  state(ai: AppState['ai']): AppState {
-    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), ai, mode: 'local-single-user' };
+  state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
+    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), ai, mode };
   }
-  createProject(input: unknown): Project {
+  createProject(input: unknown, attribution?: ActorAttribution): Project {
     const data = object(input, ['name', 'description', 'color']);
     const color = data.color === undefined ? '#5b83b5' : string(data.color, 'Color', 7);
     if (!/^#[a-f\d]{6}$/i.test(color)) throw new HttpError(400, 'Color must be a six-digit hexadecimal color.');
     const project: Project = { id: this.nextId('project', 'PROJ'), name: string(data.name, 'Name'), description: optionalString(data.description, 'Description'), color };
-    this.save('project', project); this.event(project.id, 'created', `Created project ${project.name}.`); return project;
+    this.save('project', project); this.event(project.id, 'created', `Created project ${project.name}.`, attribution); return project;
   }
-  createRepository(input: unknown): Repository {
+  createRepository(input: unknown, attribution?: ActorAttribution): Repository {
     const data = object(input, ['name', 'remoteUrl', 'description', 'defaultBranch']);
     const repository: Repository = { id: this.nextId('repository', 'R'), name: string(data.name, 'Name'), remoteUrl: remoteUrl(data.remoteUrl), description: optionalString(data.description, 'Description'), defaultBranch: data.defaultBranch === undefined ? 'main' : string(data.defaultBranch, 'Default branch') };
-    this.save('repository', repository); this.event(repository.id, 'registered', `Registered ${repository.name}; no remote content fetched.`); return repository;
+    this.save('repository', repository); this.event(repository.id, 'registered', `Registered ${repository.name}; no remote content fetched.`, attribution); return repository;
   }
-  createTask(input: unknown): Task { return this.writeTask(input); }
-  updateTask(id: string, input: unknown): Task { return this.writeTask(input, this.get<Task>('task', id)); }
-  private writeTask(input: unknown, current?: Task): Task {
+  createTask(input: unknown, attribution?: ActorAttribution): Task { return this.writeTask(input, undefined, attribution); }
+  updateTask(id: string, input: unknown, attribution?: ActorAttribution): Task { return this.writeTask(input, this.get<Task>('task', id), attribution); }
+  private writeTask(input: unknown, current?: Task, attribution?: ActorAttribution): Task {
     const data = object(input, ['title', 'description', 'status', 'priority', 'projectId']);
     if (current && Object.keys(data).length === 0) throw new HttpError(400, 'At least one task field is required.');
     const now = new Date().toISOString();
@@ -145,7 +148,7 @@ export class Store {
       projectId: data.projectId === undefined && current ? current.projectId : this.reference(data.projectId, 'project'),
       createdAt: current?.createdAt ?? now, updatedAt: now,
     };
-    this.save('task', task); this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`); return task;
+    this.save('task', task); this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`, attribution); return task;
   }
   private documentMutation(work: () => WikiDocument): WikiDocument {
     // A savepoint preserves atomic history even for callers outside mutate(),
@@ -154,9 +157,9 @@ export class Store {
     try { const document = work(); this.database.exec('RELEASE wiki_document_write'); return document; }
     catch (error) { this.database.exec('ROLLBACK TO wiki_document_write; RELEASE wiki_document_write'); throw error; }
   }
-  createDocument(input: unknown): WikiDocument { return this.documentMutation(() => this.writeDocument(input)); }
-  updateDocument(id: string, input: unknown): WikiDocument { return this.documentMutation(() => this.writeDocument(input, this.get<WikiDocument>('document', id))); }
-  restoreDocument(id: string, input: unknown): WikiDocument {
+  createDocument(input: unknown, attribution?: ActorAttribution): WikiDocument { return this.documentMutation(() => this.writeDocument(input, undefined, null, attribution)); }
+  updateDocument(id: string, input: unknown, attribution?: ActorAttribution): WikiDocument { return this.documentMutation(() => this.writeDocument(input, this.get<WikiDocument>('document', id), null, attribution)); }
+  restoreDocument(id: string, input: unknown, attribution?: ActorAttribution): WikiDocument {
     return this.documentMutation(() => {
       const data = object(input, ['version', 'expectedVersion', 'message']);
       const current = this.get<WikiDocument>('document', id);
@@ -165,10 +168,10 @@ export class Store {
       return this.writeDocument({
         title: selected.title, content: selected.content, slug: current.slug, expectedVersion: current.version,
         message: data.message === undefined ? `Restored content from version ${selected.number}. Current slug retained.` : data.message,
-      }, current, selected.number);
+      }, current, selected.number, attribution);
     });
   }
-  private writeDocument(input: unknown, current?: WikiDocument, restoredFrom: number | null = null): WikiDocument {
+  private writeDocument(input: unknown, current?: WikiDocument, restoredFrom: number | null = null, attribution?: ActorAttribution): WikiDocument {
     const data = object(input, ['title', 'slug', 'content', 'expectedVersion', 'message']);
     if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This document changed. Reload before saving.');
     if (!current && data.expectedVersion !== undefined) throw new HttpError(400, 'expectedVersion is only used when updating a document.');
@@ -180,13 +183,13 @@ export class Store {
     const document: WikiDocument = { id: current?.id ?? this.nextId('document', 'W'), title: string(data.title, 'Title'), slug, content: string(data.content, 'Content', 500_000, true), version: (current?.version ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now };
     if (!Number.isSafeInteger(document.version)) throw new HttpError(409, 'This document has reached the supported version limit.');
     this.save('document', document);
-    this.saveWikiVersion(document, { kind: restoredFrom === null ? current ? 'edit' : 'create' : 'restore', author: 'You', message, restoredFrom });
+    this.saveWikiVersion(document, { kind: restoredFrom === null ? current ? 'edit' : 'create' : 'restore', author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), message, restoredFrom });
     this.event(document.id, restoredFrom === null ? current ? 'updated' : 'created' : 'restored', restoredFrom === null
       ? `Saved document ${document.title}, version ${document.version}.`
-      : `Restored content from version ${restoredFrom} as version ${document.version}. Current slug retained.`);
+      : `Restored content from version ${restoredFrom} as version ${document.version}. Current slug retained.`, attribution);
     return document;
   }
-  private saveWikiVersion(document: WikiDocument, metadata: Pick<WikiVersion, 'kind' | 'author' | 'message' | 'restoredFrom'>): WikiVersion {
+  private saveWikiVersion(document: WikiDocument, metadata: Pick<WikiVersion, 'kind' | 'author' | 'message' | 'restoredFrom' | 'attribution'>): WikiVersion {
     const version: WikiVersion = {
       id: randomUUID(), documentId: document.id, number: document.version, title: document.title,
       slug: document.slug, content: document.content, createdAt: document.updatedAt, ...metadata,
@@ -214,16 +217,16 @@ export class Store {
   documentDetail(id: string): WikiDetail {
     return { document: this.get<WikiDocument>('document', id), history: this.documentHistory(id), activity: this.activities(id) };
   }
-  createRevision(input: unknown): RevisionDetail {
+  createRevision(input: unknown, attribution?: ActorAttribution): RevisionDetail {
     const data = object(input, ['title', 'summary', 'kind', 'files', 'repositoryId', 'projectId']);
     const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
     const source = files(data.files);
     const now = new Date().toISOString();
     const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
-    this.save('revision', revision); this.saveVersion(revision, source, 'Initial version'); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`); return this.detail(revision.id);
+    this.save('revision', revision); this.saveVersion(revision, source, 'Initial version', attribution); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
   }
-  private saveVersion(revision: Revision, source: SourceFile[], message: string): RevisionVersion {
-    const version: RevisionVersion = { id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source), createdAt: new Date().toISOString() };
+  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution): RevisionVersion {
+    const version: RevisionVersion = { ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version)); return version;
   }
   requireVersion(id: string, expected: unknown): RevisionDetail {
@@ -231,14 +234,14 @@ export class Store {
     if (detail.revision.currentVersion !== version) throw new HttpError(409, 'This revision changed. Reload before continuing.');
     return detail;
   }
-  createVersion(id: string, input: unknown): RevisionDetail {
+  createVersion(id: string, input: unknown, attribution?: ActorAttribution): RevisionDetail {
     const data = object(input, ['files', 'message', 'expectedVersion']);
     const { revision } = this.requireVersion(id, data.expectedVersion);
     const source = files(data.files); const message = string(data.message, 'Message', 10_000);
     revision.currentVersion += 1; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
-    this.save('revision', revision); this.saveVersion(revision, source, message); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`); return this.detail(id);
+    this.save('revision', revision); this.saveVersion(revision, source, message, attribution); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); return this.detail(id);
   }
-  updateRevision(id: string, input: unknown): Revision {
+  updateRevision(id: string, input: unknown, attribution?: ActorAttribution): Revision {
     const data = object(input, ['status', 'expectedVersion']);
     const detail = this.requireVersion(id, data.expectedVersion);
     const status = choice(data.status, 'status', ['draft', 'needs_review', 'changes_requested', 'accepted', 'closed']);
@@ -248,9 +251,9 @@ export class Store {
       if (!reviews.length || reviews.some(review => review.findings.some(finding => finding.severity === 'error'))) throw new HttpError(409, 'Acceptance requires current-version review evidence with no error findings.');
     }
     const revision = { ...detail.revision, status, updatedAt: new Date().toISOString() };
-    this.save('revision', revision); this.event(id, status, `${status === 'closed' ? 'Manually closed' : `Set status to ${status.replaceAll('_', ' ')}`} at version ${revision.currentVersion}.`); return revision;
+    this.save('revision', revision); this.event(id, status, `${status === 'closed' ? 'Manually closed' : `Set status to ${status.replaceAll('_', ' ')}`} at version ${revision.currentVersion}.`, attribution); return revision;
   }
-  createComment(id: string, input: unknown): ReviewComment {
+  createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
     const data = object(input, ['body', 'versionId', 'filePath', 'line']); const detail = this.detail(id);
     const versionId = string(data.versionId, 'Version ID', 100); const version = detail.versions.find(item => item.id === versionId);
     if (!version) throw new HttpError(400, 'Comment version does not belong to this revision.');
@@ -259,19 +262,19 @@ export class Store {
     if (filePath && !file) throw new HttpError(400, 'Comment file does not exist in the selected version.');
     const line = data.line === undefined || data.line === null ? null : integer(data.line, 'Line');
     if (line !== null && (!file || line > file.content.split('\n').length)) throw new HttpError(400, 'Comment line must exist in the selected file and version.');
-    const comment: ReviewComment = { id: randomUUID(), revisionId: id, versionId, filePath, line, body: string(data.body, 'Comment', 20_000), author: 'You', createdAt: new Date().toISOString() };
+    const comment: ReviewComment = { id: randomUUID(), revisionId: id, versionId, filePath, line, body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO comments (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(comment.id, id, versionId, JSON.stringify(comment));
-    this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`); return comment;
+    this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); return comment;
   }
-  saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis): ReviewRun {
+  saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis, attribution?: ActorAttribution): ReviewRun {
     const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
-    const review: ReviewRun = { ...analysis, id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
+    const review: ReviewRun = { ...analysis, ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO reviews (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(review.id, id, version.id, JSON.stringify(review));
     if (detail.revision.status === 'accepted' && analysis.findings.some(finding => finding.severity === 'error')) {
       this.save('revision', { ...detail.revision, status: 'changes_requested', updatedAt: new Date().toISOString() });
-      this.event(id, 'acceptance_invalidated', `New review errors invalidated acceptance of version ${expectedVersion}.`);
+      this.event(id, 'acceptance_invalidated', `New review errors invalidated acceptance of version ${expectedVersion}.`, attribution);
     }
-    this.event(id, 'reviewed', `${analysis.provider === 'local' ? 'Local checks' : 'AI review'} completed for version ${expectedVersion}: ${analysis.findings.length} findings.`, analysis.provider === 'local' ? 'Local checks' : 'AI reviewer'); return review;
+    this.event(id, 'reviewed', `${analysis.provider === 'local' ? 'Local checks' : 'AI review'} completed for version ${expectedVersion}: ${analysis.findings.length} findings.`, attribution); return review;
   }
   detail(id: string): RevisionDetail {
     const revision = this.get<Revision>('revision', id);

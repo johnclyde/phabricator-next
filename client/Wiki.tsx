@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, GitCompareArrows, History, Pencil, RotateCcw, WifiOff } from 'lucide-react';
 import { diffLines, diffWordsWithSpace } from 'diff';
 import type { WikiDetail, WikiDocument, WikiHistory, WikiVersion } from '../shared/types';
-import { isNetworkError, readStored, request, writeStored, type MutationMethod } from './offline';
+import { isNetworkError, type MutationMethod } from './offline';
+import { useWorkspace } from './SessionGate';
 
 type WikiMutation = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
 type WikiTab = 'document' | 'compare' | 'history';
@@ -17,6 +18,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
   mutate: WikiMutation;
   edit: (document: WikiDocument) => void;
 }) {
+  const { readStored, writeStored, request, durable, assertActive } = useWorkspace();
   const [detail, setDetail] = useState<WikiDetail | null>(() => readStored(`wiki:${id}`, null));
   const [tab, setTab] = useState<WikiTab>('document');
   const [selected, setSelected] = useState<number | null>(null);
@@ -55,7 +57,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
       if (generation !== loadGeneration.current) return null;
       if (isNetworkError(failure)) {
         setSnapshot(true);
-        if (!readStored(`wiki:${id}`, null)) setError('This document has not been saved on this device. Reconnect to open its history.');
+        if (!readStored(`wiki:${id}`, null)) setError(durable ? 'This document has not been saved on this device. Reconnect to open its history.' : 'This document has not been loaded in this session. Reconnect to open its history.');
       } else setError(failure instanceof Error ? failure.message : 'Could not load this document.');
       return null;
     } finally { if (generation === loadGeneration.current) setLoading(false); }
@@ -79,7 +81,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
         saveVersion(version); return version;
       } catch (failure) {
         setVersionErrors(current => ({ ...current, [number]: isNetworkError(failure)
-          ? `Version ${number} has not been saved on this device. Reconnect to read it.`
+          ? durable ? `Version ${number} has not been saved on this device. Reconnect to read it.` : `Version ${number} has not been loaded in this session. Reconnect to read it.`
           : failure instanceof Error ? failure.message : `Could not load version ${number}.` }));
         return null;
       } finally { inFlight.current.delete(number); }
@@ -131,7 +133,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
     setRestoring(true); setError('');
     try {
       await mutate<WikiDocument>(`/api/documents/${id}/restore`, 'POST', { version: version.number, expectedVersion: detail.document.version }, `Version ${version.number} restored as a new document version`, false);
-      setSelected(null); setTab('document'); await load();
+      assertActive(); setSelected(null); setTab('document'); await load();
     } catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not restore this version.'); }
     finally { setRestoring(false); }
   };
@@ -142,7 +144,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
   return <div className="wiki-page">
     <a className="back-link" href="#wiki"><ArrowLeft size={14}/>All documents</a>
     <div className="page-heading wiki-page-heading"><div><h1><span className="object-id">{id}</span> {detail.document.title}</h1><p>{detail.document.slug} · Current version {detail.document.version}</p></div><button className="button primary" disabled={!online || snapshot || loading} onClick={() => edit(detail.document)}><Pencil size={15}/>Edit Document</button></div>
-    {snapshot && <div className="banner warning"><WifiOff size={16}/><span>Saved document snapshot. Only versions opened on this device are available offline. Reconnect before editing or restoring.</span></div>}
+    {snapshot && <div className="banner warning"><WifiOff size={16}/><span>{durable ? 'Saved document snapshot. Only versions opened on this device are available offline. Reconnect before editing or restoring.' : 'Connection interrupted. Loaded versions are kept only in this session. Reconnect before editing or restoring.'}</span></div>}
     {storageWarning && <div className="banner warning" role="status">{storageWarning}</div>}
     {error && <div className="banner error" role="alert"><span>{error}</span><button onClick={() => void load()} disabled={loading}>Reload document</button></div>}
     {first > 1 && <div className="info-strip wiki-history-gap">Retained history starts at version {first}. Earlier versions were not stored by the previous application and cannot be recovered here.</div>}

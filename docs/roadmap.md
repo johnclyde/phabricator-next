@@ -8,13 +8,14 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | --- | --- | --- |
 | F001 | Download historical sources and inventory all applications | Done; exact commits and reproduction script recorded |
 | F002 | Strict TypeScript browser/API/CLI foundation | Implemented; one process plus browser |
-| F003 | SQLite transactions, version snapshots, comments and evidence | Implemented; local single-user only |
+| F003 | SQLite transactions, version snapshots, comments and evidence | Implemented; local mode and attributed authenticated writes |
 | F004 | Tasks, projects, wiki, repository registry, activity | Partial legacy parity; no hosted repositories or object ACLs |
 | F005 | Paper and prose drafts with source/word comparisons | Implemented first slice; no PDF or DOCX engine |
 | F006 | Offline checks, drafts, snapshot reads and mutation outbox | Implemented first slice; conflicts require attention |
 | F007 | Hosted and local model review adapters | Implemented; credentials/runtime required; live provider evaluation pending |
 | F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent; direct D/P/L/W object navigation supported |
-| F009 | Wiki history and comparisons (WIKI-01 local slice) | Implemented immutable content versions, summaries, paging, arbitrary version comparison and restore-as-new; legacy migration preserves only known content; authenticated authorship and WIKI-02–04 remain gaps |
+| F009 | Wiki history and comparisons (WIKI-01 local slice) | Implemented immutable content versions, summaries, paging, arbitrary version comparison and restore-as-new; legacy migration preserves only known content; new authenticated writes retain principal/credential attribution; WIKI-02–04 remain gaps |
+| F010 | Accounts and request authority (AUTH-01/02 slice) | Password sessions, terminal provisioning/reset/disable, scoped revocable tokens, account attribution and principal-scoped retries implemented for a shared workspace; policies, invitations, MFA and remote hosting remain open |
 
 ## Next: useful document iteration
 
@@ -38,8 +39,8 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | O204 | Authenticated mobile deployment | Real phone access over TLS with sessions/tokens, private drafts and installable app testing on iOS/Android |
 | O205 | Cross-device synchronization | Multiple devices retain drafts and detect conflicts; no silent last-write-wins for manuscript revisions |
 | O206 | Local model lifecycle | Model availability/context checks, cancellation, resource budgets, trusted local-only configuration and evaluations |
-| O207 | Configurable path-prefix hosting | Implemented for local mode; APP_BASE_PATH covers browser/API/CLI, assets, canonical redirects, manifest and service-worker scope; root and mounted browser tests cover desktop/mobile and offline reload; network hosting still requires O204/P301 |
-| O208 | Account-aware offline storage | Mount-specific caches/drafts/outbox/locks implemented without discarding root data; workspace/principal isolation, logout/account switching and retention/export policy remain planned |
+| O207 | Configurable path-prefix hosting | Implemented for local and password modes; APP_BASE_PATH covers browser/API/CLI, assets, canonical redirects, manifest and service-worker scope; root and mounted browser tests cover desktop/mobile and offline reload; network hosting still requires O204/P301 |
+| O208 | Account-aware offline storage | Local mount caches retained; password mode uses verified-session memory only, export-before-signout, request cancellation and context validation across tabs. Durable authenticated offline storage and trusted-device retention remain planned |
 | O209 | Portable release and hosting contract | Planned; document validated origin/base-path/proxy configuration, persistent data and health interface; reproduce a pinned release with independent site configuration and no operator-specific files or credentials in this repository |
 
 For hosted access, complete the authentication and object-policy requirements in O204/P301 alongside O207–O209 before exposing a workspace. These requirements are reusable product work. Site-specific infrastructure and rollout plans remain in a separate repository; see [ADR 006](architecture.md#adr-006-portable-application-separate-site-operations).

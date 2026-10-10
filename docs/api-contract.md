@@ -22,10 +22,20 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 - `POST /api/revisions/:id/reviews` ReviewInput → ReviewRun; hosted review explicit; errors never fall back to simulated AI. Reject stale input or revision changes during review.
 - `GET /api/revisions/:id/export?version=N` → JSON snapshot `{revision,version}` (paper .tex downloaded from version.files in UI/CLI)
 
-Local single-user mode, loopback bind only; strict origin/host checks on server; no authentication yet, no execution of source or TeX. Include `Idempotency-Key` on client queued POST/PATCH/PUT; server persists successful mutation responses and rejects reuse for different bodies. This permits offline outbox replay without duplicates. All writes and activity log events transactional. Client offline outbox can support tasks/documents/comments/versions; don't queue hosted reviews or acceptance.
+Both local and password modes bind to loopback with strict origin/host checks; no source or TeX execution. Password mode requires account membership for all content APIs; every member currently shares the workspace. See [authentication](authentication.md) for the credential and offline contracts. Include `Idempotency-Key` on client queued POST/PATCH/PUT; server persists successful mutation responses and rejects reuse for different bodies. This permits offline outbox replay without duplicates. All writes and activity log events transactional. Client offline outbox can support tasks/documents/comments/versions; don't queue hosted reviews or acceptance.
 
 `shared/review.ts` supplies `analyzeLocally(kind, files): ReviewAnalysis`; `server/ai.ts` supplies `analyzeWithAI(kind, files, provider?: 'openai' | 'ollama'): Promise<ReviewAnalysis>` and `aiConfiguration()`. Local review has real deterministic checks and is labelled local, not AI. Default fixtures are explicit demo content, seeded only for fresh DB unless disabled.
 
 RevisionKind supports code, paper and document (general prose/legal draft). Local model review uses provider `ollama`, is explicit and requires OLLAMA_MODEL; no model downloads or implicit remote fallback.
 
-Schema 2 migrates each pre-history wiki document into one `legacy` snapshot at its actual current version, with unknown author (`null`) and its existing last-edit timestamp. Earlier unavailable versions are not synthesized. New writes record the local actor; authenticated authorship remains future work. Read/compare can use individually cached wiki versions offline, but restoring requires a live current document.
+Schema 2 migrates each pre-history wiki document into one `legacy` snapshot at its actual current version, with unknown author (`null`) and its existing last-edit timestamp. Earlier unavailable versions are not synthesized. New writes record an `attribution` containing principal ID, display name, credential ID and request ID; legacy records are not backfilled with fabricated verified authorship. Read/compare can use individually cached wiki versions offline, but restoring requires a live current document.
+
+## Authentication endpoints
+
+- `GET /api/session` → `SessionState` (mode, workspace identity, optional account, session context, CSRF token, expiry). Anonymous password requests receive a pre-login challenge cookie/token; no content is returned.
+- `POST /api/login` `{username,password}` → `SessionState`, after exact-origin and pre-login `X-CSRF-Token` checks; rotates the session cookie.
+- `POST /api/logout` `{}` → anonymous `SessionState`; revokes the authenticated browser session and clears its cookie.
+
+All protected cookie requests, including GETs, require `X-Session-Context`; mutations also require `X-CSRF-Token` and an exact matching Origin. CLI requests use `Authorization: Bearer …` with independent read/write/review scopes. Authentication and scopes are evaluated before any idempotency replay. Authenticated replay keys include workspace and principal; asynchronous reviews revalidate the credential before committing. Session and token secrets are never content-API fields. Auth responses are no-store.
+
+Schema 3 marks activation of password mode. The durable authentication latch prevents a local-mode downgrade; previous schema-2 binaries refuse the newer database. Account/session/token metadata is persisted separately from immutable document records.

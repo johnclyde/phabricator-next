@@ -22,6 +22,7 @@
     "test": "node --import tsx --test tests/*.test.ts server/*.test.ts",
     "check": "tsc --noEmit",
     "arc": "tsx cli/index.ts",
+    "accounts": "node --env-file-if-exists=.env --import tsx scripts/accounts.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

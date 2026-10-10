@@ -5,6 +5,9 @@ import { runInNewContext } from 'node:vm';
 import { parseCommand } from '../client/voice.ts';
 import { canQueue, RequestError, isNetworkError } from '../client/offline.ts';
 import { applicationBase, applicationPath, storageKey } from '../client/mount.ts';
+import { activateSession, lockSession } from '../client/session.ts';
+
+const localSession = () => activateSession({ mode: 'local', workspaceId: 'test-workspace', account: null, sessionContext: null, csrfToken: null, expiresAt: null });
 
 test('voice commands navigate familiar application names and research drafts', () => {
   assert.deepEqual(parseCommand('Open Phriction.'), { type: 'navigate', view: 'wiki' });
@@ -46,6 +49,7 @@ test('outbox removal reads the latest stored queue rather than a stale tab snaps
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => memory.set(key, value) } });
   try {
+    localSession();
     const first = { id: 'one', path: '/api/tasks', method: 'POST' as const, body: { title: 'First' }, label: 'First task', createdAt: '2026-10-09' };
     const second = { ...first, id: 'two', body: { title: 'Second' }, label: 'Second task' };
     writeStored('outbox', [first]);
@@ -54,7 +58,7 @@ test('outbox removal reads the latest stored queue rather than a stale tab snaps
     const result = await changeOutbox(current => current.filter(item => item.id !== staleTab[0].id));
     assert.deepEqual(result.map(item => item.id), ['two']);
     assert.deepEqual(readStored<typeof first[]>('outbox', []).map(item => item.id), ['two']);
-  } finally { if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else Reflect.deleteProperty(globalThis, 'localStorage'); }
+  } finally { lockSession(); if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else Reflect.deleteProperty(globalThis, 'localStorage'); }
 });
 
 test('mounted browser requests and drafts stay with their installation while root drafts remain readable', async () => {
@@ -71,6 +75,7 @@ test('mounted browser requests and drafts stay with their installation while roo
   const originals = Object.fromEntries(Object.keys(replacements).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(replacements)) Object.defineProperty(globalThis, key, { configurable: true, value });
   try {
+    localSession();
     assert.deepEqual(readStored('draft:task', null), { title: 'Existing root draft' });
     assert.equal(applicationPath('/api/state'), '/api/state');
     base = '/workspace';
@@ -94,6 +99,7 @@ test('mounted browser requests and drafts stay with their installation while roo
     assert.deepEqual(readStored('draft:task', null), { title: 'Existing root draft' });
     assert.deepEqual(readStored('outbox', []), []);
   } finally {
+    lockSession();
     for (const [key, descriptor] of Object.entries(originals)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
@@ -131,4 +137,20 @@ test('service worker caches only its own shell assets and retires only its own c
     handlers.fetch({ request: { url: `https://example.test${path}`, method: 'GET', mode: 'navigate' }, respondWith: () => { intercepted = true; } });
     assert.equal(intercepted, false, path);
   }
+});
+
+test('observing password mode invalidates a prior offline-local grant even when storage is full', async () => {
+  const { rememberMode, rememberedLocalSession } = await import('../client/session.ts');
+  const memory = new Map([[storageKey('verified-mode'), JSON.stringify({ mode: 'local', workspaceId: 'existing' })]]);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => memory.get(key) ?? null,
+    removeItem: (key: string) => memory.delete(key),
+    setItem: () => { throw new DOMException('Storage full', 'QuotaExceededError'); },
+  } });
+  try {
+    assert.equal(rememberedLocalSession()?.workspaceId, 'existing');
+    rememberMode({ mode: 'password', workspaceId: 'existing', account: null, sessionContext: null, csrfToken: 'challenge', expiresAt: null });
+    assert.equal(rememberedLocalSession(), null);
+  } finally { if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else Reflect.deleteProperty(globalThis, 'localStorage'); }
 });

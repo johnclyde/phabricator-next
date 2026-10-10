@@ -5,7 +5,7 @@
 
 A working, local-first foundation for a modern Phabricator. The familiar interface is intentional. The central new workflow is **iterating on papers, arguments, and legal drafts**: inspect meaningful changes, discuss a precise version, and keep review evidence attached to the content it actually examined. Code review remains part of the historical parity target.
 
-This is a new implementation in **strict TypeScript**, with React, a Node.js server, SQLite, and an initial `arc` CLI. It is an early single-user application, **not full Phabricator parity**. The public source is licensed under **Apache 2.0**. The historical Phabricator, Arcanist, and libphutil sources can be downloaded separately for research; they are not runtime dependencies and their PHP is not executed.
+This is a new implementation in **strict TypeScript**, with React, a Node.js server, SQLite, and an initial `arc` CLI. It is an early application with local and password-authenticated shared workspaces, **not full Phabricator parity**. The public source is licensed under **Apache 2.0**. The historical Phabricator, Arcanist, and libphutil sources can be downloaded separately for research; they are not runtime dependencies and their PHP is not executed.
 
 ## Run
 
@@ -28,11 +28,11 @@ APP_BASE_PATH=/workspace/ npm run build
 APP_BASE_PATH=/workspace/ npm start
 ```
 
-Then open `http://127.0.0.1:4310/workspace/`. Assets, API calls, CLI server URLs, installed-app links and offline caches honor the prefix. A mismatched build and server configuration produces an explicit error. Browser drafts/outboxes are separated by mount, preserving existing root-installation data. This is routing support; it does not add authentication or isolate untrusted applications sharing an origin. Operator-specific site configuration belongs outside this repository.
+Then open `http://127.0.0.1:4310/workspace/`. Assets, API calls, CLI server URLs, installed-app links and offline caches honor the prefix. A mismatched build and server configuration produces an explicit error. Browser drafts/outboxes are separated by mount, preserving existing root-installation data. A path prefix does not isolate untrusted applications sharing an origin. Operator-specific site configuration belongs outside this repository.
 
 The first launch creates `.data/phabricator.sqlite` with clearly labeled sample work: a code revision, a LaTeX paper, and a fictional prose motion with two versions. Set `SEED_DEMO=false` before first launch for an empty workspace. `DATABASE_PATH` selects another database. Restarting preserves your work. To back up a database, stop the app and copy the database together with any SQLite WAL/SHM sidecars; do not delete `.data` to update the application.
 
-The server intentionally binds to loopback. This is a responsive mobile interface, but authenticated access from a physical phone or other computer is a future deployment milestone. Do not expose this prototype through a public proxy: authentication, object policies and multi-user isolation are not implemented yet.
+The server intentionally binds to loopback. Password sign-in is available with `APP_AUTH_MODE=password` after terminal account provisioning; see [workspace authentication](docs/authentication.md). Every enabled account currently shares the entire workspace. Remote phone access, TLS/trusted-proxy hosting and object/Space permissions remain future milestones; this is not yet a public-server deployment configuration.
 
 ## What works
 
@@ -41,9 +41,10 @@ The server intentionally binds to loopback. This is a responsive mobile interfac
 - Tasks, projects, repository registration, filtering, and a shared activity feed, backed by SQLite transactions. Repository registration stores metadata; it does not yet host or browse Git. Wiki documents now keep immutable content versions, edit summaries, paginated history, word/line comparisons, and restore-as-new edits. Existing databases retain their known latest snapshot with explicit legacy history gaps; missing older versions are never fabricated. Upstream wiki drafts, publication pointers, hierarchy moves and policies remain planned.
 - Deterministic checks that run without internet: LaTeX labels/citations across supplied `.tex`/`.bib` files, drafting placeholders, conflict markers and a few source checks. These are explicitly labeled **local checks**, not AI or verification of scientific/legal claims.
 - Explicit AI review adapters for hosted OpenAI and an installed local Ollama model, with source-anchor validation and no silent fallback.
-- Responsive navigation, touch controls, cached visited revisions, persistent local drafts, and a retryable offline outbox. Acceptance and AI jobs are never queued as ordinary offline edits.
+- Responsive navigation and touch controls. Local mode has cached visited revisions, persistent drafts and a retryable offline outbox. Password mode verifies identity before opening content and keeps drafts only in the current tab, with export before sign-out. Acceptance and AI jobs are never queued as ordinary offline edits.
 - Voice/typed commands for navigation, search, task drafting and summaries, with optional spoken responses. Direct object navigation accepts commands such as “open W1”, “open wiki page 1”, and “open paper 2”. Actual recognition depends on browser support and permission. The browser may use an external speech service; offline speech recognition is **not** implemented.
-- An initial CLI for offline checks, explicit-file snapshot submission, review and export.
+- Password accounts, expiring browser sessions, CSRF protection, terminal account management and revocable scoped CLI tokens. New writes retain account and credential attribution. Object-level permissions remain planned.
+- An initial CLI for offline checks, explicit-file snapshot submission, review and export; authenticated workspaces use `PHABRICATOR_TOKEN`.
 
 No TeX, uploaded code, or document macros are executed. Paper iteration currently means source/structure review, comparison and source export; reproducible sandboxed PDF builds, SyncTeX and DOCX round-tripping are planned.
 
@@ -94,6 +95,7 @@ For historical feature research, optionally run `sh scripts/fetch-upstream.sh`. 
 - [Implementation roadmap and internal tracker](docs/roadmap.md)
 - [Latest upstream parity inventory, with historical carry-forward features](docs/parity.md)
 - [Upstream provenance, exact commits, licenses, and visual reference](docs/upstream.md)
+- [Workspace authentication and operator account tools](docs/authentication.md)
 - [API contract](docs/api-contract.md)
 
 Work is tracked here and in the application's own tracker; GitHub Issues are disabled. See [contribution guidance](CONTRIBUTING.md) for sending changes. “Phabricator Next” is a working name, with no claim of upstream affiliation.

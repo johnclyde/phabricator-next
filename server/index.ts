@@ -5,8 +5,10 @@ import { normalizeBasePath } from '../shared/mount.ts';
 const port = Number(process.env.PORT ?? 4310);
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer between 1 and 65535.');
 const basePath = normalizeBasePath(process.env.APP_BASE_PATH ?? '/');
-const app = createApp({ port, basePath, databasePath: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite'), seed: process.env.SEED_DEMO !== 'false' && process.env.SEED_DEMO !== '0' });
-app.server.listen(port, '127.0.0.1', () => console.log(`Phabricator Next is running at http://127.0.0.1:${port}${basePath} (local single-user mode).`));
+const authMode = process.env.APP_AUTH_MODE ?? 'local';
+if (authMode !== 'local' && authMode !== 'password') throw new Error('APP_AUTH_MODE must be local or password.');
+const app = createApp({ port, basePath, authMode, databasePath: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite'), seed: process.env.SEED_DEMO !== 'false' && process.env.SEED_DEMO !== '0' });
+app.server.listen(port, '127.0.0.1', () => console.log(`Phabricator Next is running at http://127.0.0.1:${port}${basePath} (${authMode === 'local' ? 'local single-user' : 'password-authenticated shared workspace'} mode; loopback only).`));
 let stopping = false;
 const stop = (): void => {
   if (stopping) return;

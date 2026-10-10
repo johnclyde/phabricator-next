@@ -23,6 +23,8 @@ of text files as a complete snapshot; omitted files are removed in that version.
 export writes a JSON snapshot to stdout. --server defaults to
 http://127.0.0.1:4310 (or PHABRICATOR_URL); include any application path prefix.
 Hosted review is always explicit.
+Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
+variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
 `;
 
@@ -46,9 +48,12 @@ async function main() {
   const basePath = normalizeBasePath(rawPath || '/');
   server.pathname = basePath;
   const request = async <T>(path: string, method = 'GET', body?: unknown): Promise<T> => {
+    const token = process.env.PHABRICATOR_TOKEN;
+    if (token && (!/^[A-Za-z0-9._-]{1,256}$/.test(token))) throw new Error('PHABRICATOR_TOKEN has an invalid format.');
+    if (token && server.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(server.hostname)) throw new Error('API tokens require HTTPS except for a loopback server.');
     const response = await fetch(new URL(mountPath(path, basePath), server), {
       method, signal: AbortSignal.timeout(135_000), redirect: 'error',
-      headers: { 'Content-Type': 'application/json', ...(method === 'GET' ? {} : { 'Idempotency-Key': randomUUID() }) },
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(method === 'GET' ? {} : { 'Idempotency-Key': randomUUID() }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const value = await response.json() as T & { error?: string };

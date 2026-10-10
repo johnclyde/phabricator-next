@@ -1,10 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { analyzeLocally } from '../shared/review.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
-import type { AppState, ReviewAnalysis, RevisionKind, SourceFile } from '../shared/types.ts';
+import type { ActorAttribution, AppState, ReviewAnalysis, RevisionKind, SourceFile } from '../shared/types.ts';
+import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
+import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
 import { createStore, type MutationResponse, type Store } from './store.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
@@ -18,10 +20,11 @@ export interface AppOptions {
   port?: number;
   distPath?: string;
   basePath?: string;
+  authMode?: AuthMode;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
-export interface App { server: Server; store: Store; close: () => Promise<void> }
+export interface App { server: Server; store: Store; auth: Auth; close: () => Promise<void> }
 
 function security(req: IncomingMessage, res: ServerResponse, configuredPort: number): void {
   if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) throw new HttpError(403, 'Only loopback clients are allowed.');
@@ -35,7 +38,7 @@ function security(req: IncomingMessage, res: ServerResponse, configuredPort: num
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Idempotency-Key');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Idempotency-Key, X-Session-Context, X-CSRF-Token, Authorization');
   }
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -104,12 +107,26 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
 export function createApp(options: AppOptions = {}): App {
   const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath });
+  let auth: Auth;
+  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath }); }
+  catch (error) { if (!options.store) store.close(); throw error; }
   if (options.seed !== false) seedDemo(store);
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
 
-  async function mutate(method: string, path: string, input: unknown, key: string | undefined): Promise<MutationResponse> {
+  async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext): Promise<MutationResponse> {
+    const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
+    let scope: AuthScope = 'write';
+    if (method === 'POST' && reviewMatch) {
+      const data = object(input, ['provider', 'expectedVersion']);
+      scope = choice(data.provider, 'provider', ['local', 'openai', 'ollama']) === 'openai' ? 'review:hosted' : 'review:local';
+    }
+    auth.revalidate(context, scope);
+    const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+    // Preserve legacy local retries, while every authenticated principal has a
+    // separate durable replay namespace. Authorization always precedes replay.
+    const key = rawKey && (context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`);
     const fingerprint = createHash('sha256').update(JSON.stringify([method, path, input])).digest('hex');
     if (key) {
       const replay = store.replay(key, fingerprint);
@@ -117,11 +134,12 @@ export function createApp(options: AppOptions = {}): App {
       const active = pending.get(key);
       if (active) {
         if (active.fingerprint !== fingerprint) throw new HttpError(409, 'This idempotency key is being used for a different request.');
-        return active.promise;
+        const response = await active.promise;
+        auth.revalidate(context, scope);
+        return response;
       }
     }
     const execute = async (): Promise<MutationResponse> => {
-      const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
       if (method === 'POST' && reviewMatch) {
         const data = object(input, ['provider', 'expectedVersion']);
         const provider = choice(data.provider, 'provider', ['local', 'openai', 'ollama']);
@@ -137,26 +155,27 @@ export function createApp(options: AppOptions = {}): App {
           console.error('Review provider failed:', error instanceof Error ? error.message : 'unknown provider error');
           throw new HttpError(502, 'The review provider failed. No review evidence was saved.');
         }
-        return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis) }));
+        auth.revalidate(context, scope);
+        return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis, attribution) }), () => auth.revalidate(context, scope));
       }
       return store.mutate(key, fingerprint, () => {
-        if (method === 'POST' && path === '/api/projects') return { status: 201, body: store.createProject(input) };
-        if (method === 'POST' && path === '/api/repositories') return { status: 201, body: store.createRepository(input) };
-        if (method === 'POST' && path === '/api/tasks') return { status: 201, body: store.createTask(input) };
-        if (method === 'POST' && path === '/api/documents') return { status: 201, body: store.createDocument(input) };
-        if (method === 'POST' && path === '/api/revisions') return { status: 201, body: store.createRevision(input) };
+        if (method === 'POST' && path === '/api/projects') return { status: 201, body: store.createProject(input, attribution) };
+        if (method === 'POST' && path === '/api/repositories') return { status: 201, body: store.createRepository(input, attribution) };
+        if (method === 'POST' && path === '/api/tasks') return { status: 201, body: store.createTask(input, attribution) };
+        if (method === 'POST' && path === '/api/documents') return { status: 201, body: store.createDocument(input, attribution) };
+        if (method === 'POST' && path === '/api/revisions') return { status: 201, body: store.createRevision(input, attribution) };
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
-        if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input) };
+        if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
         const document = /^\/api\/documents\/(W\d+)$/.exec(path);
-        if (method === 'PUT' && document) return { status: 200, body: store.updateDocument(document[1]!, input) };
+        if (method === 'PUT' && document) return { status: 200, body: store.updateDocument(document[1]!, input, attribution) };
         const restore = /^\/api\/documents\/(W\d+)\/restore$/.exec(path);
-        if (method === 'POST' && restore) return { status: 200, body: store.restoreDocument(restore[1]!, input) };
+        if (method === 'POST' && restore) return { status: 200, body: store.restoreDocument(restore[1]!, input, attribution) };
         const revision = /^\/api\/revisions\/([DPL]\d+)(?:\/(versions|comments))?$/.exec(path);
-        if (revision && method === 'PATCH' && !revision[2]) return { status: 200, body: store.updateRevision(revision[1]!, input) };
-        if (revision && method === 'POST' && revision[2] === 'versions') return { status: 201, body: store.createVersion(revision[1]!, input) };
-        if (revision && method === 'POST' && revision[2] === 'comments') return { status: 201, body: store.createComment(revision[1]!, input) };
+        if (revision && method === 'PATCH' && !revision[2]) return { status: 200, body: store.updateRevision(revision[1]!, input, attribution) };
+        if (revision && method === 'POST' && revision[2] === 'versions') return { status: 201, body: store.createVersion(revision[1]!, input, attribution) };
+        if (revision && method === 'POST' && revision[2] === 'comments') return { status: 201, body: store.createComment(revision[1]!, input, attribution) };
         throw new HttpError(404, 'Route not found.');
-      });
+      }, () => auth.revalidate(context, scope));
     };
     const promise = execute();
     if (key) pending.set(key, { fingerprint, promise });
@@ -182,9 +201,31 @@ export function createApp(options: AppOptions = {}): App {
       const path = `/${pathname.slice(basePath.length)}`;
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
       if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath); return; }
+      if (req.method === 'GET' && path === '/api/health') { send(res, 200, { ok: true }); return; }
+      if (req.method === 'GET' && path === '/api/session') {
+        const result = auth.session(req);
+        if (result.cookie) res.setHeader('Set-Cookie', result.cookie);
+        send(res, 200, result.session); return;
+      }
+      if (req.method === 'POST' && path === '/api/login') {
+        if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
+        const input = object(await body(req), ['username', 'password']);
+        const result = await auth.login(req, input.username, input.password);
+        res.setHeader('Set-Cookie', result.cookie);
+        send(res, 200, result.session); return;
+      }
+      const context = auth.authenticate(req, req.method === 'GET' || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      if (req.method === 'POST' && path === '/api/logout') {
+        if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
+        object(await body(req), []);
+        auth.revalidate(context);
+        const result = auth.logout(context);
+        const bootstrap = auth.session(req);
+        res.setHeader('Set-Cookie', [result.cookie, ...(bootstrap.cookie ? [bootstrap.cookie] : [])]);
+        send(res, 200, bootstrap.session); return;
+      }
       if (req.method === 'GET') {
-        if (path === '/api/health') { send(res, 200, { ok: true }); return; }
-        if (path === '/api/state') { send(res, 200, store.state(ai())); return; }
+        if (path === '/api/state') { send(res, 200, store.state(ai(), auth.mode === 'local' ? 'local-single-user' : 'authenticated-workspace')); return; }
         const document = /^\/api\/documents\/(W\d+)(?:\/(history)|\/versions\/([^/]+))?$/.exec(path);
         if (document) {
           const positiveParameter = (value: string, name: string): number => {
@@ -222,7 +263,7 @@ export function createApp(options: AppOptions = {}): App {
       const key = req.headers['idempotency-key'];
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
-      const result = await mutate(req.method!, path, await body(req), key);
+      const result = await mutate(req.method!, path, await body(req), key, context);
       send(res, result.status, result.body);
     })().catch((error: unknown) => {
       if (res.headersSent) { res.destroy(); return; }
@@ -232,7 +273,7 @@ export function createApp(options: AppOptions = {}): App {
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  return { server, store, close: async () => {
+  return { server, store, auth, close: async () => {
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
     if (!options.store) store.close();
   } };

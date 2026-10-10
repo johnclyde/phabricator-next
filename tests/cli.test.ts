@@ -6,13 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
+import { createServer } from 'node:http';
 import { createApp } from '../server/app.ts';
+import { createAuth } from '../server/auth.ts';
+import { createStore } from '../server/store.ts';
 
 const cli = fileURLToPath(new URL('../cli/index.ts', import.meta.url));
 const loader = import.meta.resolve('tsx');
-function runCommand(cwd: string, args: string[]) {
+function runCommand(cwd: string, args: string[], token?: string) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', loader, cli, ...args], { cwd, env: { ...process.env, PHABRICATOR_URL: undefined }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--import', loader, cli, ...args], { cwd, env: { ...process.env, PHABRICATOR_URL: undefined, PHABRICATOR_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
@@ -117,4 +120,43 @@ test('CLI rejects ambiguous server URLs before sending requests', async () => {
     const credentials = await runCommand(root, ['list', '--server', 'http://user:private@127.0.0.1:1/workspace']);
     assert.equal(credentials.code, 1); assert.match(credentials.stderr, /without embedded credentials/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('CLI authenticates with scoped environment tokens without following redirects or exposing credentials', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'phab-cli-auth-'));
+  const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+  const account = await provision.createAccount({ username: 'cli-user', displayName: 'CLI user', password: 'test-only-cli-long-password' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/workspace/' });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
+  const read = app.auth.createToken(account.id, { name: 'CLI read fixture', scopes: ['read'] });
+  const write = app.auth.createToken(account.id, { name: 'CLI write fixture', scopes: ['read', 'write', 'review:local'] });
+  let redirectHits = 0;
+  const redirect = createServer((_req, res) => { redirectHits++; res.writeHead(302, { Location: `${server}api/state` }); res.end(); });
+  await new Promise<void>(resolve => redirect.listen(0, '127.0.0.1', resolve));
+  try {
+    await writeFile(join(root, 'draft.md'), '# Private draft\nAn explicit source snapshot.');
+    const denied = await runCommand(root, ['diff', '--title', 'Denied', '--server', server, 'draft.md'], read.token);
+    assert.equal(denied.code, 1);
+    const created = await runCommand(root, ['diff', '--title', 'Authenticated CLI draft', '--server', server, 'draft.md'], write.token);
+    assert.equal(created.code, 0, created.stderr);
+    const shown = await runCommand(root, ['show', 'D1', '--server', server], read.token);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.equal(JSON.parse(shown.stdout).versions[0].attribution.principalId, account.id);
+    app.auth.revokeToken(account.id, read.record.id);
+    const revoked = await runCommand(root, ['list', '--server', server], read.token);
+    assert.equal(revoked.code, 1);
+    const redirected = await runCommand(root, ['list', '--server', `http://127.0.0.1:${(redirect.address() as AddressInfo).port}`], write.token);
+    assert.equal(redirected.code, 1); assert.equal(redirectHits, 1);
+    const insecure = await runCommand(root, ['list', '--server', 'http://tokens-must-not-travel.invalid'], write.token);
+    assert.equal(insecure.code, 1); assert.match(insecure.stderr, /require HTTPS/);
+    for (const result of [denied, created, shown, revoked, redirected, insecure]) {
+      assert.ok(!`${result.stdout}${result.stderr}`.includes(read.token));
+      assert.ok(!`${result.stdout}${result.stderr}`.includes(write.token));
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => redirect.close(error => error ? reject(error) : resolve()));
+    await app.close(); store.close(); await rm(root, { recursive: true, force: true });
+  }
 });
