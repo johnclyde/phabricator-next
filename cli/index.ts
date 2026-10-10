@@ -5,6 +5,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { analyzeLocally } from '../shared/review';
+import { mountPath, normalizeBasePath } from '../shared/mount';
 import type { AppState, RevisionDetail, RevisionKind, SourceFile } from '../shared/types';
 
 const help = `Phabricator Next — arc (initial CLI)
@@ -20,7 +21,8 @@ const help = `Phabricator Next — arc (initial CLI)
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
 export writes a JSON snapshot to stdout. --server defaults to
-http://127.0.0.1:4310 (or PHABRICATOR_URL). Hosted review is always explicit.
+http://127.0.0.1:4310 (or PHABRICATOR_URL); include any application path prefix.
+Hosted review is always explicit.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
 `;
 
@@ -37,9 +39,14 @@ async function main() {
   const [command, ...args] = positionals;
   if (values.help || !command || command === 'help') return console.log(help);
   const server = new URL(values.server!);
-  if (!['http:', 'https:'].includes(server.protocol) || server.username || server.password) throw new Error('Provide an HTTP(S) server URL without embedded credentials.');
+  if (!['http:', 'https:'].includes(server.protocol) || server.username || server.password || values.server!.includes('?') || values.server!.includes('#') || values.server!.includes('\\')) throw new Error('Provide an HTTP(S) server URL without embedded credentials, query parameters, or a fragment.');
+  // Read the unnormalized path so a dot segment cannot silently change mounts.
+  const rawPath = /^[a-z][a-z\d+.-]*:\/\/[^/?#]*([^?#]*)$/i.exec(values.server!)?.[1];
+  if (rawPath === undefined) throw new Error('Provide an absolute HTTP(S) server URL.');
+  const basePath = normalizeBasePath(rawPath || '/');
+  server.pathname = basePath;
   const request = async <T>(path: string, method = 'GET', body?: unknown): Promise<T> => {
-    const response = await fetch(new URL(path, server), {
+    const response = await fetch(new URL(mountPath(path, basePath), server), {
       method, signal: AbortSignal.timeout(135_000), redirect: 'error',
       headers: { 'Content-Type': 'application/json', ...(method === 'GET' ? {} : { 'Idempotency-Key': randomUUID() }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -78,7 +85,7 @@ async function main() {
       detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', kind, files });
     }
     console.log(`${detail.revision.id} · v${detail.revision.currentVersion} · ${detail.revision.title}`);
-    console.log(new URL(`/#${detail.revision.id}`, server).href);
+    console.log(new URL(`${basePath}#${detail.revision.id}`, server).href);
     return;
   }
   if (command === 'list') {

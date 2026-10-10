@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
 async function queueTask(page: Page, title: string) {
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await page.getByRole('button', { name: 'Create Task', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox', { name: 'Title', exact: true }).fill(title);
@@ -10,10 +10,10 @@ async function queueTask(page: Page, title: string) {
 }
 
 test('discarding in another tab retains newer offline edits', async ({ page, context }, info) => {
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   const other = await context.newPage();
-  await other.goto('/#tasks');
+  await other.goto('./#tasks');
   await expect(other.getByRole('heading', { name: 'Maniphest', exact: true })).toBeVisible();
   await context.setOffline(true);
   const first = `Discarded ${info.project.name} ${Date.now()}`;
@@ -29,13 +29,13 @@ test('discarding in another tab retains newer offline edits', async ({ page, con
   await expect(page.locator('.outbox-item pre')).toContainText(second);
   await context.setOffline(false);
   await expect(page.getByText('Everything is synchronized.', { exact: false })).toBeVisible();
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await expect(page.getByText(second, { exact: true })).toHaveCount(1);
   await expect(page.getByText(first, { exact: true })).toHaveCount(0);
 });
 
 test('inline comment draft keeps the original version and location after reload', async ({ page }) => {
-  await page.goto('/#L3');
+  await page.goto('./#L3');
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');
   await page.getByRole('button', { name: 'Source', exact: true }).click();
   await page.getByRole('button', { name: 'Comment on line 7', exact: true }).click();
@@ -50,11 +50,11 @@ test('inline comment draft keeps the original version and location after reload'
 });
 
 test('storage failures keep draft text visible and offer export', async ({ page }) => {
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await page.evaluate(() => {
     const original = Storage.prototype.setItem;
     Storage.prototype.setItem = function(key: string, value: string) {
-      if (key.startsWith('phabricator-next:draft:')) throw new DOMException('Test quota exhausted', 'QuotaExceededError');
+      if (key.startsWith('phabricator-next:') && key.includes(':draft:')) throw new DOMException('Test quota exhausted', 'QuotaExceededError');
       return original.call(this, key, value);
     };
   });

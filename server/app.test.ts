@@ -156,6 +156,66 @@ test('static serving contains files and symlinks within the distribution directo
   } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('mounted API and frontend stay inside their configured path and canonicalize the mount', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'phab-mounted-'));
+  const html = '<meta name="application-base" content="/workspace/"><h1>Mounted workspace</h1>';
+  await writeFile(join(directory, 'index.html'), html);
+  await mkdir(join(directory, 'assets'));
+  await writeFile(join(directory, 'assets', 'app.js'), 'console.log("mounted");');
+  const app = await start({ basePath: '/workspace', distPath: directory });
+  const rawStatus = (path: string) => new Promise<number | undefined>((resolveStatus, reject) => {
+    const req = requestHttp(app.base, { path }, res => { res.resume(); res.on('end', () => resolveStatus(res.statusCode)); });
+    req.on('error', reject); req.end();
+  });
+  try {
+    assert.equal((await app.request('/workspace/api/health')).status, 200);
+    const created = await app.request<RevisionDetail>('/workspace/api/revisions', 'POST', revisionInput);
+    assert.equal(created.status, 201);
+    assert.equal((await app.request(`/workspace/api/revisions/${created.body.revision.id}/export?version=1`)).status, 200);
+    assert.equal((await app.request('/workspace/api/state', 'GET', undefined, { Origin: 'https://attacker.example' })).status, 403);
+    for (const path of ['/', '/api/state', '/workspaces/api/state', '/workspace-other', '/workspace/api']) {
+      assert.equal((await fetch(`${app.base}${path}`)).status, 404, path);
+    }
+    assert.equal((await fetch(`${app.base}/api/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"title":"Outside mount"}' })).status, 404);
+    assert.equal((await fetch(`${app.base}/`, { method: 'OPTIONS' })).status, 404);
+    assert.equal((await fetch(`${app.base}/workspace/api/state`, { method: 'OPTIONS' })).status, 204);
+    const page = await fetch(`${app.base}/workspace/differential/D1`);
+    assert.equal(page.status, 200); assert.equal(await page.text(), html);
+    const asset = await fetch(`${app.base}/workspace/assets/app.js`);
+    assert.equal(asset.status, 200); assert.match(asset.headers.get('Cache-Control')!, /immutable/);
+    assert.equal((await fetch(`${app.base}/workspace/missing.js`)).status, 404);
+    for (const method of ['GET', 'HEAD']) {
+      const redirect = await fetch(`${app.base}/workspace?next=%2F%2Fevil.example`, { method, redirect: 'manual' });
+      assert.equal(redirect.status, 308);
+      assert.equal(redirect.headers.get('Location'), '/workspace/?next=%2F%2Fevil.example');
+      assert.equal(await redirect.text(), '');
+    }
+    assert.equal((await fetch(`${app.base}/workspace`, { method: 'POST', redirect: 'manual' })).status, 404);
+    for (const path of ['/workspace/../api/health', '/workspace/%2e%2e/api/health', '/workspace/%2e%2e%2fsecret.txt', '/workspace/%5c..%5csecret.txt', '/workspace/.git/config']) {
+      assert.equal(await rawStatus(path), 404, path);
+    }
+    assert.equal(await rawStatus('/workspace/%zz'), 400);
+    assert.equal((await app.request<AppState>('/workspace/api/state')).body.tasks.length, 0);
+  } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('server reports incompatible frontend mounts instead of serving a broken application', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'phab-mount-build-'));
+  const app = await start({ basePath: '/workspace/', distPath: directory });
+  try {
+    for (const html of ['<h1>Unmarked build</h1>', '<meta name="application-base" content="/"><h1>Root build</h1>']) {
+      await writeFile(join(directory, 'index.html'), html);
+      const response = await app.request('/workspace/');
+      assert.equal(response.status, 503); assert.match(response.body.error, /Rebuild and start with the same APP_BASE_PATH/);
+      assert.equal((await fetch(`${app.base}/workspace/`, { method: 'HEAD' })).status, 503);
+      assert.equal((await app.request('/workspace/api/health')).status, 200);
+    }
+    await writeFile(join(directory, 'index.html'), '<meta name="application-base" content="/workspace/"><h1>Matching build</h1>');
+    assert.equal((await fetch(`${app.base}/workspace/`)).status, 200);
+  } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
+  assert.throws(() => createApp({ databasePath: ':memory:', basePath: '/workspace/../' }), /APP_BASE_PATH/);
+});
+
 test('document revisions and explicitly configured offline AI use the same version discipline', async () => {
   let providerUsed: string | undefined;
   const app = await start({ aiConfiguration: () => ({ configured: false, model: null, localConfigured: true, localModel: 'sample-model' }), analyzeAI: async (_kind, _files, provider) => { providerUsed = provider; return { ...goodAnalysis, provider: 'ollama', model: 'sample-model' }; } });

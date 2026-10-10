@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { analyzeLocally } from '../shared/review.ts';
+import { normalizeBasePath } from '../shared/mount.ts';
 import type { AppState, ReviewAnalysis, RevisionKind, SourceFile } from '../shared/types.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
 import { createStore, type MutationResponse, type Store } from './store.ts';
@@ -16,6 +17,7 @@ export interface AppOptions {
   seed?: boolean;
   port?: number;
   distPath?: string;
+  basePath?: string;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
@@ -63,10 +65,10 @@ function send(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value));
 }
 
-async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: string): Promise<void> {
+async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: string, path: string, basePath: string): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(404, 'Route not found.');
   let pathname: string;
-  try { pathname = decodeURIComponent((req.url ?? '/').split('?')[0]!); }
+  try { pathname = decodeURIComponent(path); }
   catch { throw new HttpError(400, 'Malformed URL.'); }
   if (pathname.includes('\\') || pathname.includes('\0') || pathname.split('/').some(part => part === '..' || part.startsWith('.'))) throw new HttpError(404, 'File not found.');
   let root: string;
@@ -82,15 +84,25 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
   }
   const pathRelative = relative(root, file);
   if (pathRelative.startsWith('..') || isAbsolute(pathRelative)) throw new HttpError(404, 'File not found.');
+  let html: Buffer | undefined;
+  if (extname(file) === '.html') {
+    html = await readFile(file);
+    const marker = html.toString('utf8').match(/<meta\b[^>]*\bname=["']application-base["'][^>]*>/i)?.[0];
+    const builtBasePath = marker?.match(/\bcontent=["']([^"']*)["']/i)?.[1];
+    if ((builtBasePath !== undefined && builtBasePath !== basePath) || (builtBasePath === undefined && basePath !== '/')) {
+      throw new HttpError(503, `Frontend mount does not match APP_BASE_PATH (${basePath}). Rebuild and start with the same APP_BASE_PATH.`);
+    }
+  }
   const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
   res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
   res.setHeader('Cache-Control', pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache');
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
   res.statusCode = 200;
-  if (req.method === 'HEAD') res.end(); else res.end(await readFile(file));
+  if (req.method === 'HEAD') res.end(); else res.end(html ?? await readFile(file));
 }
 
 export function createApp(options: AppOptions = {}): App {
+  const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath });
   if (options.seed !== false) seedDemo(store);
   const ai = options.aiConfiguration ?? aiConfiguration;
@@ -152,10 +164,22 @@ export function createApp(options: AppOptions = {}): App {
   const server = createServer((req, res) => {
     void (async () => {
       security(req, res, options.port ?? 4310);
+      const target = req.url ?? '/';
+      if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\') || target.includes('#')) throw new HttpError(400, 'Malformed URL.');
+      const pathname = target.split('?')[0]!;
+      let decoded: string;
+      try { decoded = decodeURIComponent(pathname); } catch { throw new HttpError(400, 'Malformed URL.'); }
+      // Validate the original path before URL parsing can normalize traversal.
+      if (decoded.includes('\\') || decoded.includes('\0') || decoded.split('/').some(part => part === '.' || part === '..')) throw new HttpError(404, 'Route not found.');
+      const url = new URL(target, 'http://127.0.0.1');
+      if (basePath !== '/' && pathname === basePath.slice(0, -1)) {
+        if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(404, 'Route not found.');
+        res.writeHead(308, { Location: `${basePath}${url.search}`, 'Cache-Control': 'no-store' }); res.end(); return;
+      }
+      if (!pathname.startsWith(basePath)) throw new HttpError(404, 'Route not found.');
+      const path = `/${pathname.slice(basePath.length)}`;
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      const path = url.pathname;
-      if (!path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist')); return; }
+      if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath); return; }
       if (req.method === 'GET') {
         if (path === '/api/health') { send(res, 200, { ok: true }); return; }
         if (path === '/api/state') { send(res, 200, store.state(ai())); return; }

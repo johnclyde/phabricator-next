@@ -1,4 +1,7 @@
 import { defineConfig } from '@playwright/test';
+import { normalizeBasePath, mountPath } from './shared/mount.ts';
+
+const basePath = normalizeBasePath(process.env.APP_BASE_PATH);
 
 export default defineConfig({
   testDir: './tests', testMatch: '**/*.spec.ts',
@@ -6,7 +9,7 @@ export default defineConfig({
   outputDir: '.data/browser-results',
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4311',
+    baseURL: `http://127.0.0.1:4311${basePath}`,
     browserName: 'chromium',
     ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
       ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } }
@@ -19,7 +22,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'node --import tsx scripts/e2e-server.ts',
-    url: 'http://127.0.0.1:4311/api/health', reuseExistingServer: false,
+    url: `http://127.0.0.1:4311${mountPath('/api/health', basePath)}`, reuseExistingServer: false,
     timeout: 20_000,
   },
 });

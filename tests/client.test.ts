@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { parseCommand } from '../client/voice.ts';
 import { canQueue, RequestError, isNetworkError } from '../client/offline.ts';
+import { applicationBase, applicationPath, storageKey } from '../client/mount.ts';
 
 test('voice commands navigate familiar application names and research drafts', () => {
   assert.deepEqual(parseCommand('Open Phriction.'), { type: 'navigate', view: 'wiki' });
@@ -52,4 +55,80 @@ test('outbox removal reads the latest stored queue rather than a stale tab snaps
     assert.deepEqual(result.map(item => item.id), ['two']);
     assert.deepEqual(readStored<typeof first[]>('outbox', []).map(item => item.id), ['two']);
   } finally { if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else Reflect.deleteProperty(globalThis, 'localStorage'); }
+});
+
+test('mounted browser requests and drafts stay with their installation while root drafts remain readable', async () => {
+  const { changeOutbox, writeStored, readStored, removeStored, request } = await import('../client/offline.ts');
+  const memory = new Map([['phabricator-next:draft:task', JSON.stringify({ title: 'Existing root draft' })]]);
+  const requests: string[] = [], locks: string[] = [];
+  let base = '/';
+  const replacements = {
+    document: { querySelector: () => ({ content: base }) },
+    localStorage: { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => memory.set(key, value), removeItem: (key: string) => memory.delete(key) },
+    navigator: { locks: { request: async (name: string, commit: () => unknown) => { locks.push(name); return commit(); } } },
+    fetch: async (path: string) => { requests.push(path); return Response.json({ ok: true }); },
+  };
+  const originals = Object.fromEntries(Object.keys(replacements).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  for (const [key, value] of Object.entries(replacements)) Object.defineProperty(globalThis, key, { configurable: true, value });
+  try {
+    assert.deepEqual(readStored('draft:task', null), { title: 'Existing root draft' });
+    assert.equal(applicationPath('/api/state'), '/api/state');
+    base = '/workspace';
+    assert.equal(applicationBase(), '/workspace/');
+    assert.equal(applicationPath('/icon.svg'), '/workspace/icon.svg');
+    assert.equal(readStored('draft:task', null), null);
+    assert.equal(writeStored('draft:task', { title: 'Mounted draft' }), true);
+    await request('/api/state');
+    const queued = await changeOutbox(() => [{ id: 'mounted', path: '/api/tasks', method: 'POST', body: { title: 'Offline' }, label: 'Task', createdAt: '2026-10-10' }]);
+    assert.equal(queued[0].path, '/api/tasks');
+    assert.deepEqual(locks, [storageKey('outbox-write', '/workspace/')]);
+    assert.deepEqual(requests, ['/workspace/api/state']);
+    base = '/workspace-other/';
+    assert.equal(readStored('draft:task', null), null);
+    assert.deepEqual(readStored('outbox', []), []);
+    base = '/workspace/';
+    assert.deepEqual(readStored('draft:task', null), { title: 'Mounted draft' });
+    removeStored('draft:task');
+    assert.equal(readStored('draft:task', null), null);
+    base = '/';
+    assert.deepEqual(readStored('draft:task', null), { title: 'Existing root draft' });
+    assert.deepEqual(readStored('outbox', []), []);
+  } finally {
+    for (const [key, descriptor] of Object.entries(originals)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
+test('service worker caches only its own shell assets and retires only its own cache versions', async () => {
+  const scope = 'https://example.test/workspace/';
+  const prefix = `phabricator-next-shell:${encodeURIComponent(scope)}:`;
+  const sibling = `phabricator-next-shell:${encodeURIComponent('https://example.test/other/')}:v1`;
+  const handlers: Record<string, (event: { waitUntil?: (promise: Promise<unknown>) => void; request?: { url: string; method: string; mode: string }; respondWith?: (promise: Promise<unknown>) => void }) => void> = {};
+  const added: string[] = [], stored: string[] = [], deleted: string[] = [];
+  const html = '<meta name="application-base" content="/workspace/"><script src="/workspace/assets/app-123.js"></script><link href="/workspace/assets/app-123.css"><script src="/api/source.js"></script><script src="/other/assets/app.js"></script>';
+  const cache = {
+    addAll: async (requests: Request[]) => { added.push(...requests.map(request => request.url)); },
+    put: async (path: string) => { stored.push(path); },
+    match: async () => new Response('cached'),
+  };
+  runInNewContext(readFileSync(new URL('../client/public/sw.js', import.meta.url), 'utf8'), {
+    URL, Request, Set,
+    self: { registration: { scope }, addEventListener: (name: string, handler: typeof handlers[string]) => { handlers[name] = handler; }, skipWaiting: async () => {}, clients: { claim: async () => {} } },
+    caches: { open: async () => cache, keys: async () => [`${prefix}v1`, `${prefix}v2`, sibling, 'phabricator-next-shell-v1', 'another-app'], delete: async (key: string) => { deleted.push(key); } },
+    fetch: async () => new Response(html, { headers: { 'Content-Type': 'text/html' } }),
+  });
+  const pending: Promise<unknown>[] = [];
+  handlers.install({ waitUntil: promise => { pending.push(promise); } });
+  await Promise.all(pending);
+  assert.deepEqual(stored, [scope]);
+  assert.deepEqual(added, [`${scope}icon.svg`, `${scope}manifest.webmanifest`, `${scope}assets/app-123.js`, `${scope}assets/app-123.css`]);
+  handlers.activate({ waitUntil: promise => { pending.push(promise); } });
+  await Promise.all(pending);
+  assert.deepEqual(deleted, [`${prefix}v1`]);
+  for (const path of ['/api/state', '/workspace/api/state', '/workspace/auth/login', '/workspace/assets/private.json', '/other/', '/', '/workspace/?auth=code']) {
+    let intercepted = false;
+    handlers.fetch({ request: { url: `https://example.test${path}`, method: 'GET', mode: 'navigate' }, respondWith: () => { intercepted = true; } });
+    assert.equal(intercepted, false, path);
+  }
 });

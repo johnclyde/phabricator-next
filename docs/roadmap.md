@@ -1,6 +1,6 @@
 # Internal implementation tracker
 
-The product goal is a familiar Phabricator workspace for documents, code and agents. Full 2021 parity is an eventual compatibility target, not the completion criterion for this first slice. [parity.md](parity.md) inventories all upstream applications. No GitHub Issues are used.
+The product goal is a familiar Phabricator workspace for documents, code and agents. Full parity with the latest pinned upstream source is the ongoing completion target, alongside voice, offline work and explicit AI workflows. Capabilities removed after the original 2021 baseline remain historical carry-forward targets. [parity.md](parity.md) inventories all upstream applications and defines completion evidence. No GitHub Issues are used.
 
 ## Foundation delivered in the first slice
 
@@ -37,8 +37,8 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | O204 | Authenticated mobile deployment | Real phone access over TLS with sessions/tokens, private drafts and installable app testing on iOS/Android |
 | O205 | Cross-device synchronization | Multiple devices retain drafts and detect conflicts; no silent last-write-wins for manuscript revisions |
 | O206 | Local model lifecycle | Model availability/context checks, cancellation, resource budgets, trusted local-only configuration and evaluations |
-| O207 | Configurable path-prefix hosting | Planned; root and non-root installs pass browser/API/CLI tests; assets, redirects, manifest and service worker stay within the configured mount and leave sibling routes alone |
-| O208 | Account-aware offline storage | Planned; caches, drafts, outbox and locks distinguish deployments/workspaces/principals; logout and account switching cannot reveal another user's data or replay their writes; unsynced work has an explicit retention/export policy |
+| O207 | Configurable path-prefix hosting | Implemented for local mode; APP_BASE_PATH covers browser/API/CLI, assets, canonical redirects, manifest and service-worker scope; root and mounted browser tests cover desktop/mobile and offline reload; network hosting still requires O204/P301 |
+| O208 | Account-aware offline storage | Mount-specific caches/drafts/outbox/locks implemented without discarding root data; workspace/principal isolation, logout/account switching and retention/export policy remain planned |
 | O209 | Portable release and hosting contract | Planned; document validated origin/base-path/proxy configuration, persistent data and health interface; reproduce a pinned release with independent site configuration and no operator-specific files or credentials in this repository |
 
 For hosted access, complete the authentication and object-policy requirements in O204/P301 alongside O207–O209 before exposing a workspace. These requirements are reusable product work. Site-specific infrastructure and rollout plans remain in a separate repository; see [ADR 006](architecture.md#adr-006-portable-application-separate-site-operations).

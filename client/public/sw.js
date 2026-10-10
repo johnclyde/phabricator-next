@@ -1,25 +1,59 @@
-/* Cache only the static shell. API snapshots are managed explicitly by the client. */
-const CACHE = 'phabricator-next-shell-v1';
+/* Cache only this installation's static shell. API snapshots live in the client. */
+const SCOPE = new URL(self.registration.scope);
+const BASE = SCOPE.pathname;
+const SHELL = SCOPE.href;
+const CACHE_PREFIX = `phabricator-next-shell:${encodeURIComponent(SHELL)}:`;
+const CACHE = `${CACHE_PREFIX}v2`;
+const STATIC = new Set([new URL('icon.svg', SCOPE).href, new URL('manifest.webmanifest', SCOPE).href]);
+
+function isBuiltAsset(url) {
+  return url.origin === SCOPE.origin && url.pathname.startsWith(`${BASE}assets/`) && !url.search &&
+    /^[A-Za-z0-9_.-]+\.(?:js|css)$/.test(url.pathname.slice(`${BASE}assets/`.length));
+}
+
+async function cacheShell(response) {
+  if (!response.ok || !response.headers.get('content-type')?.includes('text/html')) throw new Error('Could not cache app shell');
+  const html = await response.clone().text();
+  const declaredBase = html.match(/<meta\b[^>]*\bname=["']application-base["'][^>]*\bcontent=["']([^"']+)["']/i)?.[1];
+  if (declaredBase !== BASE) throw new Error('App shell mount does not match service worker');
+  const assets = [...html.matchAll(/(?:src|href)="([^\"]+\.(?:js|css))"/g)]
+    .map(match => new URL(match[1], SCOPE)).filter(isBuiltAsset).map(url => url.href);
+  const cache = await caches.open(CACHE);
+  // Save the new shell only after every asset it needs is available offline.
+  await cache.addAll([...STATIC, ...new Set(assets)].map(url => new Request(url, { cache: 'reload' })));
+  await cache.put(SHELL, response);
+}
+
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
-    const cache = await caches.open(CACHE);
-    const response = await fetch('/');
-    if (!response.ok) throw new Error('Could not cache app shell');
-    const html = await response.clone().text();
-    const assets = [...html.matchAll(/(?:src|href)="([^\"]+\.(?:js|css))"/g)].map(match => match[1]);
-    await cache.put('/', response);
-    await cache.addAll(['/icon.svg', '/manifest.webmanifest', ...assets]);
+    await cacheShell(await fetch(SHELL, { cache: 'reload' }));
     await self.skipWaiting();
   })());
 });
-self.addEventListener('activate', event => { event.waitUntil((async () => { const keys = await caches.keys(); await Promise.all(keys.filter(key => key.startsWith('phabricator-next-shell-') && key !== CACHE).map(key => caches.delete(key))); await self.clients.claim(); })()); });
+self.addEventListener('activate', event => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(key => (key.startsWith(CACHE_PREFIX) && key !== CACHE) ||
+      (BASE === '/' && key === 'phabricator-next-shell-v1')).map(key => caches.delete(key)));
+    await self.clients.claim();
+  })());
+});
 self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
-  if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
-  if (request.mode === 'navigate') {
-    event.respondWith(fetch(request).then(response => { if (response.ok) { const copy = response.clone(); event.waitUntil(caches.open(CACHE).then(cache => cache.put('/', copy))); } return response; }).catch(() => caches.match('/')));
-  } else {
-    event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => { if (response.ok) { const copy = response.clone(); event.waitUntil(caches.open(CACHE).then(cache => cache.put(request, copy))); } return response; })));
+  if (request.method !== 'GET' || url.origin !== SCOPE.origin || url.search) return;
+  const isShell = url.pathname === BASE || url.pathname === `${BASE}index.html`;
+  if (request.mode === 'navigate' && isShell) {
+    event.respondWith(fetch(request).then(response => {
+      if (response.ok) event.waitUntil(cacheShell(response.clone()).catch(() => { /* Retain the last complete shell if a release cannot be cached. */ }));
+      return response;
+    }).catch(async () => {
+      const cached = await (await caches.open(CACHE)).match(SHELL);
+      if (!cached) throw new Error('No offline shell is available');
+      return cached;
+    }));
+  } else if (STATIC.has(url.href) || isBuiltAsset(url)) {
+    // Never populate caches from arbitrary requests, including API/auth routes or sibling sites.
+    event.respondWith(caches.open(CACHE).then(async cache => await cache.match(request) || fetch(request)));
   }
 });

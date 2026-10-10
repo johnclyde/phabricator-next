@@ -2,6 +2,8 @@
 
 JSON API, same origin; errors `{ error: string }` with 400/404/409/500 status. Exact shared types in `shared/types.ts`. GET returns objects directly; mutation returns created/updated object, except revision creation and version creation return `RevisionDetail`. Revision IDs `D1` for code and `P1` for papers, `L1` for prose/legal drafts (shared numeric sequence allowed), tasks `T1`, projects `PROJ1`, repositories `R1`, wiki `W1`.
 
+Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For example, `/workspace/` places the health route at `/workspace/api/health`; requests outside the configured mount return 404. The bare mount redirects GET/HEAD to its canonical trailing slash. Frontend build and server mount must agree; a mismatch returns 503 with rebuild guidance. Mount support preserves the local-only security boundary.
+
 - `GET /api/health` → `{ok:true}`
 - `GET /api/state` → AppState; includes all simple objects and recent activity
 - `POST /api/tasks` TaskInput → Task; `PATCH /api/tasks/:id` partial TaskInput → Task
@@ -18,6 +20,6 @@ JSON API, same origin; errors `{ error: string }` with 400/404/409/500 status. E
 
 Local single-user mode, loopback bind only; strict origin/host checks on server; no authentication yet, no execution of source or TeX. Include `Idempotency-Key` on client queued POST/PATCH/PUT; server persists successful mutation responses and rejects reuse for different bodies. This permits offline outbox replay without duplicates. All writes and activity log events transactional. Client offline outbox can support tasks/documents/comments/versions; don't queue hosted reviews or acceptance.
 
-Root owns shared/review.ts (`analyzeLocally(kind, files): ReviewAnalysis`) and server/ai.ts (`analyzeWithAI(kind, files, provider?: 'openai' | 'ollama'): Promise<ReviewAnalysis>`, `aiConfiguration(): {configured:boolean,model:string|null,localConfigured?:boolean,localModel?:string|null}`). Backend may import these; root supplies shortly. Local review has real deterministic checks and is labelled local, not AI. Default fixtures are explicit demo content, seeded only for fresh DB unless disabled.
+`shared/review.ts` supplies `analyzeLocally(kind, files): ReviewAnalysis`; `server/ai.ts` supplies `analyzeWithAI(kind, files, provider?: 'openai' | 'ollama'): Promise<ReviewAnalysis>` and `aiConfiguration()`. Local review has real deterministic checks and is labelled local, not AI. Default fixtures are explicit demo content, seeded only for fresh DB unless disabled.
 
 RevisionKind supports code, paper and document (general prose/legal draft). Local model review uses provider `ollama`, is explicit and requires OLLAMA_MODEL; no model downloads or implicit remote fallback.

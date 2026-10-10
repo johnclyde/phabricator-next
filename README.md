@@ -21,6 +21,15 @@ npm start
 
 Open **http://127.0.0.1:4310**. The production build supports the offline app shell. `npm run dev` starts the API on 4310 and the browser development server on 5173; the service worker is intentionally disabled in development.
 
+To run under a path prefix, use the same `APP_BASE_PATH` when building and starting (or set it in `.env`):
+
+```sh
+APP_BASE_PATH=/workspace/ npm run build
+APP_BASE_PATH=/workspace/ npm start
+```
+
+Then open `http://127.0.0.1:4310/workspace/`. Assets, API calls, CLI server URLs, installed-app links and offline caches honor the prefix. A mismatched build and server configuration produces an explicit error. Browser drafts/outboxes are separated by mount, preserving existing root-installation data. This is routing support; it does not add authentication or isolate untrusted applications sharing an origin. Operator-specific site configuration belongs outside this repository.
+
 The first launch creates `.data/phabricator.sqlite` with clearly labeled sample work: a code revision, a LaTeX paper, and a fictional prose motion with two versions. Set `SEED_DEMO=false` before first launch for an empty workspace. `DATABASE_PATH` selects another database. Restarting preserves your work. To back up a database, stop the app and copy the database together with any SQLite WAL/SHM sidecars; do not delete `.data` to update the application.
 
 The server intentionally binds to loopback. This is a responsive mobile interface, but authenticated access from a physical phone or other computer is a future deployment milestone. Do not expose this prototype through a public proxy: authentication, object policies and multi-user isolation are not implemented yet.
@@ -64,7 +73,7 @@ npm run arc -- show P2
 npm run arc -- export P2 --version 1
 ```
 
-Use actual revision IDs from your workspace. `--server` or `PHABRICATOR_URL` selects the API. `check` exits nonzero on error findings. For machine-readable export use `npm run --silent arc -- export P2 > snapshot.json`. `arc` does not yet implement Arcanist Git ranges, patch/land, lint engines or Conduit compatibility.
+Use actual revision IDs from your workspace. `--server` or `PHABRICATOR_URL` selects the API, including a mount such as `http://127.0.0.1:4310/workspace/`. `check` exits nonzero on error findings. For machine-readable export use `npm run --silent arc -- export P2 > snapshot.json`. `arc` does not yet implement Arcanist Git ranges, patch/land, lint engines or Conduit compatibility.
 
 ## Verify and continue
 
@@ -77,13 +86,13 @@ npm run test:e2e
 
 Local browser tests use Playwright with Chrome (or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chromium binary). To use Playwright's bundled browser instead, run `npx playwright install chromium` followed by `CI=true npm run test:e2e`. Browser tests run against a temporary seeded database and never touch the normal workspace database. Coverage includes desktop and 390px touch emulation, first-visit offline reload, outbox replay across tabs, storage quota failures, comment anchor recovery and invalidation of acceptance. Physical iOS/Android devices, microphone recognition and real model calls have not been exercised yet.
 
-[GitHub Actions](https://github.com/johnclyde/phabricator-next/actions/workflows/ci.yml) runs type checks, core tests, the build, and desktop/mobile browser tests on pushes and pull requests. It uses Node 22 and standard Ubuntu runners, which are [free for public repositories](https://docs.github.com/en/billing/concepts/product-billing/github-actions). The workflow needs no secrets, makes no model calls, and uses no paid actions, artifact uploads, or caches. Hosted AI is optional and has separate provider costs; it is not needed to build, test, or run the application.
+[GitHub Actions](https://github.com/johnclyde/phabricator-next/actions/workflows/ci.yml) runs type checks, core tests, the build, and desktop/mobile browser tests at both the root and a path prefix on pushes and pull requests. It uses Node 22 and standard Ubuntu runners, which are [free for public repositories](https://docs.github.com/en/billing/concepts/product-billing/github-actions). The workflow needs no secrets, makes no model calls, and uses no paid actions, artifact uploads, or caches. Hosted AI is optional and has separate provider costs; it is not needed to build, test, or run the application.
 
 For historical feature research, optionally run `sh scripts/fetch-upstream.sh`. This downloads the three upstream repositories into ignored `reference/` directories at the exact commits in [upstream-lock.tsv](docs/upstream-lock.tsv). A normal source clone does not include these checkouts.
 
 - [Architecture decisions](docs/architecture.md)
 - [Implementation roadmap and internal tracker](docs/roadmap.md)
-- [2021 parity inventory: all 78 application directories](docs/parity.md)
+- [Latest upstream parity inventory, with historical carry-forward features](docs/parity.md)
 - [Upstream provenance, exact commits, licenses, and visual reference](docs/upstream.md)
 - [API contract](docs/api-contract.md)
 

@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test('tasks persist across reloads and typed commands navigate on desktop and mobile', async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await expect(page.getByRole('heading', { name: 'Maniphest', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Create Task', exact: true }).click();
   const dialog = page.getByRole('dialog');
@@ -28,7 +28,7 @@ test('tasks persist across reloads and typed commands navigate on desktop and mo
 });
 
 test('prose revisions preserve word diffs, comments and invalidate old acceptance', async ({ page }, info) => {
-  await page.goto('/#drafts');
+  await page.goto('./#drafts');
   await page.getByRole('button', { name: 'Create Draft', exact: true }).click();
   const dialog = page.getByRole('dialog');
   const title = `Reviewable ${info.project.name} argument ${Date.now()}`;
@@ -62,7 +62,7 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
 });
 
 test('first-visit shell works offline and queued edits replay exactly once', async ({ page, context }, info) => {
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await expect(page.getByRole('heading', { name: 'Maniphest', exact: true })).toBeVisible();
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await context.setOffline(true);
@@ -81,7 +81,7 @@ test('first-visit shell works offline and queued edits replay exactly once', asy
   await expect(page.getByRole('heading', { name: 'Task created', exact: true })).toHaveCount(1);
   await context.setOffline(false);
   await expect(page.getByText('Everything is synchronized.', { exact: false })).toBeVisible();
-  await page.goto('/#tasks');
+  await page.goto('./#tasks');
   await expect(page.getByText(title, { exact: true })).toHaveCount(1);
   await page.reload();
   await expect(page.getByText(title, { exact: true })).toHaveCount(1);

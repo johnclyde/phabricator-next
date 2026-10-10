@@ -1,1 +1,1 @@
-{"name":"Phabricator Next","short_name":"Phabricator","start_url":"/","display":"standalone","background_color":"#f3f5f7","theme_color":"#2e343e","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{"id":"./","name":"Phabricator Next","short_name":"Phabricator","start_url":"./","scope":"./","display":"standalone","background_color":"#f3f5f7","theme_color":"#2e343e","icons":[{"src":"./icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}

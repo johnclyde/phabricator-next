@@ -49,3 +49,13 @@ jobs:
 
       - name: Run desktop and mobile browser tests
         run: npm run test:e2e
+
+      - name: Build under a path prefix
+        run: npm run build
+        env:
+          APP_BASE_PATH: /workspace/
+
+      - name: Run browser tests under a path prefix
+        run: npm run test:e2e
+        env:
+          APP_BASE_PATH: /workspace/
