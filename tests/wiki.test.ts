@@ -55,7 +55,7 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
   let store = createStore({ path });
   try {
     assert.equal(store.fresh, false);
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
     const detail = store.documentDetail('W1');
     assert.deepEqual(detail.document, legacy);
     assert.equal(detail.history.firstAvailableVersion, 7);
@@ -178,7 +178,7 @@ test('wiki conflicts and failed writes leave latest content, history, events, an
     // were written; the entire document save must still roll back.
     app.store.database.exec("CREATE TRIGGER reject_wiki_activity BEFORE INSERT ON activity WHEN NEW.object_id = 'W1' BEGIN SELECT RAISE(ABORT, 'Simulated event failure'); END");
     assert.throws(() => app.store.updateDocument('W1', { title: 'Uncommitted', slug: 'allowed', content: 'Must roll back', expectedVersion: 3 }), /Simulated event failure/);
-    assert.deepEqual(app.store.documentDetail('W1'), committed);
+    assert.deepEqual((await app.request<WikiDetail>(path)).body, committed);
     app.store.database.exec('DROP TRIGGER reject_wiki_activity');
     assert.equal((await app.request(path, 'PUT', { title: 'Fourth', slug: 'allowed', content: 'Four', expectedVersion: 3 })).status, 200);
   } finally { await app.close(); }

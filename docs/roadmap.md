@@ -9,13 +9,14 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | F001 | Download historical sources and inventory all applications | Done; exact commits and reproduction script recorded |
 | F002 | Strict TypeScript browser/API/CLI foundation | Implemented; one process plus browser |
 | F003 | SQLite transactions, version snapshots, comments and evidence | Implemented; local mode and attributed authenticated writes |
-| F004 | Tasks, projects, wiki, repository registry, activity | Partial legacy parity; no hosted repositories or object ACLs |
+| F004 | Tasks, projects, wiki, repository registry, activity | Partial legacy parity; object policies implemented, no hosted repositories |
 | F005 | Paper and prose drafts with source/word comparisons | Implemented first slice; no PDF or DOCX engine |
 | F006 | Offline checks, drafts, snapshot reads and mutation outbox | Implemented first slice; conflicts require attention |
 | F007 | Hosted and local model review adapters | Implemented; credentials/runtime required; live provider evaluation pending |
 | F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent; direct D/P/L/W object navigation supported |
 | F009 | Wiki history and comparisons (WIKI-01 local slice) | Implemented immutable content versions, summaries, paging, arbitrary version comparison and restore-as-new; legacy migration preserves only known content; new authenticated writes retain principal/credential attribution; WIKI-02–04 remain gaps |
-| F010 | Accounts and request authority (AUTH-01/02 slice) | Password sessions, terminal provisioning/reset/disable, scoped revocable tokens, account attribution and principal-scoped retries implemented for a shared workspace; policies, invitations, MFA and remote hosting remain open |
+| F010 | Accounts and request authority (AUTH-01/02 slice) | Password sessions, terminal provisioning/reset/disable, scoped revocable tokens, account attribution and principal-scoped retries implemented; invitations, MFA and remote hosting remain open |
+| F011 | Object and Space policies (POLICY-01 slice) | Explicit workspace/member view, edit and interact rules; restrictive Spaces; policy-aware reads/search input/history/exports/review calls; atomic replay and revocation checks; mobile access controls and draft quarantine (durable locally, tab-memory-only when authenticated). Project membership rules, inherited wiki restrictions and full-text search remain gaps |
 
 ## Next: useful document iteration
 

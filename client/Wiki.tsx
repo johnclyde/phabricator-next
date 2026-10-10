@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, GitCompareArrows, History, Pencil, RotateCcw, WifiOff } from 'lucide-react';
 import { diffLines, diffWordsWithSpace } from 'diff';
-import type { WikiDetail, WikiDocument, WikiHistory, WikiVersion } from '../shared/types';
+import type { AppState, WikiDetail, WikiDocument, WikiHistory, WikiVersion } from '../shared/types';
 import { isNetworkError, type MutationMethod } from './offline';
 import { useWorkspace } from './SessionGate';
+import { AccessSummary } from './Access';
 
 type WikiMutation = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
 type WikiTab = 'document' | 'compare' | 'history';
@@ -11,14 +12,16 @@ function date(value: string): string { return new Date(value).toLocaleString(); 
 function author(version: WikiVersion): string { return version.author || 'Unknown (legacy snapshot)'; }
 
 /** Phriction's source history is immutable; viewing an old version never edits it. */
-export default function Wiki({ id, currentVersion, online, mutate, edit }: {
+export default function Wiki({ id, currentVersion, online, state, manageAccess, mutate, edit }: {
   id: string;
   currentVersion?: number;
   online: boolean;
+  state: AppState;
+  manageAccess: () => void;
   mutate: WikiMutation;
   edit: (document: WikiDocument) => void;
 }) {
-  const { readStored, writeStored, request, durable, assertActive } = useWorkspace();
+  const { readStored, writeStored, request, durable, assertActive, unavailableObject } = useWorkspace();
   const [detail, setDetail] = useState<WikiDetail | null>(() => readStored(`wiki:${id}`, null));
   const [tab, setTab] = useState<WikiTab>('document');
   const [selected, setSelected] = useState<number | null>(null);
@@ -37,6 +40,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
   const [restoring, setRestoring] = useState(false);
 
   const saveVersion = useCallback((version: WikiVersion) => {
+    if (unavailableObject(id)) return;
     loaded.current[version.number] = version;
     setVersions(current => ({ ...current, [version.number]: version }));
     if (!writeStored(`wiki:${id}:version:${version.number}`, version)) setStorageWarning('Browser storage is unavailable. This version is visible now but was not saved for offline reading.');
@@ -69,6 +73,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
   useEffect(() => { setSelected(null); }, [currentVersion]);
 
   const loadVersion = useCallback((number: number): Promise<WikiVersion | null> => {
+    if (unavailableObject(id)) return Promise.resolve(null);
     if (loaded.current[number]) return Promise.resolve(loaded.current[number]);
     const cached = readStored<WikiVersion | null>(`wiki:${id}:version:${number}`, null);
     if (cached) { loaded.current[number] = cached; setVersions(current => ({ ...current, [number]: cached })); return Promise.resolve(cached); }
@@ -127,8 +132,10 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
     finally { setPaging(false); }
   };
 
+  const access = detail && state.accessEpoch >= (detail.accessEpoch ?? -1) ? state.access[id] : detail?.access;
+  const canEdit = Boolean(access?.capabilities.edit);
   const restore = async () => {
-    if (!detail || !version || !online || snapshot || version.number === detail.document.version) return;
+    if (!canEdit || !detail || !version || !online || snapshot || version.number === detail.document.version) return;
     if (!window.confirm(`Restore version ${version.number} of “${version.title}” as a new version? The current title and content will be replaced. The current slug and every historical version will be kept.`)) return;
     setRestoring(true); setError('');
     try {
@@ -143,7 +150,8 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
   const unavailable = (value: number) => !valid(value) ? `Choose a version between ${first} and ${last}.` : versionErrors[value] || `Loading version ${value}…`;
   return <div className="wiki-page">
     <a className="back-link" href="#wiki"><ArrowLeft size={14}/>All documents</a>
-    <div className="page-heading wiki-page-heading"><div><h1><span className="object-id">{id}</span> {detail.document.title}</h1><p>{detail.document.slug} · Current version {detail.document.version}</p></div><button className="button primary" disabled={!online || snapshot || loading} onClick={() => edit(detail.document)}><Pencil size={15}/>Edit Document</button></div>
+    <div className="page-heading wiki-page-heading"><div><h1><span className="object-id">{id}</span> {detail.document.title}</h1><p>{detail.document.slug} · Current version {detail.document.version}</p></div><button className="button primary" disabled={!online || snapshot || loading || !canEdit} onClick={() => edit(detail.document)}><Pencil size={15}/>Edit Document</button></div>
+    <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/>
     {snapshot && <div className="banner warning"><WifiOff size={16}/><span>{durable ? 'Saved document snapshot. Only versions opened on this device are available offline. Reconnect before editing or restoring.' : 'Connection interrupted. Loaded versions are kept only in this session. Reconnect before editing or restoring.'}</span></div>}
     {storageWarning && <div className="banner warning" role="status">{storageWarning}</div>}
     {error && <div className="banner error" role="alert"><span>{error}</span><button onClick={() => void load()} disabled={loading}>Reload document</button></div>}
@@ -162,7 +170,7 @@ export default function Wiki({ id, currentVersion, online, mutate, edit }: {
         {number !== last && <button className="text-button" onClick={() => setSelected(null)}>Current version</button>}
       </div>}
       {tab === 'document' && (version && validNumber ? <>
-        <div className="wiki-version-heading"><div><span className={`badge ${number === last ? 'badge-accepted' : 'badge-draft'}`}>{number === last ? 'Current' : 'Historical'} · Version {number}</span><h2>{version.title}</h2><p>{version.slug} · {author(version)} · {date(version.createdAt)}</p>{version.message && <p className="wiki-edit-summary">{version.message}</p>}{version.kind === 'legacy' && <p>This snapshot predates recorded authorship and full history.</p>}</div>{number !== last && <button className="button" disabled={!online || snapshot || restoring || loading} onClick={() => void restore()}><RotateCcw size={15}/>{restoring ? 'Restoring…' : 'Restore as new version'}</button>}</div>
+        <div className="wiki-version-heading"><div><span className={`badge ${number === last ? 'badge-accepted' : 'badge-draft'}`}>{number === last ? 'Current' : 'Historical'} · Version {number}</span><h2>{version.title}</h2><p>{version.slug} · {author(version)} · {date(version.createdAt)}</p>{version.message && <p className="wiki-edit-summary">{version.message}</p>}{version.kind === 'legacy' && <p>This snapshot predates recorded authorship and full history.</p>}</div>{number !== last && <button className="button" disabled={!online || snapshot || restoring || loading || !canEdit} onClick={() => void restore()}><RotateCcw size={15}/>{restoring ? 'Restoring…' : 'Restore as new version'}</button>}</div>
         <pre className="wiki-content">{version.content}</pre>
       </> : <p className="wiki-status" role="status">{unavailable(number)}</p>)}
       {tab === 'compare' && (version && before && validNumber && validBaseline ? <div className="wiki-comparison">

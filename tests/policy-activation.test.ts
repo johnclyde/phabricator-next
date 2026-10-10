@@ -1,0 +1,192 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { IncomingMessage } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createAuth } from '../server/auth.ts';
+import { PolicyStore } from '../server/policy.ts';
+import { Store } from '../server/store.ts';
+import type { Audience } from '../shared/policy.ts';
+import type { Activity } from '../shared/types.ts';
+
+const password = 'correct horse battery staple';
+const request = { method: 'GET', headers: { host: '127.0.0.1:4310' } } as IncomingMessage;
+const workspace: Audience = { kind: 'workspace' };
+const selected = (...principalIds: string[]): Audience => ({ kind: 'principals', principalIds });
+const schemaVersion = (store: Store) => (store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+const latch = (store: Store) => store.database.prepare("SELECT value FROM auth_meta WHERE name = 'require_auth'").get();
+
+test('password activation preserves local access until local-only grants are explicitly reassigned', async () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const local = createAuth({ database: store.database, mode: 'local', basePath: '/' });
+    const identity = local.authenticate(request).principalId;
+    const policies = new PolicyStore(store.database, { principalExists: id => id === identity || local.listAccounts().some(account => account.id === id) });
+    const space = policies.createSpace({ name: 'Private local research' }, identity);
+    const task = store.createTask({ title: 'Local research notes' });
+    policies.configureNew(task.id, { spaceId: space.id }, identity);
+    const version = schemaVersion(store);
+    const policyBefore = policies.policy(task.id, identity);
+    const spaceBefore = policies.getSpace(space.id, identity);
+    const epoch = policies.epoch();
+    const provisioner = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+    const account = await provisioner.createAccount({ username: 'alice', displayName: 'Alice', password });
+    assert.equal(latch(store), undefined, 'provisioning an account does not activate authentication');
+    // Explicit password provisioning is also metadata-only, even with an account.
+    createAuth({ database: store.database, mode: 'password', basePath: '/', provisioning: true });
+    assert.equal(latch(store), undefined);
+    assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /policies reference the local-only principal.*APP_AUTH_MODE=local/);
+    assert.equal(latch(store), undefined); assert.equal(schemaVersion(store), version);
+    assert.equal(local.authenticate(request).principalId, identity);
+    assert.deepEqual(policies.policy(task.id, identity), policyBefore);
+    assert.deepEqual(policies.getSpace(space.id, identity), spaceBefore);
+    assert.equal(policies.epoch(), epoch, 'activation cannot silently rewrite policy ownership');
+
+    const transferred = provisioner.transferLocalPolicies(account.id);
+    assert.equal(transferred.spaces, 1); assert.equal(transferred.objects, 0);
+    assert.equal(latch(store), undefined, 'explicit handoff remains separate from activation');
+    const authenticated = createAuth({ database: store.database, mode: 'password', basePath: '/' });
+    assert.equal(authenticated.mode, 'password'); assert.ok(latch(store));
+    assert.equal(schemaVersion(store), version, 'activation does not downgrade the policy schema');
+    assert.equal(policies.access(task.id, account.id).edit, true);
+    assert.equal(policies.access(task.id, identity).view, false);
+    assert.throws(() => local.authenticate(request), (error: unknown) => typeof error === 'object' && error !== null && 'status' in error && error.status === 401);
+  } finally { store.close(); }
+});
+
+test('terminal handoff preserves other grants and immutable content, versions changed policies once, and audits atomically', async () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const operator = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+    const identity = operator.authenticate(request).principalId;
+    const alice = await operator.createAccount({ username: 'alice', displayName: 'Alice', password });
+    const bob = await operator.createAccount({ username: 'bob', displayName: 'Bob', password });
+    const policies = new PolicyStore(store.database, { principalExists: id => [identity, alice.id, bob.id].includes(id) });
+    const space = policies.createSpace({ name: 'Research', view: selected(identity, alice.id, bob.id), edit: selected(identity, alice.id) }, identity);
+    const wiki = store.createDocument({ title: 'Preserve source', slug: 'handoff-source', content: `A literal principal in source: ${identity}` });
+    store.updateDocument(wiki.id, { title: wiki.title, slug: wiki.slug, content: 'Second immutable snapshot.', expectedVersion: 1 });
+    policies.configureNew(wiki.id, { spaceId: space.id, view: selected(identity, alice.id, bob.id), edit: selected(identity), interact: selected(identity, bob.id) }, identity);
+    const revision = store.createRevision({ title: 'Preserve paper', kind: 'paper', files: [{ path: 'paper.tex', content: 'Original paper.' }] });
+    store.createVersion(revision.revision.id, { files: [{ path: 'paper.tex', content: 'Revised paper.' }], message: 'Second immutable version.', expectedVersion: 1 });
+    const beforePolicy = policies.policy(wiki.id, identity);
+    const beforeSpace = policies.getSpace(space.id, identity);
+    const unchangedPolicy = policies.policy(revision.revision.id, identity);
+    const source = () => ['entities', 'versions', 'wiki_versions'].map(table => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const contentBefore = source();
+    const permissions = () => ['policy_spaces', 'object_policies', 'policy_meta', 'activity'].map(table => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    let before = permissions();
+    assert.throws(() => operator.transferLocalPolicies('missing'), /Active account not found/);
+    assert.deepEqual(permissions(), before);
+    operator.setAccountDisabled(alice.id, true);
+    assert.throws(() => operator.transferLocalPolicies(alice.id), /Active account not found/);
+    assert.deepEqual(permissions(), before);
+    operator.setAccountDisabled(alice.id, false);
+    const ordinary = createAuth({ database: store.database, mode: 'local', basePath: '/' });
+    assert.throws(() => ordinary.transferLocalPolicies(alice.id), /terminal provisioning access/);
+    assert.deepEqual(permissions(), before);
+
+    store.database.exec(`CREATE TRIGGER fail_transfer_audit BEFORE INSERT ON activity WHEN NEW.object_id = '${wiki.id}' AND json_extract(NEW.data, '$.action') = 'local_grants_transferred' BEGIN SELECT RAISE(ABORT, 'Injected transfer audit failure'); END;`);
+    assert.throws(() => operator.transferLocalPolicies(alice.id), /Injected transfer audit failure/);
+    assert.deepEqual(permissions(), before, 'failed audit rolls back prior grants, versions and audit entries');
+    store.database.exec('DROP TRIGGER fail_transfer_audit');
+    const epoch = policies.epoch();
+    const transferred = operator.transferLocalPolicies(alice.id);
+    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1 });
+    assert.equal(policies.epoch(), epoch + 1);
+    const afterPolicy = policies.policy(wiki.id, alice.id);
+    const afterSpace = policies.getSpace(space.id, alice.id);
+    assert.equal(afterPolicy.version, beforePolicy.version + 1);
+    assert.equal(afterSpace.version, beforeSpace.version + 1);
+    assert.deepEqual(afterPolicy.rules.view.kind === 'principals' ? [...afterPolicy.rules.view.principalIds].sort() : null, [alice.id, bob.id].sort());
+    assert.deepEqual(afterPolicy.rules.edit, selected(alice.id));
+    assert.deepEqual(new Set(afterPolicy.rules.interact.kind === 'principals' ? afterPolicy.rules.interact.principalIds : []), new Set([alice.id, bob.id]));
+    assert.deepEqual(new Set(afterSpace.view.kind === 'principals' ? afterSpace.view.principalIds : []), new Set([alice.id, bob.id]));
+    assert.deepEqual(afterSpace.edit, selected(alice.id));
+    assert.deepEqual(policies.policy(revision.revision.id, alice.id), unchangedPolicy, 'unaffected rules and versions are unchanged');
+    assert.deepEqual(source(), contentBefore, 'source metadata and immutable snapshots remain byte-for-byte identical');
+    const audits = (store.database.prepare("SELECT data FROM activity WHERE json_extract(data, '$.action') = 'local_grants_transferred'").all() as { data: string }[]).map(row => JSON.parse(row.data) as Activity);
+    assert.equal(audits.length, 2); assert.equal(new Set(audits.map(item => item.attribution!.requestId)).size, 1);
+    for (const audit of audits) {
+      assert.equal(audit.actor, 'Terminal operator'); assert.equal(audit.attribution!.displayName, 'Terminal operator');
+      assert.equal(audit.attribution!.principalId, `operator:${operator.workspaceId}`); assert.equal(audit.attribution!.credentialId, null);
+      assert.doesNotMatch(audit.detail, /Alice|Bob|Research/);
+    }
+    before = permissions();
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0 });
+    assert.deepEqual(permissions(), before, 'repeat handoff is a no-op, including versions, epoch and audit');
+    assert.equal(latch(store), undefined);
+    createAuth({ database: store.database, mode: 'password', basePath: '/' });
+    assert.throws(() => operator.transferLocalPolicies(alice.id), /before password authentication is activated/);
+    assert.deepEqual(permissions(), before);
+  } finally { store.close(); }
+});
+
+test('transfer-local command reports the chosen account and counts without activating sign-in', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'phab-policy-transfer-'));
+  const path = join(directory, 'workspace.sqlite');
+  const store = new Store({ path });
+  try {
+    const operator = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+    const account = await operator.createAccount({ username: 'alice', displayName: 'Alice', password });
+    const identity = operator.authenticate(request).principalId;
+    const policies = new PolicyStore(store.database, { principalExists: id => [identity, account.id].includes(id) });
+    const space = policies.createSpace({ name: 'CLI handoff' }, identity);
+    const run = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveRun, reject) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../scripts/accounts.ts', import.meta.url)), ...args], { env: { ...process.env, DATABASE_PATH: path }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = ''; let stderr = '';
+      child.stdout.on('data', chunk => { stdout += String(chunk); }); child.stderr.on('data', chunk => { stderr += String(chunk); });
+      child.on('error', reject); child.on('close', code => resolveRun({ code, stdout, stderr }));
+    });
+    assert.equal((await run(['transfer-local', 'missing'])).code, 1);
+    const result = await run(['transfer-local', 'ALICE']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Transferred local-only grants to alice \([a-f0-9-]+\): 1 Space\(s\), 0 object\(s\)/);
+    assert.match(result.stdout, /Password authentication remains inactive/);
+    assert.equal(latch(store), undefined);
+    assert.deepEqual(policies.getSpace(space.id, account.id).view, selected(account.id));
+    const repeat = await run(['transfer-local', 'alice']);
+    assert.equal(repeat.code, 0, repeat.stderr); assert.match(repeat.stdout, /0 Space\(s\), 0 object\(s\)/);
+    createAuth({ database: store.database, mode: 'password', basePath: '/' });
+    const activated = await run(['transfer-local', 'alice']);
+    assert.equal(activated.code, 1); assert.match(activated.stderr, /before password authentication is activated/);
+  } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('every explicit local Space and object grant blocks transition, without false matches on descriptive text', async () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const local = createAuth({ database: store.database, mode: 'local', basePath: '/' });
+    const identity = local.authenticate(request).principalId;
+    const account = await local.createAccount({ username: 'alice', displayName: 'Alice', password });
+    const policies = new PolicyStore(store.database, { principalExists: id => id === identity || id === account.id });
+    const task = store.createTask({ title: 'Policy activation test' });
+    const policy = policies.policy(task.id, identity);
+    const sharedSpace = policies.getSpace('S1', identity);
+    for (const field of ['view', 'edit', 'interact'] as const) {
+      const restricted = { ...policy, rules: { ...policy.rules, [field]: selected(identity, account.id) } };
+      store.database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify(restricted), task.id);
+      assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /local-only principal/, field);
+      assert.equal(latch(store), undefined);
+      store.database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify(policy), task.id);
+    }
+    for (const field of ['view', 'edit'] as const) {
+      const restricted = { ...sharedSpace, [field]: selected(identity, account.id) };
+      store.database.prepare('UPDATE policy_spaces SET data = ? WHERE id = ?').run(JSON.stringify(restricted), 'S1');
+      assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /local-only principal/, `Space ${field}`);
+      assert.equal(latch(store), undefined);
+      store.database.prepare('UPDATE policy_spaces SET data = ? WHERE id = ?').run(JSON.stringify(sharedSpace), 'S1');
+    }
+    policies.updateSpace('S1', { expectedVersion: 1, description: `A historical note mentioning ${identity}.`, view: workspace, edit: workspace }, identity);
+    createAuth({ database: store.database, mode: 'password', basePath: '/' });
+    assert.ok(latch(store), 'descriptions are not policy grants');
+
+    // A previously activated workspace must remain usable when dormant legacy
+    // identities remain in a rule; account access is still evaluated normally.
+    const historical = { ...policy, rules: { ...policy.rules, interact: selected(identity, account.id) } };
+    store.database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify(historical), task.id);
+    assert.doesNotThrow(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }));
+  } finally { store.close(); }
+});

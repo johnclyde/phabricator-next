@@ -133,3 +133,40 @@
  .session-confirm .modal-footer>.button{min-height:44px;white-space:normal}
  .comment-form-footer{flex-wrap:wrap;gap:8px}
 }
+
+/* Spaces and access retain the compact object/property layout on small screens. */
+.access-summary { margin-bottom: 18px; }
+.access-summary .metadata { display: grid; grid-template-columns: 90px minmax(0, 1fr); }
+.access-summary dd { overflow-wrap: anywhere; }
+.audience-editor { min-width: 0; margin: 0 0 18px; border: 1px solid var(--border, #d8dde3); border-radius: 4px; padding: 12px; }
+.audience-editor legend { font-weight: 600; padding: 0 5px; }
+.audience-editor > select { width: 100%; min-height: 40px; }
+.audience-members { display: grid; gap: 8px; max-height: 230px; overflow: auto; padding-top: 12px; }
+.audience-members label { min-height: 32px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.audience-members small { color: var(--muted, #667685); }
+.policy-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.spaces-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0; }
+.space-status { display: flex; gap: 8px; }
+.space-card .metadata { padding-left: 0; padding-right: 0; }
+.space-card .panel-heading h2 { overflow-wrap: anywhere; }
+.spaces-view > .info-strip { margin-bottom: 16px; }
+.quarantined-drafts { margin-top: 24px; border-color: #d7ac60; }
+.quarantined-draft { display: flex; gap: 12px; align-items: flex-start; padding: 18px; border-top: 1px solid #e0e4e8; }
+.quarantined-draft > div { flex: 1; min-width: 0; }
+.quarantined-draft small { display: block; margin: 6px 0; color: #667685; }
+.quarantined-draft pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.task-access { white-space: nowrap; min-height: 40px; }
+@media (max-width: 650px) {
+  .access-summary .metadata { grid-template-columns: 74px minmax(0, 1fr); gap: 9px; }
+  .audience-members label, .audience-editor > select { min-height: 44px; }
+  .quarantined-draft { flex-wrap: wrap; }
+  .quarantined-draft > div { flex-basis: 100%; }
+  .quarantined-draft > button { flex: 1; }
+  .spaces-toolbar { align-items: flex-start; }
+  .task-row { flex-wrap: wrap; }
+  .task-row .row-main { min-width: calc(100% - 28px); }
+  .task-row .status-select { margin-left: 16px; }
+  .task-access { padding: 10px; }
+  .repository-row { flex-wrap: wrap; }
+  .repository-row > div { min-width: 0; flex: 1; }
+}

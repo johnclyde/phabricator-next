@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ActorAttribution, Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
+import { initializePolicies, registerDefaultPolicy } from './policy.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -26,7 +27,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 3) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 4) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -60,26 +61,35 @@ export class Store {
         });
       } catch (error) { this.database.close(); throw error; }
     }
+    if (version < 4) {
+      try { this.transaction(() => { initializePolicies(this.database); this.database.exec('PRAGMA user_version = 4'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
   }
 
   close(): void { this.database.close(); }
+  read<T>(work: () => T): T {
+    this.database.exec('SAVEPOINT read_snapshot');
+    try { const result = work(); this.database.exec('RELEASE read_snapshot'); return result; }
+    catch (error) { this.database.exec('ROLLBACK TO read_snapshot; RELEASE read_snapshot'); throw error; }
+  }
   transaction<T>(work: () => T): T {
     this.database.exec('BEGIN IMMEDIATE');
     try { const result = work(); this.database.exec('COMMIT'); return result; }
     catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
-  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse, authorize?: () => void): MutationResponse {
+  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse, authorize?: () => void, present?: (response: MutationResponse) => MutationResponse): MutationResponse {
     return this.transaction(() => {
       // Credential revocation in another process may commit while BEGIN waits.
       // Check authority after acquiring the write lock and before replay/writes.
       authorize?.();
       if (key) {
         const existing = this.replay(key, fingerprint);
-        if (existing) return existing;
+        if (existing) return present ? present(existing) : existing;
       }
       const response = work();
       if (key) this.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(key, fingerprint, response.status, JSON.stringify(response.body), new Date().toISOString());
-      return response;
+      return present ? present(response) : response;
     });
   }
   replay(key: string, fingerprint: string): MutationResponse | undefined {
@@ -101,7 +111,9 @@ export class Store {
     return (this.database.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid DESC').all(kind) as JsonRow[]).map(row => JSON.parse(row.data) as T);
   }
   private save(kind: Kind, value: Entity): void {
-    this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data').run(value.id, kind, JSON.stringify(value));
+    const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, JSON.stringify(value));
+    if (created.changes) registerDefaultPolicy(this.database, value.id);
+    else this.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify(value), value.id);
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -113,14 +125,14 @@ export class Store {
     const value: Activity = { id: randomUUID(), objectId, actor: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), action, detail, createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO activity (id, object_id, data) VALUES (?, ?, ?)').run(value.id, objectId, JSON.stringify(value));
   }
-  activities(objectId?: string): Activity[] {
+  activities(objectId?: string, visible?: (id: string) => boolean): Activity[] {
     const rows = objectId
       ? this.database.prepare('SELECT data FROM activity WHERE object_id = ? ORDER BY sequence DESC LIMIT 200').all(objectId)
-      : this.database.prepare('SELECT data FROM activity ORDER BY sequence DESC LIMIT 200').all();
-    return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity);
+      : this.database.prepare(`SELECT data FROM activity ORDER BY sequence DESC${visible ? '' : ' LIMIT 200'}`).all();
+    return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), ai, mode };
+    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
     const data = object(input, ['name', 'description', 'color']);
@@ -177,7 +189,7 @@ export class Store {
     if (!current && data.expectedVersion !== undefined) throw new HttpError(400, 'expectedVersion is only used when updating a document.');
     const slug = string(data.slug, 'Slug', 160);
     if (!/^[a-z0-9]+(?:[-/][a-z0-9]+)*$/.test(slug)) throw new HttpError(400, 'Slug must contain lowercase letters, numbers, hyphens, or slash-separated paths.');
-    if (this.all<WikiDocument>('document').some(doc => doc.slug === slug && doc.id !== current?.id)) throw new HttpError(409, 'A document with this slug already exists.');
+    if (this.all<WikiDocument>('document').some(doc => doc.slug === slug && doc.id !== current?.id)) throw new HttpError(409, 'This slug is unavailable.');
     const message = optionalString(data.message, 'Message', 10_000, current ? 'Updated document' : 'Initial version');
     const now = new Date().toISOString();
     const document: WikiDocument = { id: current?.id ?? this.nextId('document', 'W'), title: string(data.title, 'Title'), slug, content: string(data.content, 'Content', 500_000, true), version: (current?.version ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now };

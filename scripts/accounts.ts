@@ -11,6 +11,7 @@ const help = `Manage accounts for this local workspace (terminal access required
   npm run accounts -- reset USERNAME
   npm run accounts -- disable USERNAME
   npm run accounts -- enable USERNAME
+  npm run accounts -- transfer-local USERNAME
   npm run accounts -- token USERNAME --name "CLI access" --scopes read,write --days 30
   npm run accounts -- tokens USERNAME
   npm run accounts -- revoke USERNAME TOKEN_ID
@@ -19,7 +20,10 @@ Passwords are prompted without echo. For automation, explicitly use
 --password-stdin with create/reset; passwords are never command-line arguments.
 Token secrets are printed once. Store them privately; never commit them.
 Scopes: read, write, review:local, review:hosted. Review scopes are explicit.
-All enabled accounts share this workspace. Object permissions are not yet present.
+Workspace membership is separate from object and Space permissions.
+Before enabling password sign-in, transfer-local explicitly hands local-only
+policy grants to the chosen enabled account. It preserves other grants, records
+the terminal operator's action, and does not activate password authentication.
 Set APP_AUTH_MODE=password and restart the loopback server to require sign-in.
 `;
 
@@ -71,7 +75,7 @@ async function main(): Promise<void> {
   } });
   const [command, username, tokenId, ...extra] = positionals;
   if (values.help || !command) { console.log(help); return; }
-  if (!['list', 'create', 'reset', 'disable', 'enable', 'token', 'tokens', 'revoke'].includes(command) || extra.length) throw new Error('Unknown command or extra arguments. Use --help.');
+  if (!['list', 'create', 'reset', 'disable', 'enable', 'transfer-local', 'token', 'tokens', 'revoke'].includes(command) || extra.length) throw new Error('Unknown command or extra arguments. Use --help.');
   if (command === 'list' && (username || tokenId)) throw new Error('list does not take an account name.');
   if (command !== 'list' && !username) throw new Error('Provide an account username.');
   if (command !== 'revoke' && tokenId) throw new Error('Unexpected extra argument.');
@@ -88,6 +92,10 @@ async function main(): Promise<void> {
     if (!account) throw new Error('Account not found.');
     if (command === 'reset') { await auth.resetPassword(account.id, await password(Boolean(values['password-stdin']))); console.log('Password reset. Existing sessions and access tokens were revoked.'); }
     if (command === 'disable' || command === 'enable') { auth.setAccountDisabled(account.id, command === 'disable'); console.log(`${account.username} ${command === 'disable' ? 'disabled; credentials revoked' : 'enabled'}.`); }
+    if (command === 'transfer-local') {
+      const result = auth.transferLocalPolicies(account.id);
+      console.log(`Transferred local-only grants to ${result.account.username} (${result.account.id}): ${result.spaces} Space(s), ${result.objects} object(s). Password authentication remains inactive.`);
+    }
     if (command === 'tokens') console.log(JSON.stringify(auth.listTokens(account.id), null, 2));
     if (command === 'revoke') { if (!tokenId) throw new Error('Provide the token ID to revoke.'); auth.revokeToken(account.id, tokenId); console.log('Access token revoked.'); }
     if (command === 'token') {

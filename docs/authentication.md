@@ -1,8 +1,8 @@
 # Workspace authentication
 
-The application has two explicit modes. `APP_AUTH_MODE=local` is the existing single-user loopback workspace. `APP_AUTH_MODE=password` requires an enabled account for every content read or mutation, including history, exports and review requests. Both modes still bind to loopback. TLS, trusted proxies, remote access and fine-grained object/Space permissions are separate milestones.
+The application has two explicit modes. `APP_AUTH_MODE=local` is the existing single-user loopback workspace. `APP_AUTH_MODE=password` requires an enabled account for every content read or mutation, including history, exports and review requests. Both modes still bind to loopback. TLS, trusted proxies and remote access are separate milestones. [Object and Space policies](policies.md) restrict access within a workspace.
 
-**Every enabled account currently shares the whole workspace.** There are no private projects, documents or Spaces yet. A bearer token restricts permitted operations, not which objects it can see. Account creation is an operator action from the terminal; there is no public registration or web bootstrap endpoint.
+Existing objects migrate to the shared default Space with explicit workspace-member rules. New Spaces default to selected-member access for their creator. Objects can further restrict viewing, editing and interaction. Bearer scopes and object policies are independent requirements: a token cannot exceed its account’s object access. Account creation is an operator action from the terminal; there is no public registration or web bootstrap endpoint.
 
 ## Enable sign-in
 
@@ -15,7 +15,7 @@ APP_AUTH_MODE=password npm start
 
 The terminal prompts for a password without echo, then asks for confirmation. Passwords must contain at least 15 characters and at most 1024 UTF-8 bytes. Automation can explicitly pass `--password-stdin`; passwords are never accepted as command arguments. Set `APP_AUTH_MODE=password` in the private `.env` to retain this mode across starts.
 
-Password startup fails if no enabled account exists. Activation records an authentication requirement and advances the database to schema 3; changing the environment back to `local` fails closed, and previous schema-2 application versions refuse that database. Local databases that have not activated authentication remain schema 2. Provisioning an account alone does not activate sign-in. The operator tool can reset passwords and enable accounts even if all accounts were disabled.
+Password startup fails if no enabled account exists. Activation records an authentication requirement; changing the environment back to `local` fails closed. All workspaces now use schema 4 for policy storage, so older application versions refuse the database instead of ignoring its access rules. Provisioning an account alone does not activate sign-in. If existing Space or object rules explicitly name the local-only identity, activation refuses rather than stranding those grants. After backing up, explicitly hand them to the intended enabled account with `npm run accounts -- transfer-local editor`, then start password mode. This command replaces only the local identity, preserves other selected members, versions and audits each changed policy, and does not activate authentication. It is unavailable after password mode has been activated. Stop the local server while making this handoff; local-only content becomes inaccessible to its former local principal as soon as the handoff commits. The operator tool can reset passwords and enable accounts even if all accounts were disabled.
 
 ```sh
 npm run accounts -- list
@@ -48,8 +48,8 @@ The browser verifies its session before mounting the workspace or reading its co
 
 Password workspaces cannot be reopened offline after a reload. Durable authenticated offline work needs a separate trusted-device, encryption and retention design. The existing local mode retains persistent drafts, cached snapshots and its offline outbox. Enabling password mode cannot remotely erase copies previously saved by a local-mode client; those older local drafts are preserved without automatic import into an authenticated session.
 
-Idempotency records and in-flight requests are scoped to the authenticated principal and workspace. Current credentials and required operation scopes are checked before replay. A review rechecks authority after a model call returns and before saving evidence, so disabling an account or revoking its credential prevents a late result from being committed.
+Idempotency records and in-flight requests are scoped to the authenticated principal and workspace. Current credentials, required operation scopes and object permissions are checked before replay. Created-object retries also require current access to the resulting object; saved responses are redacted using current reference visibility. A review rechecks authority after a model call returns and before saving evidence, so disabling an account or revoking its credential prevents a late result from being committed.
 
 ## Remaining parity
 
-Invitations, verified email, recovery flows, identity providers, MFA, service/agent account kinds, user-facing session management, project membership, object policies, restrictive Spaces, policy-aware search and durable authenticated offline storage remain open work in [the parity inventory](parity.md). These limitations are not hidden behind an enabled login screen.
+Invitations, verified email, recovery flows, identity providers, MFA, service/agent account kinds, user-facing session management, project membership, custom policy rules, inherited wiki restrictions, full-text search and durable authenticated offline storage remain open work in [the parity inventory](parity.md). These limitations are not hidden behind an enabled login screen.

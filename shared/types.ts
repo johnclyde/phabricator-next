@@ -1,3 +1,6 @@
+import type { EffectiveAccess, NewObjectAccessInput, ObjectAccess, Space } from './policy';
+import type { PublicAccount } from './auth';
+
 export type RevisionKind = 'code' | 'paper' | 'document';
 export type RevisionStatus = 'draft' | 'needs_review' | 'changes_requested' | 'accepted' | 'closed';
 export type TaskStatus = 'open' | 'in_progress' | 'resolved';
@@ -11,7 +14,7 @@ export interface WikiDocument { id: string; title: string; slug: string; content
 export interface WikiVersion { attribution?: ActorAttribution; id: string; documentId: string; number: number; title: string; slug: string; content: string; author: string | null; createdAt: string; message: string; kind: 'create' | 'edit' | 'restore' | 'legacy'; restoredFrom: number | null }
 export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
 export interface WikiHistory { versions: WikiVersionSummary[]; nextBefore: number | null; firstAvailableVersion: number }
-export interface WikiDetail { document: WikiDocument; history: WikiHistory; activity: Activity[] }
+export interface WikiDetail { document: WikiDocument; history: WikiHistory; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface Revision { id: string; title: string; summary: string; kind: RevisionKind; status: RevisionStatus; repositoryId: string | null; projectId: string | null; currentVersion: number; createdAt: string; updatedAt: string }
 export interface RevisionVersion { attribution?: ActorAttribution; id: string; revisionId: string; number: number; files: SourceFile[]; message: string; contentHash: string; createdAt: string }
 export interface ReviewComment { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; filePath: string | null; line: number | null; body: string; author: string; createdAt: string }
@@ -19,9 +22,10 @@ export interface Finding { id: string; severity: 'info' | 'warning' | 'error'; f
 export interface ReviewAnalysis { summary: string; findings: Finding[]; provider: 'local' | 'openai' | 'ollama'; model: string }
 export interface ReviewRun extends ReviewAnalysis { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; contentHash: string; createdAt: string }
 export interface Activity { attribution?: ActorAttribution; id: string; objectId: string; actor: string; action: string; detail: string; createdAt: string }
-export interface AppState { projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
-export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; reviews: ReviewRun[]; activity: Activity[] }
-export interface CreateRevisionInput { title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; repositoryId?: string | null; projectId?: string | null }
+export type SpaceSummary = Space & { capabilities: EffectiveAccess };
+export interface AppState { projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
+export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; reviews: ReviewRun[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
+export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; repositoryId?: string | null; projectId?: string | null }
 export interface CreateVersionInput { files: SourceFile[]; message: string; expectedVersion: number }
 export interface ReviewInput { provider: 'local' | 'openai' | 'ollama'; expectedVersion: number }
 export interface CreateCommentInput { body: string; versionId: string; filePath?: string | null; line?: number | null }

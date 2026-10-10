@@ -95,8 +95,6 @@ test('wiki history pages reach old content without duplicating versions', async 
 
 for (const navigateAway of [false, true]) test(`a late document refresh cannot replace a newer version${navigateAway ? ' after navigating away and back' : ''}`, async ({ page, request, baseURL }) => {
   const document = await seedHistory(request, baseURL!, 1, 'Concurrent wiki refresh');
-  await page.goto(`./#${document.id}`);
-  await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
   const endpoint = new URL(`api/documents/${document.id}`, baseURL!).href;
   let release!: () => void;
   let captured!: () => void;
@@ -107,12 +105,15 @@ for (const navigateAway of [false, true]) test(`a late document refresh cannot r
     if (!first) { await route.continue(); return; }
     first = false;
     const response = await route.fetch();
+    expect((await response.json()).document.version).toBe(1);
     captured();
     await hold;
     await route.fulfill({ response });
   });
   try {
-    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+    // Hold an actual initial response; synthetic offline events may be batched
+    // with a successful workspace refresh and never trigger another wiki load.
+    await page.goto(`./#${document.id}`);
     await ready;
     if (navigateAway) {
       await page.evaluate(() => { location.hash = 'home'; });
@@ -120,7 +121,7 @@ for (const navigateAway of [false, true]) test(`a late document refresh cannot r
     }
     const updated = await request.put(endpoint, { data: { title: document.title, slug: document.slug, content: 'Newer content must remain visible', expectedVersion: 1 } });
     expect(updated.ok()).toBe(true);
-    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     if (navigateAway) await page.evaluate(id => { location.hash = id; }, document.id);
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
     await expect(page.locator('.wiki-content')).toHaveText('Newer content must remain visible');

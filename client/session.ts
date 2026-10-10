@@ -4,12 +4,27 @@ import { applicationPath, storageKey } from './mount';
 export class SessionChangedError extends Error {
   constructor() { super('Your session changed. Reconnect or sign in before continuing.'); this.name = 'SessionChangedError'; }
 }
-export class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
+export class RequestError extends Error { constructor(message: string, public status: number, public code?: string) { super(message); } }
+export interface QuarantinedDraft { key: string; objectId: string; value: unknown; reason: string }
 export interface WorkspaceSession {
   readonly generation: number;
   readonly state: SessionState;
   readonly memory: Map<string, string>;
   readonly controllers: Set<AbortController>;
+  readonly objectControllers: Map<AbortController, string>;
+  readonly objectCapabilities: Map<string, { edit: boolean; interact: boolean }>;
+  readonly objectGenerations: Map<string, number>;
+  readonly unavailableObjects: Set<string>;
+  readonly cleanupCallbacks: Set<() => void>;
+  readonly quarantinePersisted: Set<string>;
+  readonly quarantineLoaded: Set<string>;
+  readonly quarantinePending: Set<string>;
+  quarantineWarning: string;
+  readonly quarantinedDrafts: Map<string, QuarantinedDraft>;
+  readonly accessListeners: Set<(objectIds: string[]) => void>;
+  visibleObjects: Set<string> | null;
+  accessEpoch: number;
+  accessGeneration: number;
   active: boolean;
 }
 let generation = 0;
@@ -25,8 +40,10 @@ export function lockSession(reason = 'Your session changed. Please sign in again
   active = null;
   if (previous) {
     previous.active = false;
+    for (const cleanup of previous.cleanupCallbacks) cleanup(); previous.cleanupCallbacks.clear();
     for (const controller of previous.controllers) controller.abort();
-    previous.controllers.clear(); previous.memory.clear();
+    previous.controllers.clear(); previous.memory.clear(); previous.objectControllers.clear();
+    previous.quarantinedDrafts.clear(); previous.accessListeners.clear();
   }
   if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
   for (const listener of listeners) listener(reason);
@@ -34,7 +51,7 @@ export function lockSession(reason = 'Your session changed. Please sign in again
 export function activateSession(state: SessionState): WorkspaceSession {
   if (state.mode === 'password' && (!state.account || !state.sessionContext || !state.csrfToken)) throw new SessionChangedError();
   if (active) lockSession();
-  const session: WorkspaceSession = { generation: ++generation, state, memory: new Map(), controllers: new Set(), active: true };
+  const session: WorkspaceSession = { generation: ++generation, state, memory: new Map(), controllers: new Set(), objectControllers: new Map(), objectCapabilities: new Map(), objectGenerations: new Map(), unavailableObjects: new Set(), cleanupCallbacks: new Set(), quarantinePersisted: new Set(), quarantineLoaded: new Set(), quarantinePending: new Set(), quarantineWarning: '', quarantinedDrafts: new Map(), accessListeners: new Set(), visibleObjects: null, accessEpoch: -1, accessGeneration: 0, active: true };
   active = session;
   return session;
 }

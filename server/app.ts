@@ -11,6 +11,8 @@ import { aiConfiguration, analyzeWithAI } from './ai.ts';
 import { createStore, type MutationResponse, type Store } from './store.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
+import { PolicyStore } from './policy.ts';
+import { AccessLayer } from './access.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -24,7 +26,7 @@ export interface AppOptions {
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
-export interface App { server: Server; store: Store; auth: Auth; close: () => Promise<void> }
+export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; close: () => Promise<void> }
 
 function security(req: IncomingMessage, res: ServerResponse, configuredPort: number): void {
   if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) throw new HttpError(403, 'Only loopback clients are allowed.');
@@ -111,32 +113,37 @@ export function createApp(options: AppOptions = {}): App {
   try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath }); }
   catch (error) { if (!options.store) store.close(); throw error; }
   if (options.seed !== false) seedDemo(store);
+  const policies = new PolicyStore(store.database, { principalExists: id =>
+    (auth.mode === 'local' && id === `local:${auth.workspaceId}`) || Boolean(store.database.prepare('SELECT id FROM auth_accounts WHERE id = ?').get(id)),
+  });
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext): Promise<MutationResponse> {
+    const access = new AccessLayer(store, auth, policies, context);
     const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
       const data = object(input, ['provider', 'expectedVersion']);
       scope = choice(data.provider, 'provider', ['local', 'openai', 'ollama']) === 'openai' ? 'review:hosted' : 'review:local';
     }
-    auth.revalidate(context, scope);
+    const authorize = () => { auth.revalidate(context, scope); access.authorize(method, path, input); };
+    const present = (response: MutationResponse) => access.present(method, path, response);
+    store.read(authorize);
     const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
     // Preserve legacy local retries, while every authenticated principal has a
     // separate durable replay namespace. Authorization always precedes replay.
     const key = rawKey && (context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`);
     const fingerprint = createHash('sha256').update(JSON.stringify([method, path, input])).digest('hex');
     if (key) {
-      const replay = store.replay(key, fingerprint);
+      const replay = store.read(() => { authorize(); const saved = store.replay(key, fingerprint); return saved ? present(saved) : undefined; });
       if (replay) return replay;
       const active = pending.get(key);
       if (active) {
         if (active.fingerprint !== fingerprint) throw new HttpError(409, 'This idempotency key is being used for a different request.');
         const response = await active.promise;
-        auth.revalidate(context, scope);
-        return response;
+        return store.read(() => { authorize(); return present(response); });
       }
     }
     const execute = async (): Promise<MutationResponse> => {
@@ -144,7 +151,7 @@ export function createApp(options: AppOptions = {}): App {
         const data = object(input, ['provider', 'expectedVersion']);
         const provider = choice(data.provider, 'provider', ['local', 'openai', 'ollama']);
         const expectedVersion = integer(data.expectedVersion, 'expectedVersion');
-        const detail = store.requireVersion(reviewMatch[1]!, expectedVersion);
+        const detail = store.read(() => { authorize(); return store.requireVersion(reviewMatch[1]!, expectedVersion); });
         const version = detail.versions.find(item => item.number === expectedVersion)!;
         if (provider === 'openai' && !ai().configured) throw new HttpError(400, 'Hosted AI review is not configured by the server operator.');
         if (provider === 'ollama' && !ai().localConfigured) throw new HttpError(400, 'Offline AI review is not configured by the server operator.');
@@ -155,15 +162,34 @@ export function createApp(options: AppOptions = {}): App {
           console.error('Review provider failed:', error instanceof Error ? error.message : 'unknown provider error');
           throw new HttpError(502, 'The review provider failed. No review evidence was saved.');
         }
-        auth.revalidate(context, scope);
-        return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis, attribution) }), () => auth.revalidate(context, scope));
+        return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis, attribution) }), authorize, present);
       }
       return store.mutate(key, fingerprint, () => {
-        if (method === 'POST' && path === '/api/projects') return { status: 201, body: store.createProject(input, attribution) };
-        if (method === 'POST' && path === '/api/repositories') return { status: 201, body: store.createRepository(input, attribution) };
-        if (method === 'POST' && path === '/api/tasks') return { status: 201, body: store.createTask(input, attribution) };
-        if (method === 'POST' && path === '/api/documents') return { status: 201, body: store.createDocument(input, attribution) };
-        if (method === 'POST' && path === '/api/revisions') return { status: 201, body: store.createRevision(input, attribution) };
+        if (method === 'POST' && ['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions'].includes(path)) {
+          const { content } = access.creationInput(input);
+          const created = path === '/api/projects' ? store.createProject(content, attribution)
+            : path === '/api/repositories' ? store.createRepository(content, attribution)
+              : path === '/api/tasks' ? store.createTask(content, attribution)
+                : path === '/api/documents' ? store.createDocument(content, attribution) : store.createRevision(content, attribution);
+          return access.configureCreated({ status: 201, body: created }, input);
+        }
+        if (method === 'POST' && path === '/api/spaces') {
+          const space = policies.createSpace(input, context.principalId);
+          store.event(space.id, 'created', `Created Space ${space.name}.`, attribution);
+          return { status: 201, body: space };
+        }
+        const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
+        if (method === 'PATCH' && space) {
+          const updated = policies.updateSpace(space[1]!, input, context.principalId);
+          store.event(updated.id, 'updated', 'Updated Space settings and access rules.', attribution);
+          return { status: 200, body: updated };
+        }
+        const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
+        if (method === 'PUT' && policy) {
+          const updated = policies.setPolicy(policy[1]!, input, context.principalId);
+          store.event(updated.objectId, 'policy_updated', 'Updated access rules.', attribution);
+          return { status: 200, body: updated };
+        }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
         const document = /^\/api\/documents\/(W\d+)$/.exec(path);
@@ -175,7 +201,7 @@ export function createApp(options: AppOptions = {}): App {
         if (revision && method === 'POST' && revision[2] === 'versions') return { status: 201, body: store.createVersion(revision[1]!, input, attribution) };
         if (revision && method === 'POST' && revision[2] === 'comments') return { status: 201, body: store.createComment(revision[1]!, input, attribution) };
         throw new HttpError(404, 'Route not found.');
-      }, () => auth.revalidate(context, scope));
+      }, authorize, present);
     };
     const promise = execute();
     if (key) pending.set(key, { fingerprint, promise });
@@ -225,39 +251,49 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, bootstrap.session); return;
       }
       if (req.method === 'GET') {
-        if (path === '/api/state') { send(res, 200, store.state(ai(), auth.mode === 'local' ? 'local-single-user' : 'authenticated-workspace')); return; }
-        const document = /^\/api\/documents\/(W\d+)(?:\/(history)|\/versions\/([^/]+))?$/.exec(path);
-        if (document) {
-          const positiveParameter = (value: string, name: string): number => {
-            if (!/^[1-9]\d*$/.test(value)) throw new HttpError(400, `${name} must be a positive integer.`);
-            return integer(Number(value), name);
-          };
-          if (document[2]) {
-            for (const name of url.searchParams.keys()) {
-              if (!['before', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'History accepts only one before cursor and one limit.');
+        store.read(() => {
+          auth.revalidate(context, 'read');
+          const access = new AccessLayer(store, auth, policies, context);
+          if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          if (path === '/api/spaces') { send(res, 200, policies.spaces(context.principalId).map(space => access.space(space))); return; }
+          const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
+          if (space) { send(res, 200, access.space(policies.getSpace(space[1]!, context.principalId))); return; }
+          const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
+          if (policy) { send(res, 200, access.describe(policy[1]!)); return; }
+          const document = /^\/api\/documents\/(W\d+)(?:\/(history)|\/versions\/([^/]+))?$/.exec(path);
+          if (document) {
+            access.require(document[1]!);
+            const positiveParameter = (value: string, name: string): number => {
+              if (!/^[1-9]\d*$/.test(value)) throw new HttpError(400, `${name} must be a positive integer.`);
+              return integer(Number(value), name);
+            };
+            if (document[2]) {
+              for (const name of url.searchParams.keys()) {
+                if (!['before', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'History accepts only one before cursor and one limit.');
+              }
+              const before = url.searchParams.get('before'); const limit = url.searchParams.get('limit');
+              send(res, 200, store.documentHistory(document[1]!, {
+                ...(before === null ? {} : { before: positiveParameter(before, 'before') }),
+                ...(limit === null ? {} : { limit: positiveParameter(limit, 'limit') }),
+              })); return;
             }
-            const before = url.searchParams.get('before'); const limit = url.searchParams.get('limit');
-            send(res, 200, store.documentHistory(document[1]!, {
-              ...(before === null ? {} : { before: positiveParameter(before, 'before') }),
-              ...(limit === null ? {} : { limit: positiveParameter(limit, 'limit') }),
-            })); return;
+            if (url.search) throw new HttpError(400, 'Document read URLs may not contain query parameters.');
+            send(res, 200, document[3] ? store.documentVersion(document[1]!, positiveParameter(document[3], 'version')) : access.document(document[1]!)); return;
           }
-          if (url.search) throw new HttpError(400, 'Document read URLs may not contain query parameters.');
-          send(res, 200, document[3] ? store.documentVersion(document[1]!, positiveParameter(document[3], 'version')) : store.documentDetail(document[1]!)); return;
-        }
-        const match = /^\/api\/revisions\/([DPL]\d+)(\/export)?$/.exec(path);
-        if (match) {
-          const detail = store.detail(match[1]!);
-          if (!match[2]) { send(res, 200, detail); return; }
-          const selected = url.searchParams.get('version');
-          if (selected !== null && !/^[1-9]\d*$/.test(selected)) throw new HttpError(400, 'version must be a positive integer.');
-          const number = selected === null ? detail.revision.currentVersion : integer(Number(selected), 'version');
-          const version = detail.versions.find(item => item.number === number);
-          if (!version) throw new HttpError(404, 'Version not found.');
-          res.setHeader('Content-Disposition', `attachment; filename="${detail.revision.id}-v${version.number}.json"`);
-          send(res, 200, { revision: detail.revision, version }); return;
-        }
-        throw new HttpError(404, 'Route not found.');
+          const match = /^\/api\/revisions\/([DPL]\d+)(\/export)?$/.exec(path);
+          if (match) {
+            const detail = access.revision(match[1]!);
+            if (!match[2]) { send(res, 200, detail); return; }
+            const selected = url.searchParams.get('version');
+            if (selected !== null && !/^[1-9]\d*$/.test(selected)) throw new HttpError(400, 'version must be a positive integer.');
+            const number = selected === null ? detail.revision.currentVersion : integer(Number(selected), 'version');
+            const version = detail.versions.find(item => item.number === number);
+            if (!version) throw new HttpError(404, 'Version not found.');
+            res.setHeader('Content-Disposition', `attachment; filename="${detail.revision.id}-v${version.number}.json"`);
+            send(res, 200, { revision: detail.revision, version }); return;
+          }
+          throw new HttpError(404, 'Route not found.');
+        }); return;
       }
       if (!['POST', 'PATCH', 'PUT'].includes(req.method ?? '')) throw new HttpError(404, 'Route not found.');
       const key = req.headers['idempotency-key'];
@@ -267,13 +303,13 @@ export function createApp(options: AppOptions = {}): App {
       send(res, result.status, result.body);
     })().catch((error: unknown) => {
       if (res.headersSent) { res.destroy(); return; }
-      if (error instanceof HttpError) send(res, error.status, { error: error.message });
+      if (error instanceof HttpError) send(res, error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
       else { console.error('Request failed:', error instanceof Error ? error.message : 'unknown error'); send(res, 500, { error: 'An internal error occurred.' }); }
     });
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  return { server, store, auth, close: async () => {
+  return { server, store, auth, policies, close: async () => {
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
     if (!options.store) store.close();
   } };
