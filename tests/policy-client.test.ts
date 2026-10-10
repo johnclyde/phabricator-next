@@ -307,3 +307,24 @@ test('thread replies use interaction permission and preserve their fixed parent 
     assert.equal(sent, 1, 'revoked replies never automatically resume when access returns');
   } finally { globalThis.fetch = fetch; storage.close(); }
 });
+
+test('suggestion drafts with an empty explanation or deletion remain exportable and survive access-loss quarantine', () => {
+  const key = 'comment-source:D1:V1';
+  const draft = { body: '', versionId: 'V1', filePath: 'argument.md', line: null, passage: { start: 0, end: 5, quote: 'words' }, suggestion: { replacement: '' } };
+  const protectedClient = createWorkspaceClient(activateSession(identity()));
+  protectedClient.writeStored(key, draft);
+  assert.deepEqual(protectedClient.draftRecords(), [{ key, value: draft }], 'a deletion is unsaved work even before its explanation is typed');
+  lockSession();
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen();
+    client.reconcileAccess({ D1: access('D1') }, 1, ['S1']);
+    client.writeStored(key, draft);
+    client.reconcileAccess({ D1: access('D1', true, false) }, 2, ['S1']);
+    assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [draft]);
+    const reopened = storage.reopen();
+    assert.deepEqual(reopened.quarantinedDrafts().map(item => item.value), [draft]);
+    assert.equal(reopened.readStored(key, null), null);
+    assert.equal(canQueue('/api/revisions/D1/suggestions/root-comment/apply', 'POST'), false, 'applying a proposal is never offline replay');
+  } finally { storage.close(); }
+});

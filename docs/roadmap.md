@@ -27,7 +27,7 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | D103 | Sandboxed TeX jobs and PDF artifacts | Reproducible build manifest, source/PDF alignment, compile diagnostics, no unsafe shell or network access |
 | D104 | Citation/evidence objects | Import BibTeX and structured sources; show where a claim came from and whether the source was actually checked |
 | D105 | DOCX interchange | Preserve headings, footnotes, comments and tracked changes across golden-fixture round trips |
-| D106 | Review threads and resolutions | Partial: immutable replies, optimistic resolve/reopen and version-bound resolution history. Suggested patches, exact patch scope and atomic application remain open. |
+| D106 | Review threads and resolutions | Partial: immutable replies, optimistic resolve/reopen, version-bound state history, exact single-passage suggestions and atomic application as new versions. Multi-passage/file proposals, rebasing, upstream publication semantics and automated proposal provenance remain open. See [suggested edits](suggested-edits.md). |
 | D107 | Review evaluations | Curated code/paper/prose fixtures measure false positives, groundedness, missed defects, cost and latency per model |
 
 ## Next: private, hands-off and mobile work

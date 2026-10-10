@@ -115,7 +115,7 @@ export class AccessLayer {
       const comment = record(value);
       // Schema 4 had only root comments, with no passage/reply metadata. Never
       // reinterpret a newer or malformed response as a historical snapshot.
-      if (!comment || comment.threadId !== undefined || comment.viewedVersionId !== undefined || comment.anchor !== undefined
+      if (!comment || comment.threadId !== undefined || comment.viewedVersionId !== undefined || comment.anchor !== undefined || comment.suggestion !== undefined
         || typeof comment.id !== 'string' || !comment.id || rootIds.has(comment.id) || comment.revisionId !== revisionId
         || typeof comment.versionId !== 'string' || !versionIds.has(comment.versionId)
         || (comment.filePath !== null && typeof comment.filePath !== 'string')
@@ -127,6 +127,16 @@ export class AccessLayer {
     }
     detail.threads = threads;
     detail.threadEvents = [];
+  }
+  private legacySuggestionSnapshot(detail: Record<string, unknown>): void {
+    if (detail.suggestionApplications !== undefined) return;
+    if (!Array.isArray(detail.comments) || !Array.isArray(detail.versions) || !Array.isArray(detail.threads) || !Array.isArray(detail.threadEvents)
+      || detail.comments.some(comment => !record(comment) || record(comment)!.suggestion !== undefined)) {
+      throw new HttpError(409, 'This saved suggestion response cannot be safely replayed. Reload the revision.');
+    }
+    // Schema 4/5 snapshots predate suggestions. Preserve that historical state
+    // without borrowing newer application records from the live revision.
+    detail.suggestionApplications = [];
   }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
   present(method: string, path: string, response: MutationResponse): MutationResponse {
@@ -145,7 +155,10 @@ export class AccessLayer {
     const revisionId = record(detail?.revision)?.id;
     const id = revisionId ?? record(detail?.document)?.id;
     if (detail && typeof id === 'string') {
-      if (typeof revisionId === 'string') this.legacyDiscussionSnapshot(detail, revisionId);
+      if (typeof revisionId === 'string') {
+        this.legacyDiscussionSnapshot(detail, revisionId);
+        this.legacySuggestionSnapshot(detail);
+      }
       detail.access = this.describe(id); detail.accessEpoch = this.policies.epoch();
     }
     return { status: response.status, body: result };

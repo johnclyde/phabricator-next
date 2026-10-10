@@ -18,7 +18,7 @@ function queuedObject(item: PendingMutation): string | null {
 }
 function objectFromKey(key: string): string | null { return /^(?:revision|wiki|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
 function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:'); }
-function hasSavedWork(key: string, value: unknown): boolean { return !key.startsWith('comment-source:') || Boolean(value && typeof value === 'object' && 'body' in value && typeof value.body === 'string' && value.body.trim()); }
+function hasSavedWork(key: string, value: unknown): boolean { return !key.startsWith('comment-source:') || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function unavailable(): RequestError { return new RequestError('This object is unavailable or you no longer have access. Unsaved drafts have been set aside for export.', 404, 'OBJECT_UNAVAILABLE'); }
 
 
@@ -274,7 +274,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const draftRecords = (): { key: string; value: unknown }[] => {
     if (!sessionIsActive(session) || durable) return [];
     const ordinary = [...session.memory].filter(([key, value]) => {
-      if (key.startsWith('comment-source:')) { try { return Boolean((JSON.parse(value) as { body?: string }).body?.trim()); } catch { return false; } }
+      if (key.startsWith('comment-source:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
       return key.startsWith('draft:') || key.startsWith('version-draft:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value }))];

@@ -219,3 +219,27 @@
   .passage-line-numbers button { height: 44px; line-height: 44px; }
   .selectable-source { line-height: 44px; }
 }
+
+.suggestion-composer { margin: 14px 0; padding: 14px; border: 1px solid #ccd9e2; border-radius: 4px; background: #f6f9fc; }
+.suggestion-toggle { display: flex; gap: 9px; align-items: center; min-height: 44px; font-weight: 600; font-size: 13px; }
+.suggestion-toggle input { width: 18px; height: 18px; flex: 0 0 auto; }
+.thread-suggestion { margin: 16px 0; padding: 14px; border: 1px solid #bfd0dd; border-radius: 4px; background: #f8fafc; }
+.thread-suggestion h4, .suggestion-confirmation h5 { margin: 0 0 9px; font-size: 14px; }
+.suggestion-texts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.suggestion-texts h5 { font-size: 12px; color: #596f80; margin: 10px 0 6px; }
+.suggestion-texts pre, .suggestion-diff { margin: 0; padding: 10px 12px; border: 1px solid #d8e1e8; border-radius: 3px; background: white; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.suggestion-deletion { padding: 10px 12px; margin: 0; border: 1px solid #e3c9c9; border-radius: 3px; color: #8e4141; background: #fff5f4; font-size: 13px; }
+.suggestion-preview details { margin: 12px 0; }
+.suggestion-preview summary { cursor: pointer; font-size: 12px; color: #3d6686; padding: 8px 0; }
+.suggestion-diff ins { color: #225c36; background: #d9f1e0; text-decoration: underline; }
+.suggestion-diff del { color: #8a2e2e; background: #ffe2e2; }
+.suggestion-confirmation { border: 1px solid #abc7da; background: #edf5fb; padding: 14px; margin-top: 12px; border-radius: 4px; }
+.suggestion-confirmation p { line-height: 1.65; font-size: 13px; overflow-wrap: anywhere; }
+.suggestion-application { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #356541; font-size: 12px; padding-top: 8px; }
+@media (max-width: 650px) {
+  .suggestion-composer, .thread-suggestion, .suggestion-confirmation { padding: 10px; }
+  .suggestion-texts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .thread-suggestion button, .suggestion-preview summary { min-height: 44px; }
+  .comment-target > span > button { min-width: 44px; min-height: 44px; }
+  .suggestion-confirmation .thread-actions > button { flex: 1; }
+}

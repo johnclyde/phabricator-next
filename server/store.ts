@@ -2,10 +2,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
+import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 import { initializePolicies, registerDefaultPolicy } from './policy.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
+import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -28,7 +29,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 5) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 6) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -87,6 +88,19 @@ export class Store {
             this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, thread.revisionId, thread.rootCommentId, JSON.stringify(thread));
           }
           this.database.exec('PRAGMA user_version = 5');
+        });
+      } catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 6) {
+      try {
+        this.transaction(() => {
+          this.database.exec(`
+            CREATE TABLE suggestion_applications (id TEXT PRIMARY KEY, revision_id TEXT NOT NULL REFERENCES entities(id), comment_id TEXT NOT NULL UNIQUE REFERENCES comments(id), thread_id TEXT NOT NULL REFERENCES review_threads(id), from_version_id TEXT NOT NULL REFERENCES versions(id), to_version_id TEXT NOT NULL REFERENCES versions(id), data TEXT NOT NULL CHECK(json_valid(data)));
+            CREATE INDEX suggestion_applications_revision ON suggestion_applications(revision_id);
+            CREATE TRIGGER suggestion_applications_no_update BEFORE UPDATE ON suggestion_applications BEGIN SELECT RAISE(ABORT, 'Suggestion applications are immutable'); END;
+            CREATE TRIGGER suggestion_applications_no_delete BEFORE DELETE ON suggestion_applications BEGIN SELECT RAISE(ABORT, 'Suggestion applications are immutable'); END;
+            PRAGMA user_version = 6;
+          `);
         });
       } catch (error) { this.database.close(); throw error; }
     }
@@ -292,7 +306,7 @@ export class Store {
   }
   createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
     return this.discussionMutation(() => {
-      const data = object(input, ['body', 'versionId', 'filePath', 'line', 'passage']);
+      const data = object(input, ['body', 'versionId', 'filePath', 'line', 'passage', 'suggestion']);
       const version = this.commentVersion(id, data.versionId);
       const filePath = data.filePath === undefined || data.filePath === null ? null : string(data.filePath, 'File path', 240);
       const file = filePath ? version.files.find(item => item.path === filePath) : undefined;
@@ -311,8 +325,15 @@ export class Store {
         if (line !== null && line !== firstLine) throw new HttpError(400, 'Comment line must match the beginning of the selected passage.');
         line = firstLine;
       }
+      let suggestion: SuggestedReplacement | undefined;
+      if (data.suggestion !== undefined) {
+        if (!anchor) throw new HttpError(400, 'A suggested replacement requires an exact passage anchor.');
+        const proposed = object(data.suggestion, ['replacement']);
+        try { suggestion = validateSuggestion(anchor, { replacement: string(proposed.replacement, 'Suggested replacement', 20_000, true) }); }
+        catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
+      }
       const commentId = randomUUID();
-      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), ...(suggestion ? { suggestion } : {}), body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       this.insertComment(comment);
       const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
       this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, id, commentId, JSON.stringify(thread));
@@ -382,6 +403,48 @@ export class Store {
       return thread;
     });
   }
+  applySuggestion(id: string, commentId: string, input: unknown, attribution?: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const missing = () => new HttpError(404, 'Suggested replacement was not found.', 'SUGGESTION_UNAVAILABLE');
+      const row = typeof commentId === 'string' && commentId.length <= 100
+        ? this.database.prepare('SELECT c.data AS comment_data, t.data AS thread_data FROM comments c JOIN review_threads t ON t.root_comment_id = c.id AND t.revision_id = c.revision_id WHERE c.revision_id = ? AND c.id = ?').get(id, commentId) as { comment_data: string; thread_data: string } | undefined : undefined;
+      if (!row) throw missing();
+      const comment = JSON.parse(row.comment_data) as ReviewComment;
+      const thread = JSON.parse(row.thread_data) as ReviewThread;
+      if (!comment.anchor || !comment.suggestion || comment.threadId !== thread.id || thread.rootCommentId !== comment.id || comment.viewedVersionId !== undefined) throw missing();
+      if (this.database.prepare('SELECT id FROM suggestion_applications WHERE comment_id = ?').get(comment.id)) throw new HttpError(409, 'This suggested replacement has already been applied.');
+      const data = object(input, ['expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedThreadVersion']);
+      const detail = this.requireVersion(id, data.expectedVersion);
+      const expectedVersionId = string(data.expectedVersionId, 'Expected version ID', 100);
+      const expectedContentHash = string(data.expectedContentHash, 'Expected content hash', 64);
+      if (!/^[a-f0-9]{64}$/.test(expectedContentHash)) throw new HttpError(400, 'Expected content hash must be a SHA-256 digest.');
+      if (integer(data.expectedThreadVersion, 'expectedThreadVersion') !== thread.version) throw new HttpError(409, 'This discussion changed. Reload its replies before applying the suggestion.');
+      const from = detail.versions.find(version => version.number === detail.revision.currentVersion)!;
+      const actualHash = contentHash(from.files);
+      if (from.id !== expectedVersionId || actualHash !== expectedContentHash || actualHash !== from.contentHash
+        || comment.versionId !== from.id || comment.anchor.versionId !== from.id || comment.anchor.contentHash !== actualHash
+        || comment.filePath !== comment.anchor.filePath) throw new HttpError(409, 'The suggestion must match the exact current source version and content. Review the current source before proposing another replacement.');
+      let source: SourceFile[];
+      try { source = applySuggestedReplacement(from, comment.anchor, comment.suggestion); }
+      catch (error) { if (error instanceof RangeError) throw new HttpError(409, 'The saved suggestion no longer matches its original source. Review the source before proposing another replacement.'); throw error; }
+      // Validate the complete result, including UTF-8 byte limits, before any
+      // source write. Provider/client input cannot supply an alternative patch.
+      const validated = files(source);
+      if (!Number.isSafeInteger(detail.revision.currentVersion + 1)) throw new HttpError(409, 'This revision has reached the supported version limit.');
+      const nextThread = this.advanceThread(thread, new Date().toISOString());
+      const updated = this.createVersion(id, { files: validated, message: `Applied suggested replacement from version ${from.number}.`, expectedVersion: from.number }, attribution);
+      const to = updated.versions.find(version => version.number === updated.revision.currentVersion)!;
+      const application: SuggestionApplication = {
+        id: randomUUID(), revisionId: id, commentId: comment.id, threadId: thread.id, fromVersionId: from.id, toVersionId: to.id,
+        fromContentHash: actualHash, toContentHash: to.contentHash, threadVersion: nextThread.version,
+        actor: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: nextThread.updatedAt,
+      };
+      this.saveThread(nextThread);
+      this.database.prepare('INSERT INTO suggestion_applications (id, revision_id, comment_id, thread_id, from_version_id, to_version_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)').run(application.id, id, comment.id, thread.id, from.id, to.id, JSON.stringify(application));
+      this.event(id, 'suggestion_applied', `Applied a suggested replacement from version ${from.number} as version ${to.number}. Discussion status is unchanged.`, attribution);
+      return this.detail(id);
+    });
+  }
   saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis, attribution?: ActorAttribution): ReviewRun {
     const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
     const review: ReviewRun = { ...analysis, ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
@@ -398,8 +461,9 @@ export class Store {
     const comments = (this.database.prepare('SELECT data FROM comments WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewComment);
     const threads = (this.database.prepare('SELECT data FROM review_threads WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewThread);
     const threadEvents = (this.database.prepare('SELECT data FROM thread_events WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewThreadEvent);
+    const suggestionApplications = (this.database.prepare('SELECT data FROM suggestion_applications WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as SuggestionApplication);
     const reviews = (this.database.prepare('SELECT data FROM reviews WHERE revision_id = ? ORDER BY rowid DESC').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewRun);
-    return { revision, versions, comments, threads, threadEvents, reviews, activity: this.activities(id) };
+    return { revision, versions, comments, threads, threadEvents, suggestionApplications, reviews, activity: this.activities(id) };
   }
 }
 

@@ -217,7 +217,7 @@ test('schema 4 migration preserves legacy comment bytes, provenance and replay w
   const directory = mkdtempSync(join(tmpdir(), 'phab-thread-migration-')); const path = join(directory, 'workspace.sqlite');
   const legacy = legacyDatabase(path); let store = new Store({ path });
   try {
-    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
     const detail = store.detail(legacy.revision.id);
     assert.deepEqual(detail.revision, legacy.revision); assert.deepEqual(detail.versions, [legacy.version]); assert.deepEqual(detail.comments, legacy.comments);
     assert.deepEqual((raw(store, 'comments') as { data: string }[]).map(row => row.data), legacy.commentJson);
@@ -253,7 +253,7 @@ test('legacy replay presentation adds only historical thread shape without rewri
     const context = auth.authenticate({ method: 'GET', headers: {} } as IncomingMessage);
     const policies = new PolicyStore(store.database, { principalExists: id => id === context.principalId });
     const access = new AccessLayer(store, auth, policies, context);
-    const { threads: _threads, threadEvents: _events, ...historical } = store.detail(legacy.revision.id);
+    const { threads: _threads, threadEvents: _events, suggestionApplications: _applications, ...historical } = store.detail(legacy.revision.id);
     const body = JSON.stringify(historical, null, 2);
     store.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run('legacy-detail-replay', 'legacy-detail-fingerprint', 201, body, legacy.version.createdAt);
     const root = legacy.comments[0]!;

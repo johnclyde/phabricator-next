@@ -53,6 +53,7 @@ test('offline queue permits only supported idempotent mutation routes', () => {
     assert.equal(canQueue(route, 'PATCH'), false);
   }
   assert.equal(canQueue('/api/tasks/T1/extra', 'PATCH'), false);
+  assert.equal(canQueue('/api/revisions/L1/suggestions/comment-id/apply', 'POST'), false, 'source-changing suggestions require a live current-version check');
 });
 test('server errors and conflicts do not become offline retries', () => {
   assert.equal(isNetworkError(new RequestError('Version changed', 409)), false);

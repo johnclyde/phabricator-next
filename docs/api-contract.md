@@ -21,6 +21,7 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 - `POST /api/revisions/:id/comments` CreateCommentInput → ReviewComment
 - `POST /api/revisions/:id/threads/:threadId/replies` CreateReplyInput → ReviewComment; inherits the original thread anchor and records the viewed version
 - `PATCH /api/revisions/:id/threads/:threadId` UpdateThreadInput → ReviewThread; current edit permission, optimistic thread version, exact source-version resolution provenance
+- `POST /api/revisions/:id/suggestions/:commentId/apply` ApplySuggestionInput → RevisionDetail (201); explicit online application of a stored root-passage suggestion, exact current source/thread checks, atomic new version and immutable application record
 - `POST /api/revisions/:id/reviews` ReviewInput → ReviewRun; hosted review explicit; errors never fall back to simulated AI. Reject stale input or revision changes during review.
 - `GET /api/revisions/:id/export?version=N` → JSON snapshot `{revision,version}` (paper .tex downloaded from version.files in UI/CLI)
 
@@ -40,7 +41,7 @@ Schema 2 migrates each pre-history wiki document into one `legacy` snapshot at i
 
 All protected cookie requests, including GETs, require `X-Session-Context`; mutations also require `X-CSRF-Token` and an exact matching Origin. CLI requests use `Authorization: Bearer …` with independent read/write/review scopes. Authentication, scopes and current object permissions are evaluated before any idempotency replay. Authenticated replay keys include workspace and principal; asynchronous reviews revalidate credentials and object permissions before committing under the write lock. Session and token secrets are never content-API fields. Auth responses are no-store.
 
-Schema 4 introduced object and Space policies. Schema 5 adds review threads and immutable resolution events while preserving existing comment records. Revision details include threads and their events; see [passage review](review-threads.md) for anchor, reply and resolution contracts. Previous binaries refuse the newer database. The separate durable authentication latch prevents a password-to-local downgrade. Account/session/token metadata is persisted separately from immutable document records.
+Schema 4 introduced object and Space policies. Schema 5 adds review threads and immutable resolution events while preserving existing comment records. Schema 6 adds immutable suggestion applications. Revision details include threads, their events and suggestion applications; see [passage review](review-threads.md) and [suggested edits](suggested-edits.md) for their contracts. Previous binaries refuse the newer database. The separate durable authentication latch prevents a password-to-local downgrade. Account/session/token metadata is persisted separately from immutable document records.
 
 ## Access endpoints
 

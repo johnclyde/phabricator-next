@@ -203,6 +203,8 @@ export function createApp(options: AppOptions = {}): App {
         const thread = /^\/api\/revisions\/([DPL]\d+)\/threads\/([^/]+)(\/replies)?$/.exec(path);
         if (thread && method === 'POST' && thread[3]) return { status: 201, body: store.createReply(thread[1]!, thread[2]!, input, attribution) };
         if (thread && method === 'PATCH' && !thread[3]) return { status: 200, body: store.updateThread(thread[1]!, thread[2]!, input, attribution) };
+        const suggestion = /^\/api\/revisions\/([DPL]\d+)\/suggestions\/([^/]+)\/apply$/.exec(path);
+        if (suggestion && method === 'POST') return { status: 201, body: store.applySuggestion(suggestion[1]!, suggestion[2]!, input, attribution) };
         throw new HttpError(404, 'Route not found.');
       }, authorize, present);
     };
