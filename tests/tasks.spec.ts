@@ -366,6 +366,9 @@ test('single and batch duplicate merges retain original tasks, text and relation
   await page.reload(); await refreshedState;
   await page.getByRole('button', { name: 'Merge Duplicates In', exact: true }).click();
   const panel = page.locator('.task-duplicates');
+  // A first network response may be superseded by another startup refresh.
+  // Wait for the reviewed candidate itself before pinning its version.
+  await expect(panel.locator('.task-merge-candidates label').filter({ hasText: `${first.id} ${first.title}` })).toContainText('Version 2');
   await panel.getByRole('checkbox', { name: `${first.id} ${first.title}`, exact: false }).check();
   await expect(panel.getByRole('checkbox', { name: `${second.id} ${second.title}`, exact: false })).toHaveCount(0);
   await panel.getByLabel('Include closed tasks', { exact: true }).check();

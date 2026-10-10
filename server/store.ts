@@ -12,7 +12,7 @@ import type { ProjectChildPreview, ProjectKind, ProjectDetail, ProjectHistory, P
 import { createPassageAnchor } from '../shared/anchors.ts';
 import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
 import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from './workboards.ts';
-import type { TaskColumnMove, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
+import type { TaskColumnMove, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -306,6 +306,8 @@ export class Store {
   workboardCards(id: string, columnId: string, query: WorkboardCardsQuery, visibility?: WorkboardVisibility): WorkboardCardPage { return this.workboards!.cards(id, columnId, query, visibility); }
   workboardHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): WorkboardHistory { return this.workboards!.history(id, before, limit, visible); }
   workboardColumn(id: string, columnId: string): WorkboardColumn { return this.workboards!.column(id, columnId); }
+  workboardImportPreview(targetId: string, sourceId: string): WorkboardImportPreview { return this.workboards!.importPreview(targetId, sourceId); }
+  importWorkboardColumns(targetId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.importColumns(targetId, input, attribution); }
   configureWorkboard(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.configure(id, input, attribution); }
   createWorkboardColumn(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.createColumn(id, input, attribution); }
   updateWorkboardColumn(id: string, columnId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.updateColumn(id, columnId, input, attribution); }

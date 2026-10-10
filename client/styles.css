@@ -440,3 +440,9 @@
   .workboard-move-confirm .button { width: 100%; margin: 4px 0; }
   .workboard-move-editor .panel-heading { flex-wrap: wrap; }
 }
+.workboard-import { margin: 16px 0; }
+.workboard-import-preview { margin: 16px 0; padding: 16px; background: #f0f6fa; border: 1px solid #c5d8e6; }
+.workboard-import-columns { padding-left: 22px; }
+.workboard-import-columns li { padding: 10px 4px; border-bottom: 1px solid #d8e2ea; overflow-wrap: anywhere; }
+.workboard-import-columns li span { display: block; color: #647787; font-size: 12px; margin-top: 5px; }
+@media (max-width: 700px) { .workboard-import .panel-heading { flex-wrap: wrap; }.workboard-import .button { min-height: 44px; } }

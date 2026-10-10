@@ -345,9 +345,11 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const objectGeneration = objectId ? session.objectGenerations.get(objectId) || 0 : 0;
     const boardMutation = Boolean(options && /^\/api\/projects\/PROJ\d+\/workboard(?:\/|$)/.test(path));
     const boardMove = boardMutation && path.endsWith('/moves') && options?.body && typeof options.body === 'object' ? options.body as { taskId?: unknown; position?: { beforeTaskId?: unknown; afterTaskId?: unknown } } : null;
-    const relatedIds = boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [];
+    const importSource = /^\/api\/projects\/PROJ\d+\/workboard\/import-preview\?/.test(path) && !options ? new URLSearchParams(path.split('?')[1]).get('sourceProjectId') : boardMutation && path.endsWith('/import') && options?.body && typeof options.body === 'object' && 'sourceProjectId' in options.body && typeof options.body.sourceProjectId === 'string' ? options.body.sourceProjectId : null;
+    const relatedIds = importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [];
     const relatedGenerations = relatedIds.map(id => ({ id, generation: session.objectGenerations.get(id) || 0 }));
-    if (relatedIds.some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) throw new RequestError('A selected card is no longer available. Review the move before saving.', 404, 'TASK_REFERENCE_UNAVAILABLE');
+    const referenceUnavailable = () => new RequestError(importSource ? 'The source project is no longer available. Its import preview has been removed.' : 'A selected card is no longer available. Review the move before saving.', 404, importSource ? 'PROJECT_REFERENCE_UNAVAILABLE' : 'TASK_REFERENCE_UNAVAILABLE');
+    if (relatedIds.some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) throw referenceUnavailable();
     const ownershipMutation = options?.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && options.body && typeof options.body === 'object' && 'ownerId' in options.body;
     const projectMutation = Boolean(childParent) || Boolean(options && /^\/api\/projects\/PROJ\d+(?:\/(membership|members|watchers|silence))?$/.test(path));
     let taskGeneration = session.taskSnapshotGeneration;
@@ -361,7 +363,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const assertObject = () => {
       assertSession(session);
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
-      if (relatedGenerations.some(({ id, generation }) => session.unavailableObjects.has(id) || (session.objectGenerations.get(id) || 0) !== generation)) throw new RequestError('A selected card is no longer available. Unsaved moves are retained for review.', 404, 'TASK_REFERENCE_UNAVAILABLE');
+      if (relatedGenerations.some(({ id, generation }) => session.unavailableObjects.has(id) || (session.objectGenerations.get(id) || 0) !== generation)) throw referenceUnavailable();
       if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
     };
     const controller = new AbortController();
@@ -405,6 +407,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (!response.ok) {
         const code = typeof data === 'object' && data !== null && 'code' in data ? String(data.code) : undefined;
         if (objectId && code === 'OBJECT_UNAVAILABLE') invalidateObjects([objectId]);
+        if (importSource && code === 'PROJECT_REFERENCE_UNAVAILABLE') invalidateObjects([importSource]);
         throw new RequestError(typeof data === 'object' && data !== null && 'error' in data ? String(data.error) : `Request failed (${response.status})`, response.status, code);
       }
       if (typeof data === 'object' && data !== null && 'accessEpoch' in data && typeof data.accessEpoch === 'number') {

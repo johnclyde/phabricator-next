@@ -194,11 +194,12 @@ export function createApp(options: AppOptions = {}): App {
           return { status: 200, body: updated };
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
-        const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(columns|moves)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
+        const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(columns|moves|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
         if (workboard) {
           const id = workboard[1]!; const section = workboard[2]; const columnId = workboard[3];
           if (method === 'PUT' && !section) return { status: 200, body: store.configureWorkboard(id, input, attribution) };
           if (method === 'POST' && section === 'moves' && !columnId) return { status: 200, body: store.moveWorkboardCard(id, input, attribution) };
+          if (method === 'POST' && section === 'import' && !columnId) return { status: 200, body: store.importWorkboardColumns(id, input, attribution) };
           if (section === 'columns') {
             if (method === 'POST' && !columnId) return { status: 201, body: store.createWorkboardColumn(id, input, attribution) };
             if (method === 'PATCH' && columnId && !workboard[4]) return { status: 200, body: store.updateWorkboardColumn(id, columnId, input, attribution) };
@@ -302,6 +303,12 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const importPreview = /^\/api\/projects\/(PROJ\d+)\/workboard\/import-preview$/.exec(path);
+          if (importPreview) {
+            access.require(importPreview[1]!, 'edit');
+            if (url.searchParams.getAll('sourceProjectId').length !== 1 || [...url.searchParams.keys()].some(name => name !== 'sourceProjectId')) throw new HttpError(400, 'Import preview requires exactly one sourceProjectId parameter.');
+            send(res, 200, access.workboardImportPreview(importPreview[1]!, url.searchParams.get('sourceProjectId'))); return;
+          }
           const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(history)|\/columns\/([^/]+)\/cards)?$/.exec(path);
           if (workboard) {
             const id = workboard[1]!; const history = Boolean(workboard[2]); const columnId = workboard[3]; access.require(id);

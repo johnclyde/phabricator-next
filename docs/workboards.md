@@ -10,6 +10,16 @@ Normal columns can be created, renamed, reordered and hidden. Hiding keeps their
 
 A column's optional `pointLimit` is advisory. In this slice every displayed task contributes one unit, and the warning uses only cards visible under the current filter. Zero is a real limit; null means no limit. Exceeding it does not prohibit a move. Task points and point-based presentation remain unfinished.
 
+## Importing a column setup
+
+An editor can initialize a new board by importing another visible project's column setup. The destination must never have had a board: disabling an existing board does not make it eligible for import. A disabled or archived source remains eligible if it retains importable columns and the editor can view it.
+
+The preview lists the source's visible normal columns in their manual order, including the default column and advisory limits. The import preserves these names, order, default status and limits with new column IDs. It skips hidden and proxy columns, and copies no cards, positions, task tags or triggers. The destination's own existing child projects supply its proxy columns. Tasks already tagged with the destination naturally appear in its default column; they are not copied from the source.
+
+Both source and destination board versions are pinned. Importing enables the destination and creates its columns in one transaction, or changes nothing when a pin, permission or write fails. A preview never initializes either board. The browser requires an explicit preview and a live connection; it does not enqueue an import offline or update its reviewed versions automatically.
+
+Copied column configuration becomes part of the destination project. Later changes to the source's columns or permissions do not modify or hide the copied columns. Import history retains the source project and board version, and those source-linked events are shown only while both projects remain visible. A saved import retry still requires current source view and destination edit permission, even though ordinary reads of the copied columns depend only on destination access.
+
 ## Project tags and proxy columns
 
 Board membership comes from project tags, including descendants. A direct parent tag normally puts an unpositioned task at the top of Backlog. Existing manual positions remain independent on each board. New unpositioned cards precede manually positioned cards, ordered by descending task ID.
@@ -29,6 +39,8 @@ Every direct workboard write includes `expectedBoardVersion`; a card move also i
 Moves select the destination column and start/end or a specific before/after task. The server rechecks these pins and the anchor's current destination under the writer lock. It uses the complete stored ordering, including invisible cards, rather than replacing it with a filtered list submitted by the browser. A stale, moved or unavailable anchor requires review. This deliberate conflict behavior is stricter than upstream's best-effort fallback to another anchor or the top of a column.
 
 An actual card move advances the task once, even when it also changes project tags. The task's immutable history records the column move alongside tag changes; the board has its own immutable event stream. Column names in these events are snapshots. No-op requests still check authority and versions but do not manufacture a change.
+
+New column-creation events also snapshot default status and the initial advisory limit. Earlier events retain only the evidence originally recorded; the application does not reconstruct missing configuration history from today's values.
 
 Successful writes return minimal receipts with historical board/task versions. They contain no rendered board or task content. Retrying an idempotency key checks current authority before returning the original receipt, without reapplying its changes. A receipt is not a fresh editing baseline: clients reload the board explicitly. Changed CAS values, an anchor's later movement, or a later board disable do not invalidate an otherwise authorized historical receipt.
 
@@ -66,6 +78,8 @@ Shared contracts live in `shared/workboards.ts`. All routes below begin with `/a
 | `PATCH /columns/:columnId` | `{name?,hidden?,pointLimit?,expectedBoardVersion}` → receipt; proxies permit only limit edits |
 | `POST /columns/:columnId/reorder` | `{expectedBoardVersion,position}` → receipt; normal columns only |
 | `POST /moves` | `{taskId,columnId,expectedBoardVersion,expectedTaskVersion,position}` → receipt |
+| `GET /import-preview` | `sourceProjectId` query → `WorkboardImportPreview`; destination edit and source view required |
+| `POST /import` | `{sourceProjectId,expectedBoardVersion,expectedSourceBoardVersion}` → receipt |
 | `GET /columns/:columnId/cards` | `WorkboardCardPage`; query includes `expectedBoardVersion`, optional `after` and the original filters |
 | `GET /history` | `WorkboardHistory`; exclusive `before` sequence and `limit` |
 
@@ -77,4 +91,6 @@ Read queries use `status=open|all`, `showHidden=true|false`, `ownerId` and `limi
 
 The pinned [board controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/project/controller/PhabricatorProjectBoardViewController.php) establishes opt-in boards, task visibility and omission of ordinary subproject proxies. The [layout engine](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/project/engine/PhabricatorBoardLayoutEngine.php), [column positions](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/project/storage/PhabricatorProjectColumnPosition.php), and [task transaction editor](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/editor/ManiphestTransactionEditor.php) ground independent positions, proxy tag effects and relative ordering.
 
-PROJECT-04 remains partial. Saved/default filters, grouped sorting and its field-changing drag behavior, board backgrounds, column import/default cloning, cross-project bulk moves, creating or adding tasks directly from a column, drop triggers and sounds, task points, multiple simultaneous proxy positions, durable offline move submission, drag-and-drop and Conduit/import compatibility remain gaps. This slice does not claim full Projects or workboard parity.
+The pinned [column import controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/project/controller/PhabricatorProjectBoardImportController.php) copies active normal columns and their properties into an empty board. The [column model](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/project/storage/PhabricatorProjectColumn.php) stores default status and limits in those properties, separately from the trigger reference. Our import adds exact version checks and an explicit source-linked audit; upstream records only its hidden board-enable transaction. This UI operation does not import a historical Phabricator database.
+
+PROJECT-04 remains partial. Saved/default filters, grouped sorting and its field-changing drag behavior, board backgrounds, cross-project bulk moves, creating or adding tasks directly from a column, drop triggers and sounds, task points, multiple simultaneous proxy positions, durable offline move submission, drag-and-drop and Conduit/historical import compatibility remain gaps. This slice does not claim full Projects or workboard parity.

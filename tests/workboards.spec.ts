@@ -131,3 +131,80 @@ test('a lost move response retries the exact submitted request after the board a
     await card.getByRole('button', { name: 'Move Card', exact: true }).click(); await expect(page.getByRole('button', { name: 'Review Move', exact: true })).toBeEnabled(); await expect(page.locator('.workboard-move-editor')).not.toContainText('set aside');
   } finally { await page.unrouteAll({ behavior: 'wait' }); }
 });
+
+async function prepareImportSource(page: Page, name: string) {
+  const project = await api<Project>(page, '/projects', 'POST', { name });
+  await api(page, `/projects/${project.id}/workboard`, 'PUT', { enabled: true, expectedBoardVersion: 0 });
+  let board = await api<WorkboardDetail>(page, `/projects/${project.id}/workboard`);
+  await api(page, `/projects/${project.id}/workboard/columns`, 'POST', { name: 'Peer Review', pointLimit: 2, expectedBoardVersion: board.board.version });
+  board = await api<WorkboardDetail>(page, `/projects/${project.id}/workboard`);
+  return { project, board };
+}
+async function previewImport(page: Page, source: Project) {
+  await page.getByRole('button', { name: 'Import Columns', exact: true }).click(); await page.getByLabel('Source project', { exact: true }).selectOption(source.id); await page.getByRole('button', { name: 'Preview Columns', exact: true }).click(); await expect(page.getByRole('region', { name: 'Column import preview', exact: true })).toBeVisible();
+}
+
+test('column import previews a disabled archived source and copies only its configuration into an untouched target', async ({ page }, info) => {
+  await page.goto('./#projects'); const marker = `${info.project.name} ${Date.now()}`;
+  const { project: source } = await prepareImportSource(page, `Import source ${marker}`);
+  const sourceTask = await api<Task>(page, '/tasks', 'POST', { title: `Source-only task ${marker}`, projectIds: [source.id] });
+  let board = await api<WorkboardDetail>(page, `/projects/${source.id}/workboard`);
+  await api(page, `/projects/${source.id}/workboard/columns/${board.columns.find(column => column.isDefault)!.id}`, 'PATCH', { pointLimit: 0, expectedBoardVersion: board.board.version });
+  board = await api<WorkboardDetail>(page, `/projects/${source.id}/workboard`);
+  await api(page, `/projects/${source.id}/workboard/columns`, 'POST', { name: 'Hidden source column', expectedBoardVersion: board.board.version });
+  board = await api<WorkboardDetail>(page, `/projects/${source.id}/workboard`);
+  await api(page, `/projects/${source.id}/workboard/columns/${board.columns.find(column => column.name === 'Hidden source column')!.id}`, 'PATCH', { hidden: true, expectedBoardVersion: board.board.version });
+  board = await api<WorkboardDetail>(page, `/projects/${source.id}/workboard`);
+  await api(page, `/projects/${source.id}/workboard/columns/${board.columns.find(column => column.name === 'Peer Review')!.id}/reorder`, 'POST', { position: { edge: 'start' }, expectedBoardVersion: board.board.version });
+  board = await api<WorkboardDetail>(page, `/projects/${source.id}/workboard`);
+  await api(page, `/projects/${source.id}/workboard`, 'PUT', { enabled: false, expectedBoardVersion: board.board.version });
+  await api(page, `/projects/${source.id}`, 'PATCH', { status: 'archived', expectedVersion: source.version });
+  const target = await api<Project>(page, '/projects', 'POST', { name: `Import target ${marker}` }); const targetTask = await api<Task>(page, '/tasks', 'POST', { title: `Existing target task ${marker}`, projectIds: [target.id] });
+  await openBoard(page, target); let writes = 0; page.on('request', request => { if (request.url().endsWith(`/projects/${target.id}/workboard/import`) && request.method() === 'POST') writes++; });
+  await previewImport(page, source); const preview = page.getByRole('region', { name: 'Column import preview', exact: true });
+  await expect(preview.locator('li strong')).toHaveText(['Peer Review', 'Backlog']); await expect(preview).toContainText('Advisory card limit: 2'); await expect(preview).toContainText('Default column · Advisory card limit: 0'); await expect(preview).not.toContainText('Hidden source column'); expect(writes).toBe(0);
+  const confirm = page.getByRole('button', { name: 'Confirm Import Columns', exact: true }); await confirm.evaluate(element => element.scrollIntoView({ block: 'center' })); if (info.project.name === 'mobile') { const box = await confirm.boundingBox(); expect(box!.height).toBeGreaterThanOrEqual(44); expect(box!.y).toBeGreaterThan(100); expect(box!.y + box!.height).toBeLessThan(785); } await page.screenshot({ path: info.outputPath('column-import-preview.png') });
+  await confirm.click(); await expect(page.getByRole('region', { name: 'Import workboard columns', exact: true })).toHaveCount(0); expect(writes).toBe(1); await selectColumn(page, 'Backlog');
+  await expect(page.getByRole('article', { name: `${targetTask.id} ${targetTask.title}`, exact: true })).toBeVisible(); await expect(page.getByRole('article', { name: `${sourceTask.id} ${sourceTask.title}`, exact: true })).toHaveCount(0);
+  const imported = await api<WorkboardDetail>(page, `/projects/${target.id}/workboard`); expect(imported.columns.map(column => [column.name, column.isDefault, column.pointLimit])).toEqual([['Peer Review', false, 2], ['Backlog', true, 0]]);
+  await page.getByRole('button', { name: 'Show Board History', exact: true }).click(); await expect(page.locator('.workboard-history')).toContainText(`Imported 2 columns from ${source.id}`); await expect(page.locator('.workboard-history')).toContainText('Initial advisory card limit: 0');
+  await expect(page.getByRole('button', { name: 'Import Columns', exact: true })).toHaveCount(0);
+});
+
+test('column imports keep stale source pins and retry a lost response with exactly the submitted request', async ({ page }, info) => {
+  await page.goto('./#projects'); const marker = `${info.project.name} ${Date.now()}`; const { project: source, board } = await prepareImportSource(page, `Pinned source ${marker}`); const target = await api<Project>(page, '/projects', 'POST', { name: `Pinned target ${marker}` });
+  await openBoard(page, target); await previewImport(page, source); const preview = page.getByRole('region', { name: 'Column import preview', exact: true });
+  await api(page, `/projects/${source.id}/workboard/columns/${board.columns.find(column => column.name === 'Peer Review')!.id}`, 'PATCH', { name: 'Updated Review', expectedBoardVersion: board.board.version });
+  const staleResponse = page.waitForResponse(response => response.url().endsWith(`/projects/${target.id}/workboard/import`) && response.request().method() === 'POST'); await page.getByRole('button', { name: 'Confirm Import Columns', exact: true }).click(); const conflict = await staleResponse; expect(conflict.status()).toBe(409); expect(conflict.request().postDataJSON()).toMatchObject({ expectedSourceBoardVersion: board.board.version, expectedBoardVersion: 0 });
+  await expect(preview).toContainText('Peer Review'); await expect(preview).not.toContainText('Updated Review'); await expect(page.getByRole('region', { name: 'Import workboard columns', exact: true }).getByRole('alert')).toBeVisible();
+  page.once('dialog', dialog => void dialog.accept()); await page.getByRole('button', { name: 'Load New Import Preview', exact: true }).click(); await expect(preview).toContainText('Updated Review');
+  const requests: { body: unknown; key: string | undefined }[] = []; let loseResponse = true;
+  await page.route(`**/api/projects/${target.id}/workboard/import`, async route => { requests.push({ body: route.request().postDataJSON(), key: route.request().headers()['idempotency-key'] }); if (loseResponse) { loseResponse = false; const response = await route.fetch(); expect(response.ok()).toBe(true); await route.abort('failed'); } else await route.continue(); });
+  try {
+    await page.getByRole('button', { name: 'Confirm Import Columns', exact: true }).click(); await expect(page.getByRole('button', { name: 'Retry Submitted Import', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Reload Board', exact: true }).click(); await expect(page.getByRole('region', { name: 'Import workboard columns', exact: true })).toContainText('The target board changed');
+    await page.getByRole('button', { name: 'Retry Submitted Import', exact: true }).click(); await expect(page.getByRole('region', { name: 'Import workboard columns', exact: true })).toHaveCount(0);
+    expect(requests).toHaveLength(2); expect(requests[0]).toEqual(requests[1]); expect(requests[0]!.key).toBeTruthy();
+    const imported = await api<WorkboardDetail>(page, `/projects/${target.id}/workboard`); expect(imported.columns.map(column => column.name)).toEqual(['Backlog', 'Updated Review']);
+  } finally { await page.unrouteAll({ behavior: 'wait' }); }
+});
+
+test('source revocation clears import previews and rejects a late preview without hiding its target', async ({ page, browser }, info) => {
+  await signIn(page, 0); const state = await api<AppState>(page, '/state'); const alice = state.currentPrincipalId; const marker = `${info.project.name} ${Date.now()}`;
+  const { project: source } = await prepareImportSource(page, `Private import source ${marker}`); const target = await api<Project>(page, '/projects', 'POST', { name: `Visible import target ${marker}` });
+  const context = await browser.newContext({ viewport: page.viewportSize()! });
+  await context.addInitScript(() => {
+    const held = { enabled: false, ready: false, released: false, release: () => {} }; const gate = new Promise<void>(resolve => { held.release = resolve; }); (window as unknown as { heldImport: typeof held }).heldImport = held;
+    const original = window.fetch; window.fetch = async (...args) => { const response = await original(...args); const input = args[0]; const url = new URL(input instanceof Request ? input.url : String(input), location.href); if (held.enabled && url.pathname.endsWith('/workboard/import-preview')) { const json = response.json.bind(response); response.json = async () => { const body: unknown = await json(); held.ready = true; await gate; held.released = true; return body; }; } return response; };
+  });
+  const viewer = await context.newPage();
+  try {
+    await signIn(viewer, 1); await viewer.goto(`http://127.0.0.1:4312${base}#${target.id}/workboard`); await previewImport(viewer, source);
+    await viewer.evaluate(() => { (window as unknown as { heldImport: { enabled: boolean } }).heldImport.enabled = true; }); await viewer.getByRole('button', { name: 'Load New Import Preview', exact: true }).click(); await expect.poll(() => viewer.evaluate(() => (window as unknown as { heldImport: { ready: boolean } }).heldImport.ready)).toBe(true);
+    const policy = await api<ObjectAccess>(page, `/policies/${source.id}`); await api(page, `/policies/${source.id}`, 'PUT', { expectedVersion: policy.policy.version, spaceId: 'S1', ...policy.policy.rules, view: { kind: 'principals', principalIds: [alice] } });
+    await viewer.evaluate(() => window.dispatchEvent(new Event('focus'))); await expect(viewer.getByRole('region', { name: 'Column import preview', exact: true })).toHaveCount(0);
+    await viewer.evaluate(() => (window as unknown as { heldImport: { release: () => void } }).heldImport.release()); await expect.poll(() => viewer.evaluate(() => (window as unknown as { heldImport: { released: boolean } }).heldImport.released)).toBe(true);
+    await expect(viewer.getByRole('region', { name: 'Column import preview', exact: true })).toHaveCount(0); await expect(viewer.getByRole('region', { name: 'Import workboard columns', exact: true })).not.toContainText(source.name);
+    await expect(viewer.getByRole('heading', { level: 1 })).toContainText(target.name); await expect(viewer.getByRole('button', { name: 'Preview Columns', exact: true })).toHaveCount(0); await expect(viewer.getByRole('button', { name: 'Load New Import Preview', exact: true })).toBeDisabled(); expect((await api<WorkboardDetail>(page, `/projects/${target.id}/workboard`)).board.version).toBe(0);
+  } finally { await context.close(); }
+});

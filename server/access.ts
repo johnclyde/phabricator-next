@@ -3,7 +3,7 @@ import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, P
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
 import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
-import type { WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardQuery } from '../shared/workboards.ts';
+import type { WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import type { MutationResponse, Store } from './store.ts';
@@ -99,7 +99,15 @@ export class AccessLayer {
     this.require(id);
     return { ...this.store.workboardHistory(id, before, limit, related => this.canView(related)), accessEpoch: this.policies.epoch() };
   }
+  workboardImportPreview(id: string, sourceId: unknown): WorkboardImportPreview {
+    this.require(id, 'edit'); const source = this.workboardProjectReference(sourceId);
+    return { ...this.store.workboardImportPreview(id, source), accessEpoch: this.policies.epoch() };
+  }
   /** Child failures must not be mistaken for revocation of a visible board. */
+  private workboardProjectReference(value: unknown): string {
+    if (typeof value !== 'string' || !/^PROJ[1-9]\d*$/.test(value) || !this.canView(value)) throw new HttpError(404, 'Project reference was not found.', 'PROJECT_REFERENCE_UNAVAILABLE');
+    return value;
+  }
   private workboardColumnReference(projectId: string, value: unknown): WorkboardColumn {
     const unavailable = () => new HttpError(404, 'Workboard column was not found.', 'COLUMN_UNAVAILABLE');
     if (typeof value !== 'string' || !/^COL[1-9]\d*$/.test(value)) throw unavailable();
@@ -230,10 +238,12 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
-    const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|columns)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
+    const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|columns|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
     if (workboard && method !== 'GET') {
       const id = workboard[1]!; const data = record(input);
-      if (workboard[2] === 'moves') {
+      if (workboard[2] === 'import') {
+        this.workboardProjectReference(data?.sourceProjectId);
+      } else if (workboard[2] === 'moves') {
         this.workboardTaskReference(data?.taskId, true);
         this.workboardColumnReference(id, data?.columnId);
         const position = record(data?.position);

@@ -34,6 +34,15 @@ export type WorkboardCardPosition = { beforeTaskId: string } | { afterTaskId: st
 export interface MoveWorkboardCardInput {
   taskId: string; columnId: string; expectedBoardVersion: number; expectedTaskVersion: number; position: WorkboardCardPosition;
 }
+export type WorkboardImportColumn = Pick<WorkboardColumn, 'id' | 'name' | 'isDefault' | 'pointLimit'>;
+export interface WorkboardImportPreview {
+  projectId: string; sourceProject: ProjectReference;
+  expectedBoardVersion: number; expectedSourceBoardVersion: number;
+  columns: WorkboardImportColumn[]; accessEpoch?: number;
+}
+export interface ImportWorkboardColumnsInput {
+  sourceProjectId: string; expectedBoardVersion: number; expectedSourceBoardVersion: number;
+}
 export interface TaskColumnMove {
   projectId: string; fromColumns: WorkboardColumnSnapshot[]; toColumn: WorkboardColumnSnapshot; operationId: string;
 }
@@ -42,9 +51,11 @@ export interface WorkboardFieldChange {
 }
 export interface WorkboardTransaction {
   id: string; projectId: string; sequence: number; boardVersion: number;
-  kind: 'enable' | 'disable' | 'column_create' | 'column_edit' | 'column_reorder' | 'card_move' | 'proxy_create';
+  kind: 'enable' | 'disable' | 'column_create' | 'column_edit' | 'column_reorder' | 'card_move' | 'proxy_create' | 'column_import';
   actor: string | null; createdAt: string; attribution?: ActorAttribution; operationId: string;
   column?: WorkboardColumnSnapshot; changes?: WorkboardFieldChange[];
+  columnConfiguration?: Pick<WorkboardColumn, 'isDefault' | 'pointLimit'>;
+  importedFrom?: { projectId: string; boardVersion: number; columnCount: number; columnId?: string };
   position?: WorkboardColumnPosition | WorkboardCardPosition;
   taskId?: string; taskVersion?: number; move?: TaskColumnMove;
   /** All related policy objects must remain visible before an event is shown. */

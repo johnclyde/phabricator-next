@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { ActorAttribution, Project, Task } from '../shared/types.ts';
 import type { ProjectReference } from '../shared/projects.ts';
-import type { TaskColumnMove, Workboard, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardColumnPosition, WorkboardColumnSnapshot, WorkboardDetail, WorkboardFilter, WorkboardHistory, WorkboardQuery, WorkboardReceipt, WorkboardTransaction } from '../shared/workboards.ts';
+import type { TaskColumnMove, Workboard, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardColumnPosition, WorkboardColumnSnapshot, WorkboardDetail, WorkboardFilter, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt, WorkboardTransaction } from '../shared/workboards.ts';
 import { ancestorIds, children, descendantIds, hierarchy } from './project-graph.ts';
 import { choice, HttpError, integer, object, string } from './validation.ts';
 
@@ -37,6 +37,7 @@ function reference(project: Project): ProjectReference {
   return { id, name, displayName, kind, parentId, milestoneNumber, status, icon, color, colorKey, version, hierarchyVersion, depth };
 }
 function snapshot(column: WorkboardColumn): WorkboardColumnSnapshot { return { id: column.id, name: column.name, proxyProjectId: column.proxyProjectId }; }
+function configuration(column: WorkboardColumn): NonNullable<WorkboardTransaction['columnConfiguration']> { return { isDefault: column.isDefault, pointLimit: column.pointLimit }; }
 
 /** No boards or historical actions are invented by this migration. */
 export function initializeWorkboards(database: DatabaseSync): void {
@@ -170,16 +171,62 @@ export class WorkboardStore {
   }
   private createProxy(id:string,project:Project,operationId:string,attribution?:ActorAttribution):void {
     if(this.database.prepare('SELECT 1 FROM workboard_columns WHERE project_id=? AND proxy_project_id=?').get(id,project.id))return;
-    this.touch(id);const column=this.insertColumn(id,'',false,project.id);this.append(id,{kind:'proxy_create',operationId,column:snapshot(column),relatedProjectIds:[id,project.id],relatedTaskIds:[]},attribution);
+    this.touch(id);const column=this.insertColumn(id,'',false,project.id);this.append(id,{kind:'proxy_create',operationId,column:snapshot(column),columnConfiguration:configuration(column),relatedProjectIds:[id,project.id],relatedTaskIds:[]},attribution);
   }
   configure(id:string,input:unknown,attribution?:ActorAttribution):WorkboardReceipt {
     return this.mutation(()=>{const data=object(input,['enabled','expectedBoardVersion']);if(typeof data.enabled!=='boolean')throw new HttpError(400,'enabled must be a boolean.');const board=this.check(id,data.expectedBoardVersion,false);if(board.enabled===data.enabled)return this.receipt(id);const operationId=randomUUID();
-      if(!this.row(id)){this.database.prepare('INSERT INTO project_workboards(project_id,enabled,version) VALUES(?,1,0)').run(id);this.touch(id);const column=this.insertColumn(id,'',true);this.append(id,{kind:'column_create',operationId,column:snapshot(column),relatedProjectIds:[id],relatedTaskIds:[]},attribution);for(const child of children(this.database,id))this.createProxy(id,this.options.project(child.projectId),operationId,attribution);}else{this.database.prepare('UPDATE project_workboards SET enabled=? WHERE project_id=?').run(Number(data.enabled),id);this.touch(id);}
+      if(!this.row(id)){this.database.prepare('INSERT INTO project_workboards(project_id,enabled,version) VALUES(?,1,0)').run(id);this.touch(id);const column=this.insertColumn(id,'',true);this.append(id,{kind:'column_create',operationId,column:snapshot(column),columnConfiguration:configuration(column),relatedProjectIds:[id],relatedTaskIds:[]},attribution);for(const child of children(this.database,id))this.createProxy(id,this.options.project(child.projectId),operationId,attribution);}else{this.database.prepare('UPDATE project_workboards SET enabled=? WHERE project_id=?').run(Number(data.enabled),id);this.touch(id);}
       this.append(id,{kind:data.enabled?'enable':'disable',operationId,changes:[{field:'enabled',oldValue:board.enabled,newValue:data.enabled}],relatedProjectIds:[id],relatedTaskIds:[]},attribution);return this.receipt(id);
     });
   }
+  private importSource(targetId: string, sourceId: string): { board: Workboard; project: Project; columns: ColumnRow[] } {
+    this.options.project(targetId);
+    if (sourceId === targetId) throw new HttpError(400, 'Choose a different project as the column source.');
+    if (this.row(targetId)) throw new HttpError(409, 'Columns can only be imported before this workboard is initialized.');
+    const project = this.options.project(sourceId); const board = this.board(sourceId);
+    const columns = this.rows(sourceId).filter(column => column.kind === 'normal' && !column.hidden);
+    if (!columns.length || columns.filter(column => column.is_default).length !== 1) throw new HttpError(409, 'The source must have exactly one importable default column.');
+    return { board, project, columns };
+  }
+  importPreview(targetId: string, sourceId: string): WorkboardImportPreview {
+    const source = this.importSource(targetId, sourceId);
+    return {
+      projectId: targetId, sourceProject: reference(source.project), expectedBoardVersion: 0,
+      expectedSourceBoardVersion: source.board.version,
+      columns: source.columns.map(row => { const column = this.hydrate(row); return { id: column.id, name: column.name, isDefault: column.isDefault, pointLimit: column.pointLimit }; }),
+    };
+  }
+  importColumns(targetId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt {
+    return this.mutation(() => {
+      const data = object(input, ['sourceProjectId', 'expectedBoardVersion', 'expectedSourceBoardVersion']);
+      const sourceId = string(data.sourceProjectId, 'sourceProjectId', 50);
+      if (!/^PROJ[1-9]\d*$/.test(sourceId)) throw new HttpError(400, 'Choose a valid source project.');
+      this.check(targetId, data.expectedBoardVersion, false);
+      const expectedSourceBoardVersion = integer(data.expectedSourceBoardVersion, 'expectedSourceBoardVersion');
+      const source = this.importSource(targetId, sourceId);
+      if (source.board.version !== expectedSourceBoardVersion) throw new HttpError(409, 'The source workboard changed. Reload the import preview.');
+      const operationId = randomUUID();
+      const importedFrom = { projectId: sourceId, boardVersion: source.board.version, columnCount: source.columns.length };
+      const relatedProjectIds = [targetId, sourceId];
+      this.database.prepare('INSERT INTO project_workboards(project_id,enabled,version) VALUES(?,1,0)').run(targetId);
+      this.touch(targetId);
+      for (const row of source.columns) {
+        // Raw empty names preserve the default Backlog identity. Sequences are
+        // compacted without copying gaps left by excluded hidden/proxy columns.
+        const column = this.insertColumn(targetId, row.name, !!row.is_default, null, row.point_limit);
+        this.append(targetId, {
+          kind: 'column_create', operationId, column: snapshot(column), columnConfiguration: configuration(column),
+          importedFrom: { ...importedFrom, columnId: row.id }, relatedProjectIds, relatedTaskIds: [],
+        }, attribution);
+      }
+      for (const child of children(this.database, targetId)) this.createProxy(targetId, this.options.project(child.projectId), operationId, attribution);
+      this.append(targetId, { kind: 'column_import', operationId, importedFrom, relatedProjectIds, relatedTaskIds: [] }, attribution);
+      this.append(targetId, { kind: 'enable', operationId, changes: [{ field: 'enabled', oldValue: false, newValue: true }], importedFrom, relatedProjectIds, relatedTaskIds: [] }, attribution);
+      return this.receipt(targetId);
+    });
+  }
   createColumn(id:string,input:unknown,attribution?:ActorAttribution):WorkboardReceipt {
-    return this.mutation(()=>{const data=object(input,['name','pointLimit','expectedBoardVersion']);this.check(id,data.expectedBoardVersion);const name=columnName(data.name);const capacity=data.pointLimit===undefined?null:pointLimit(data.pointLimit);this.touch(id);const column=this.insertColumn(id,name,false,null,capacity);this.append(id,{kind:'column_create',operationId:randomUUID(),column:snapshot(column),relatedProjectIds:[id],relatedTaskIds:[]},attribution);return this.receipt(id,{columnId:column.id});});
+    return this.mutation(()=>{const data=object(input,['name','pointLimit','expectedBoardVersion']);this.check(id,data.expectedBoardVersion);const name=columnName(data.name);const capacity=data.pointLimit===undefined?null:pointLimit(data.pointLimit);this.touch(id);const column=this.insertColumn(id,name,false,null,capacity);this.append(id,{kind:'column_create',operationId:randomUUID(),column:snapshot(column),columnConfiguration:configuration(column),relatedProjectIds:[id],relatedTaskIds:[]},attribution);return this.receipt(id,{columnId:column.id});});
   }
   updateColumn(id:string,columnId:string,input:unknown,attribution?:ActorAttribution):WorkboardReceipt {
     return this.mutation(()=>{const data=object(input,['name','hidden','pointLimit','expectedBoardVersion']);this.check(id,data.expectedBoardVersion);const column=this.column(id,columnId);if(!['name','hidden','pointLimit'].some(key=>key in data))throw new HttpError(400,'Provide a column setting to change.');

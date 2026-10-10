@@ -868,3 +868,45 @@ test('successful move cleanup removes a failed attempt marker without deleting a
     assert.deepEqual(client.readStored(key, null), newer);
   } finally { storage.close(); }
 });
+
+test('column import captures source view independently from target edit and never queues', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2', false) }, 1);
+    let calls = 0; globalThis.fetch = async () => { calls++; return Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 1, accessEpoch: 1 }); };
+    const body = { sourceProjectId: 'PROJ2', expectedBoardVersion: 0, expectedSourceBoardVersion: 4 };
+    assert.equal((await client.request('/api/projects/PROJ1/workboard/import', { method: 'POST', body }) as { saved: boolean }).saved, true);
+    assert.equal(canQueue('/api/projects/PROJ1/workboard/import', 'POST', body), false);
+    client.reconcileAccess({ PROJ1: access('PROJ1') }, 2);
+    await assert.rejects(client.request('/api/projects/PROJ1/workboard/import', { method: 'POST', body }), withCode('PROJECT_REFERENCE_UNAVAILABLE'));
+    assert.equal(client.unavailableObject('PROJ1'), false); assert.equal(calls, 1);
+    client.reconcileAccess({ PROJ1: access('PROJ1', false), PROJ2: access('PROJ2') }, 3);
+    await assert.rejects(client.request('/api/projects/PROJ1/workboard/import', { method: 'POST', body }), withCode('ACTION_FORBIDDEN'));
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('a late import preview cannot cross source revocation while a committed content-free receipt can', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 1);
+    let release!: (response: Response) => void; globalThis.fetch = async () => await new Promise<Response>(resolve => { release = resolve; });
+    const preview = client.request('/api/projects/PROJ1/workboard/import-preview?sourceProjectId=PROJ2');
+    client.reconcileAccess({ PROJ1: access('PROJ1') }, 2); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 3);
+    release(Response.json({ projectId: 'PROJ1', sourceProject: { id: 'PROJ2', name: 'Private source' }, columns: [{ name: 'Private configuration' }], accessEpoch: 1 }));
+    await assert.rejects(preview, withCode('PROJECT_REFERENCE_UNAVAILABLE'));
+    const receipt = client.request('/api/projects/PROJ1/workboard/import', { method: 'POST', body: { sourceProjectId: 'PROJ2', expectedBoardVersion: 0, expectedSourceBoardVersion: 4 }, id: 'retained-import-request' });
+    client.reconcileAccess({ PROJ1: access('PROJ1') }, 4); release(Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 1, accessEpoch: 4 }));
+    assert.equal((await receipt as { saved: boolean }).saved, true);
+    assert.equal(client.unavailableObject('PROJ1'), false);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('an import source denial invalidates the source preview authority and preserves its target', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 1);
+    globalThis.fetch = async () => Response.json({ error: 'Source unavailable', code: 'PROJECT_REFERENCE_UNAVAILABLE' }, { status: 404 });
+    await assert.rejects(client.request('/api/projects/PROJ1/workboard/import-preview?sourceProjectId=PROJ2'), withCode('PROJECT_REFERENCE_UNAVAILABLE'));
+    assert.equal(client.unavailableObject('PROJ2'), true); assert.equal(client.unavailableObject('PROJ1'), false);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
