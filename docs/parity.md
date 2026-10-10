@@ -1,6 +1,6 @@
-# Phabricator 2021 parity and expansion roadmap
+# Phabricator parity and expansion roadmap
 
-This document is the project's internal feature tracker for historical parity. It inventories the actual upstream source at the pins in [upstream.md](upstream.md), defines acceptance criteria, and separates the 2021 baseline from new AI and document workflows. Work is recorded here and in repository documentation, not in GitHub Issues. The [architecture](architecture.md) and [internal roadmap](roadmap.md) set current implementation order.
+This document is the project's internal feature tracker for parity with the latest pinned upstream source. It inventories the actual Phabricator and Arcanist heads verified on October 10, 2026 in [upstream.md](upstream.md), preserves explicitly identified 2021 carry-forward capabilities, and separates both from new AI and document workflows. Work is recorded here and in repository documentation, not in GitHub Issues. The [architecture](architecture.md) and [internal roadmap](roadmap.md) set current implementation order.
 
 **Product priority: document iteration first.** Academic papers, legal motions, and other long-form arguments are central, especially word/structure diffs, stable review anchors, and claim/citation provenance. Incremental code review remains part of historical parity but is a secondary initial workflow. Phabricator's durable revision and transaction model is the foundation for both.
 
@@ -8,7 +8,7 @@ This document is the project's internal feature tracker for historical parity. I
 
 ## Baseline and completion rule
 
-The baseline is the upstream Phabricator and Arcanist history through June 1, 2021 UTC. Source inventory: [`src/applications` at 51cb7a3d](https://github.com/phacility/phabricator/tree/51cb7a3db9e8e510d564f6b37297111f7a690c91/src/applications). The pinned tree contains **78 directories**, including internal services and prototypes. The upstream [prototype guide](https://github.com/phacility/phabricator/blob/51cb7a3db9e8e510d564f6b37297111f7a690c91/src/docs/user/userguide/prototypes.diviner) explicitly warns that prototypes may lack essential features. “Prototype” below means the application class returns `isPrototype() = true`, not a judgement about our implementation.
+The active baseline is Phabricator `5720a38c` and Arcanist `e50d1bc4`, the latest default-branch heads verified on October 10, 2026. Source inventory: [`src/applications` at 5720a38c](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications). The active tree contains **76 directories**, including internal services and prototypes. The 2021 tree contained 78; Phragment and Releeph remain explicit historical carry-forward targets below. The [latest-source comparison and API inventory](latest-upstream.md) are part of this acceptance scope, including upstream authorization fixes and removal of unsafe obsolete APIs. The upstream [prototype guide](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/docs/user/userguide/prototypes.diviner) explicitly warns that prototypes may lack essential features. “Prototype” below means the application class returns `isPrototype() = true`, not a judgement about our implementation.
 
 For each application, parity requires:
 
@@ -50,11 +50,37 @@ The first repository adapter is Git, but Mercurial and Subversion remain require
 | Integration | Conduit search/edit pagination, custom fields, webhooks, outbound/inbound email, external object links, auth providers. | Typed API tools and event subscriptions for agents, with least-privilege service actors and traceable run IDs. | M1, M3, M5 |
 | Shared invariants | Stable IDs, transaction history, subscriptions, object policies, Spaces, full-text search, file access, drafts, notifications. | The same policy applies to model context, retrieval results, generated summaries, review findings, artifacts and caches. | M1 |
 
-The [upstream Differential FAQ](https://github.com/phacility/phabricator/blob/51cb7a3db9e8e510d564f6b37297111f7a690c91/src/docs/user/userguide/differential_faq.diviner) documents configurable sticky acceptance after updates. Our proposed exact-content approval intentionally tightens that behavior for automated landing: updating the reviewed content requires fresh applicable evidence. This is a recorded difference, not an accidental loss of compatibility. Preserve imported historical accept events as history; do not reinterpret them as current proof.
+The [upstream Differential FAQ](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/docs/user/userguide/differential_faq.diviner) documents configurable sticky acceptance after updates. Our proposed exact-content approval intentionally tightens that behavior for automated landing: updating the reviewed content requires fresh applicable evidence. This is a recorded difference, not an accidental loss of compatibility. Preserve imported historical accept events as history; do not reinterpret them as current proof.
 
-## Every upstream application directory
+## Next acceptance slices
 
-Each row describes the baseline scope still to implement or verify. Several directories contribute infrastructure to the same user-facing application. “Standard” means not flagged as an upstream prototype; it does not certify maturity. The source's own Harbormaster guide, for example, warns of incomplete capabilities despite having no prototype flag.
+These identifiers are internal tracking keys. The rows describe required acceptance evidence, not completed work. Record implemented subsets and their tests in the roadmap; do not mark an entire application complete after one slice. Detailed pinned source entry points are in [latest-upstream.md](latest-upstream.md#foundation-acceptance-details).
+
+| Key | Capability | Required evidence |
+| --- | --- | --- |
+| AUTH-01 | Accounts and sessions | Operator bootstraps an administrator; invited users sign in and out; sessions expire, revoke and survive only as intended across restarts. Disabled users and anonymous callers cannot read or mutate protected objects. |
+| AUTH-02 | Request and credential boundaries | Session rotation, password hashing, CSRF protection, throttling and safe return URLs are exercised. Browser cookies and CLI tokens have distinct scope/revocation tests; mount paths do not bypass checks. |
+| AUTH-03 | Identity lifecycle | Registration approval, email verification/recovery, account linking, provider configuration, service actors, MFA and SSH keys have explicit implemented/unsupported status. No placeholder provider is reported as working. |
+| POLICY-01 | Objects and Spaces | View/edit/interact, project membership and a restrictive Space are evaluated for both direct IDs and list/search. Inaccessible objects and counts cannot leak through activity, attachments or model context. |
+| POLICY-02 | Offline and automated identity | Offline drafts/outbox/cache are partitioned by authenticated identity and server. Logout/account switch cannot replay one user's writes as another. Agents have attributed, bounded authority. |
+| WIKI-01 | Durable content history | Every wiki edit creates immutable content with actor/time/edit summary; view any version and compare two versions. A restart preserves histories, and concurrent updates conflict rather than overwrite. |
+| WIKI-02 | Hierarchy and movement | Canonical slugs, root/parent/child navigation, missing ancestors, move destinations and redirects are defined. Moving a subtree preserves descendants and stable document IDs; collisions and cycles fail safely. |
+| WIKI-03 | Delete, draft and publish | Soft deletion, restoration, draft versus published state and publishing an earlier version preserve historical content and policy checks. |
+| WIKI-04 | Wiki policy and interoperability | Parent/ancestor restrictions apply to view/edit/history/search/preview. Mentions and file references do not widen permissions. Import/export retains histories, hierarchy and authorship; Phriction APIs are mapped. |
+| TASK-01 | Attributed transactions | Owner, author, subscribers, multiple project tags, status, priority and comments have durable transaction history. Stale updates fail explicitly, and bulk edit results report each object. |
+| TASK-02 | Dependencies and duplicates | Create/remove parent-child dependencies; reject cycles; resolve/unblock and merge duplicate tasks with preserved histories and redirects. |
+| TASK-03 | Configurable work | Custom status/priority, fields, forms, required fields, points, ordering and edit permissions are validated consistently through UI and API. |
+| TASK-04 | Queries and notifications | Saved filters, cursor pagination, reporting, subscriptions, inbound/outbound mail and Herald actions use the same policy checks and retry-safe events. |
+| PROJECT-01 | Project identity and membership | Multiple tags, members/watchers, join/leave, edit/archive, icons/colors, aliases, profiles and activity persist with policies and transactions. |
+| PROJECT-02 | Hierarchy and milestones | Parent/subproject/milestone relationships and inherited membership semantics match pinned source; reject cycles and invalid reparenting. |
+| PROJECT-03 | Real workboards | Ordered per-project columns and card positions are independent of task status. Move cards through a touch/keyboard action, survive reload, handle concurrent ordering, and support a task on multiple boards. |
+| PROJECT-04 | Board administration | Column edit/hide, WIP limits, triggers, board enable/disable, filtering, bulk moves and policy failures are visible and attributable. |
+
+The current task-status columns and project tag list do not establish workboard parity. The current wiki's edit counter alone does not establish historical version storage. These are concrete distinctions to verify during the respective implementation slices.
+
+## Every active and historical upstream application directory
+
+Each row describes scope still to implement or verify. There are 76 active-source rows and two explicitly marked historical carry-forward rows. Several directories contribute infrastructure to the same user-facing application. “Standard” means not flagged as an upstream prototype; it does not certify maturity. The source's own Harbormaster guide, for example, warns of incomplete capabilities despite having no prototype flag.
 
 | Directory | Application / role | Baseline scope and acceptance anchor | Upstream kind | Milestone |
 | --- | --- | --- | --- | --- |
@@ -114,14 +140,14 @@ Each row describes the baseline scope still to implement or verify. Several dire
 | `pholio` | Pholio | Mock collections, image versions, region comments, status and review history. | Standard | M4 |
 | `phortune` | Phortune | Accounts, merchants, carts/orders, payment providers and billing records. | Prototype | M7 |
 | `phpast` | PHPAST | Preserve PHP parser inspection capability where useful; modern parser/debug adapter. | Developer tool | M7 |
-| `phragment` | Phragment | Versioned hierarchical artifacts, snapshots and patch/download behavior. | Prototype | M7 |
+| `phragment` | Phragment | Historical versioned hierarchical artifacts, snapshots and patch/download behavior. Removed in latest upstream; carry forward from the 2021 source. | Historical prototype, removed | M7 |
 | `phrequent` | Phrequent | Start/stop time tracking, tracked objects, durations and reporting. | Prototype | M6 |
 | `phriction` | Phriction | Wiki hierarchy, edit history, diffs, moves, deletes, restoration and policies. | Standard | M4 |
 | `phurl` | Phurl | Managed shortened URLs, redirects, aliases, policies and history. | Prototype | M6 |
 | `policy` | Policies | View/edit/interact checks, capabilities, custom rules and inherited restrictions. | Internal | M1 |
 | `ponder` | Ponder | Questions, answers, voting, status, comments and search. | Standard | M6 |
 | `project` | Projects | Tags, membership, nested projects, milestones, workboards, columns and moves. | Standard | M3 |
-| `releeph` | Releeph | Historical release-branch requests, pull/pick decisions and branch workflow. | Prototype | M7 |
+| `releeph` | Releeph | Historical release-branch requests, pull/pick decisions and branch workflow. Removed in latest upstream; carry forward from the 2021 source. | Historical prototype, removed | M7 |
 | `remarkup` | Remarkup | Formatting, code/math, mentions, object links, embeds and safe rendering. | Internal | M1, M4 |
 | `repository` | Repository engine | Storage/import, polling, Git/Hg/SVN adapters, push hooks, mirrors and clustering. | Internal | M2, M5, M7 |
 | `search` | Search | Application/full-text search, saved queries, pagination, indexes and policy filtering. | Standard | M1, M3 |
@@ -165,7 +191,7 @@ The objective is to make useful automated work normal. A reviewer agent is a nam
 - Model credentials stay on the server/worker side. Source text, comments, bibliography, PDFs and repository files are untrusted task data; they cannot expand tool permissions.
 - Local/offline model providers are first-class. An Ollama-compatible adapter can keep document content on the user's machine; provider reachability, selected model, limitations and failed runs remain visible. Remote calls must be explicit in provider configuration rather than silently substituting for a local model.
 
-These are planned product contracts. Real provider execution, scoped authorization, isolated workers, evaluation datasets and automatic landing need their own implementation and acceptance evidence.
+These are product contracts with only an initial implementation slice. The application has explicit hosted and local model adapters, but scoped authorization, isolated workers, evaluation datasets and automatic landing remain acceptance gaps. Configured real-provider success must be verified separately from deterministic checks and mocked adapter tests.
 
 ## Academic papers and LaTeX
 
