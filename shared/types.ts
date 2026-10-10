@@ -3,7 +3,7 @@ import type { PublicAccount } from './auth';
 
 export type RevisionKind = 'code' | 'paper' | 'document';
 export type RevisionStatus = 'draft' | 'needs_review' | 'changes_requested' | 'accepted' | 'closed';
-export type TaskStatus = 'open' | 'in_progress' | 'resolved';
+export type TaskStatus = 'open' | 'in_progress' | 'resolved' | 'duplicate';
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 export interface ActorAttribution { principalId: string; displayName: string; credentialId: string | null; requestId: string }
 export interface SourceFile { path: string; content: string }
@@ -17,12 +17,12 @@ export type TaskSubscriptionState = 'subscribed' | 'unsubscribed';
 export interface TaskSubscriptionStatus { taskId: string; principalId: string; state: TaskSubscriptionState | null; version: number; automatic: boolean; subscribed: boolean; updatedAt: string | null; accessEpoch?: number }
 export interface TaskSubscriptionPage { subscribers: TaskSubscriptionStatus[]; nextAfter: string | null; viewer: TaskSubscriptionStatus; accessEpoch?: number }
 export interface TaskSubscriptionInput { principalId: string; action: 'subscribe' | 'unsubscribe'; expectedMembershipVersion: number }
-export interface TaskTransaction { attribution?: ActorAttribution; id: string; taskId: string; sequence: number; taskVersion: number; kind: 'create' | 'legacy' | 'edit' | 'comment' | 'dependency' | 'dependency_status' | 'subscription'; actor: string | null; createdAt: string; snapshot?: TaskSnapshot; changes?: TaskFieldChange[]; comment?: string; dependency?: { taskId: string; action: 'added' | 'removed'; direction: 'depends_on' | 'blocks' }; dependencyStatus?: { taskId: string; oldStatus: TaskStatus; newStatus: TaskStatus }; subscription?: { principalId: string; oldState: TaskSubscriptionState | null; newState: TaskSubscriptionState; membershipVersion: number; reason: 'explicit' | 'created' | 'commented' | 'former_owner' } }
+export interface TaskTransaction { attribution?: ActorAttribution; id: string; taskId: string; sequence: number; taskVersion: number; kind: 'create' | 'legacy' | 'edit' | 'comment' | 'dependency' | 'dependency_status' | 'subscription' | 'merge'; actor: string | null; createdAt: string; snapshot?: TaskSnapshot; changes?: TaskFieldChange[]; comment?: string; dependency?: { taskId: string; action: 'added' | 'removed'; direction: 'depends_on' | 'blocks' }; dependencyStatus?: { taskId: string; oldStatus: TaskStatus; newStatus: TaskStatus }; subscription?: { principalId: string; oldState: TaskSubscriptionState | null; newState: TaskSubscriptionState; membershipVersion: number; reason: 'explicit' | 'created' | 'commented' | 'former_owner' | 'merged' }; merge?: { taskId: string; direction: 'merged_into' | 'merged_from'; operationId: string } }
 export interface TaskAccessLostAcknowledgement { id: string; saved: true; accessLost: true; accessEpoch: number }
 export type TaskUpdateResult = Task | TaskAccessLostAcknowledgement;
 export interface TaskHistory { transactions: TaskTransaction[]; nextBefore: number | null; firstAvailableSequence: number | null; accessEpoch?: number }
 export type TaskReference = Pick<Task, 'id' | 'title' | 'status' | 'priority' | 'version'>;
-export interface TaskDetail { task: Task; history: TaskHistory; dependsOn: TaskReference[]; blocks: TaskReference[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
+export interface TaskDetail { task: Task; history: TaskHistory; dependsOn: TaskReference[]; blocks: TaskReference[]; duplicateOf: TaskReference[]; duplicates: TaskReference[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface WikiDocument { id: string; title: string; slug: string; content: string; version: number; createdAt: string; updatedAt: string }
 export interface WikiVersion { attribution?: ActorAttribution; id: string; documentId: string; number: number; title: string; slug: string; content: string; author: string | null; createdAt: string; message: string; kind: 'create' | 'edit' | 'restore' | 'legacy'; restoredFrom: number | null }
 export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
@@ -56,5 +56,7 @@ export interface TaskInput { title: string; description?: string; status?: TaskS
 export type UpdateTaskInput = Partial<TaskInput> & { expectedVersion: number };
 export interface TaskCommentInput { body: string }
 export interface TaskDependencyInput { taskId: string; action: 'add' | 'remove'; expectedVersion: number }
+export interface TaskMergeInput { taskId: string; expectedVersion: number; expectedTargetVersion: number }
+export interface TaskMergeInInput { sources: { taskId: string; expectedVersion: number }[]; expectedVersion: number }
 export interface DocumentInput { title: string; slug: string; content: string; expectedVersion?: number; message?: string }
 export interface RestoreDocumentInput { version: number; expectedVersion: number; message?: string }

@@ -21,6 +21,8 @@ test('voice task creation is a draft command and preserves content case', () => 
   assert.deepEqual(parseCommand('show in progress'), { type: 'filter', value: 'in_progress' });
   assert.deepEqual(parseCommand('read summary'), { type: 'summary' });
   assert.deepEqual(parseCommand('show my tasks'), { type: 'taskFilter', value: 'mine' });
+  assert.deepEqual(parseCommand('show duplicate'), { type: 'filter', value: 'duplicate' });
+  assert.equal(parseCommand('merge this task as duplicate').type, 'unknown');
   assert.deepEqual(parseCommand('show unassigned tasks'), { type: 'taskFilter', value: 'unassigned' });
   assert.deepEqual(parseCommand('show tasks I follow'), { type: 'taskFilter', value: 'following' });
   assert.deepEqual(parseCommand('assign this task to me').type, 'unknown');
@@ -51,6 +53,8 @@ test('offline queue permits only supported idempotent mutation routes', () => {
   assert.equal(canQueue('/api/tasks/T1', 'PATCH'), true);
   assert.equal(canQueue('/api/tasks/T1/comments', 'POST'), true);
   assert.equal(canQueue('/api/tasks/T1/dependencies', 'POST'), false);
+  assert.equal(canQueue('/api/tasks/T1/merge', 'POST'), false);
+  assert.equal(canQueue('/api/tasks/T1/merge-in', 'POST'), false);
   assert.equal(canQueue('/api/tasks/T1/subscriptions', 'POST', { principalId: 'alice', action: 'subscribe', expectedMembershipVersion: 0 }), false);
   assert.equal(canQueue('/api/tasks/T1', 'PATCH', { ownerId: null, expectedVersion: 1 }), false);
   assert.equal(canQueue('/api/tasks', 'POST', { ownerId: 'alice' }), false);

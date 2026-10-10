@@ -193,11 +193,13 @@ export function createApp(options: AppOptions = {}): App {
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
-        const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies|subscriptions)$/.exec(path);
+        const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies|subscriptions|merge|merge-in)$/.exec(path);
         if (method === 'POST' && taskAction?.[2] === 'subscriptions') return { status: 200, body: store.updateTaskSubscription(taskAction[1]!, input, attribution) };
         if (method === 'POST' && taskAction?.[2] === 'comments') return { status: 201, body: store.createTaskComment(taskAction[1]!, input, attribution) };
-        if (method === 'POST' && taskAction?.[2] === 'dependencies') {
-          const detail = store.updateTaskDependencies(taskAction[1]!, input, attribution);
+        if (method === 'POST' && taskAction && ['dependencies', 'merge', 'merge-in'].includes(taskAction[2]!)) {
+          const detail = taskAction[2] === 'merge' ? store.mergeTask(taskAction[1]!, input, attribution)
+            : taskAction[2] === 'merge-in' ? store.mergeTasksInto(taskAction[1]!, input, attribution)
+              : store.updateTaskDependencies(taskAction[1]!, input, attribution);
           // Fill the initial visible page before saving this historical response.
           // Later replays may filter it further, but must not fetch newer history.
           detail.history = store.taskHistory(taskAction[1]!, undefined, undefined, related => access.canView(related));

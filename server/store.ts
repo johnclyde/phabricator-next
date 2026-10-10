@@ -29,7 +29,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 8) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 9) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -150,6 +150,21 @@ export class Store {
         });
       } catch (error) { this.database.close(); throw error; }
     }
+    if (version < 9) {
+      try {
+        this.transaction(() => {
+          // Duplicate links retain historical relationships, not canonical
+          // aliases. Existing tasks, history and replay bytes remain intact.
+          this.database.exec(`
+            CREATE TABLE task_duplicates (source_id TEXT NOT NULL REFERENCES entities(id), target_id TEXT NOT NULL REFERENCES entities(id), operation_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(source_id, target_id), CHECK(source_id <> target_id));
+            CREATE INDEX task_duplicates_target ON task_duplicates(target_id, source_id);
+            CREATE TRIGGER task_duplicates_no_update BEFORE UPDATE ON task_duplicates BEGIN SELECT RAISE(ABORT, 'Task duplicate links are immutable'); END;
+            CREATE TRIGGER task_duplicates_no_delete BEFORE DELETE ON task_duplicates BEGIN SELECT RAISE(ABORT, 'Task duplicate links are immutable'); END;
+            PRAGMA user_version = 9;
+          `);
+        });
+      } catch (error) { this.database.close(); throw error; }
+    }
   }
 
   close(): void { this.database.close(); }
@@ -243,7 +258,7 @@ export class Store {
     if (!Number.isSafeInteger(task.version) || task.version < 1 || !Number.isSafeInteger(task.version + 1)) throw new HttpError(409, 'This task has reached the supported version limit.');
     return { ...task, version: task.version + 1, updatedAt: now };
   }
-  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
+  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
     const last = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id) as { sequence: number };
     const sequence = last.sequence + 1;
     if (!Number.isSafeInteger(sequence) || sequence < 1) throw new HttpError(409, 'This task has reached the supported history limit.');
@@ -275,7 +290,7 @@ export class Store {
     const values = {
       title: data.title === undefined && current ? current.title : string(data.title, 'Title'),
       description: data.description === undefined && current ? current.description : optionalString(data.description, 'Description'),
-      status: data.status === undefined ? current?.status ?? 'open' : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
+      status: data.status === undefined ? current?.status ?? 'open' : data.status === 'duplicate' && current?.status === 'duplicate' ? 'duplicate' as const : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
       priority: data.priority === undefined ? current?.priority ?? 'normal' : choice(data.priority, 'priority', ['low', 'normal', 'high', 'urgent']),
       projectId: data.projectId === undefined && current ? current.projectId : this.reference(data.projectId, 'project'),
       ownerId: data.ownerId === undefined && current ? current.ownerId : data.ownerId === undefined || data.ownerId === null ? null : this.taskPrincipal(data.ownerId),
@@ -307,7 +322,7 @@ export class Store {
     const cursor = before === undefined ? null : integer(before, 'before');
     const size = integer(limit, 'limit');
     if (size > 100) throw new HttpError(400, 'limit must be at most 100.');
-    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)));
+    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)));
     const pageStatement = this.database.prepare(cursor === null
       ? 'SELECT data FROM task_transactions WHERE task_id = ? ORDER BY sequence DESC'
       : 'SELECT data FROM task_transactions WHERE task_id = ? AND sequence < ? ORDER BY sequence DESC');
@@ -329,13 +344,101 @@ export class Store {
   }
   taskDetail(id: string): TaskDetail {
     const task = this.get<Task>('task', id);
-    const references = (direction: 'depends_on' | 'blocks'): TaskReference[] => {
-      const rows = direction === 'depends_on'
-        ? this.database.prepare('SELECT e.data FROM task_dependencies d JOIN entities e ON e.id = d.dependency_id WHERE d.task_id = ? ORDER BY d.dependency_id').all(id)
-        : this.database.prepare('SELECT e.data FROM task_dependencies d JOIN entities e ON e.id = d.task_id WHERE d.dependency_id = ? ORDER BY d.task_id').all(id);
+    const references = (direction: 'depends_on' | 'blocks' | 'duplicate_of' | 'duplicates'): TaskReference[] => {
+      const queries = {
+        depends_on: 'SELECT e.data FROM task_dependencies d JOIN entities e ON e.id = d.dependency_id WHERE d.task_id = ? ORDER BY d.dependency_id',
+        blocks: 'SELECT e.data FROM task_dependencies d JOIN entities e ON e.id = d.task_id WHERE d.dependency_id = ? ORDER BY d.task_id',
+        duplicate_of: 'SELECT e.data FROM task_duplicates d JOIN entities e ON e.id = d.target_id WHERE d.source_id = ? ORDER BY d.target_id',
+        duplicates: 'SELECT e.data FROM task_duplicates d JOIN entities e ON e.id = d.source_id WHERE d.target_id = ? ORDER BY d.source_id',
+      };
+      const rows = this.database.prepare(queries[direction]).all(id);
       return (rows as JsonRow[]).map(row => { const value = JSON.parse(row.data) as Task; return { id: value.id, title: value.title, status: value.status, priority: value.priority, version: value.version }; });
     };
-    return { task, history: this.taskHistory(id), dependsOn: references('depends_on'), blocks: references('blocks'), activity: this.activities(id) };
+    return { task, history: this.taskHistory(id), dependsOn: references('depends_on'), blocks: references('blocks'), duplicateOf: references('duplicate_of'), duplicates: references('duplicates'), activity: this.activities(id) };
+  }
+  private mergeTaskId(value: unknown): string {
+    const id = string(value, 'Task ID', 50);
+    if (!/^T[1-9]\d*$/.test(id)) throw new HttpError(400, 'Choose a valid task.');
+    return id;
+  }
+  mergeTask(sourceId: string, input: unknown, attribution?: ActorAttribution): TaskDetail {
+    return this.taskMutation(() => {
+      const data = object(input, ['taskId', 'expectedVersion', 'expectedTargetVersion']);
+      this.applyTaskMerge(this.mergeTaskId(data.taskId), integer(data.expectedTargetVersion, 'expectedTargetVersion'), [
+        { taskId: this.mergeTaskId(sourceId), expectedVersion: integer(data.expectedVersion, 'expectedVersion') },
+      ], attribution);
+      return this.taskDetail(sourceId);
+    });
+  }
+  mergeTasksInto(targetId: string, input: unknown, attribution?: ActorAttribution): TaskDetail {
+    return this.taskMutation(() => {
+      const data = object(input, ['sources', 'expectedVersion']);
+      if (!Array.isArray(data.sources) || data.sources.length < 1 || data.sources.length > 100) throw new HttpError(400, 'Choose between 1 and 100 source tasks.');
+      const sources = data.sources.map(value => {
+        const source = object(value, ['taskId', 'expectedVersion']);
+        return { taskId: this.mergeTaskId(source.taskId), expectedVersion: integer(source.expectedVersion, 'expectedVersion') };
+      });
+      this.applyTaskMerge(this.mergeTaskId(targetId), integer(data.expectedVersion, 'expectedVersion'), sources, attribution);
+      return this.taskDetail(targetId);
+    });
+  }
+  private applyTaskMerge(targetId: string, expectedTargetVersion: number, sources: { taskId: string; expectedVersion: number }[], attribution?: ActorAttribution): void {
+    const ids = sources.map(source => source.taskId);
+    if (new Set(ids).size !== ids.length) throw new HttpError(400, 'Choose each source task only once.');
+    if (ids.includes(targetId)) throw new HttpError(400, 'A task cannot be merged into itself.');
+    const originals = new Map<string, Task>();
+    for (const endpoint of [{ taskId: targetId, expectedVersion: expectedTargetVersion }, ...sources]) {
+      const row = this.database.prepare("SELECT data FROM entities WHERE kind = 'task' AND id = ?").get(endpoint.taskId) as JsonRow | undefined;
+      if (!row) throw new HttpError(404, 'A selected task is unavailable.', 'TASK_UNAVAILABLE');
+      const task = JSON.parse(row.data) as Task;
+      if (task.version !== endpoint.expectedVersion) throw new HttpError(409, 'A selected task changed. Reload before merging.');
+      originals.set(task.id, task);
+    }
+    const now = new Date().toISOString(); const operationId = randomUUID();
+    const changed = new Map<string, Task>();
+    const advance = (id: string): Task => {
+      let task = changed.get(id);
+      if (!task) { task = this.advanceTask(originals.get(id) ?? this.get<Task>('task', id), now); changed.set(id, task); }
+      return task;
+    };
+    const target = advance(targetId);
+    const parentEffects: { parentId: string; sourceId: string; oldStatus: Task['status'] }[] = [];
+    for (const id of ids) {
+      const source = originals.get(id)!; advance(id).status = 'duplicate';
+      if (source.status === 'duplicate') continue;
+      for (const parent of this.database.prepare('SELECT task_id FROM task_dependencies WHERE dependency_id = ? ORDER BY task_id').all(id) as { task_id: string }[]) {
+        advance(parent.task_id);
+        parentEffects.push({ parentId: parent.task_id, sourceId: id, oldStatus: source.status });
+      }
+    }
+    // Every endpoint CAS is checked against the original snapshot. A task
+    // advances only once even when also a parent of several merged sources.
+    for (const task of changed.values()) this.save('task', task);
+    for (const id of ids) {
+      // A fresh merge may close this task again or carry new followers. Keep
+      // the first link immutable while recording this operation separately.
+      this.database.prepare('INSERT INTO task_duplicates (source_id, target_id, operation_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(source_id, target_id) DO NOTHING').run(id, targetId, operationId, now);
+      const original = originals.get(id)!; const source = changed.get(id)!;
+      this.appendTaskTransaction(source, { kind: 'merge', merge: { taskId: targetId, direction: 'merged_into', operationId }, ...(original.status === 'duplicate' ? {} : { changes: [{ field: 'status', oldValue: original.status, newValue: 'duplicate' }] }) }, attribution, now);
+      this.appendTaskTransaction(target, { kind: 'merge', merge: { taskId: id, direction: 'merged_from', operationId } }, attribution, now);
+      this.event(id, 'merged', 'Closed this task as a duplicate.', attribution);
+    }
+    this.event(targetId, 'duplicates_merged', 'Merged duplicate tasks into this task.', attribution);
+    for (const effect of parentEffects) {
+      const parent = changed.get(effect.parentId)!;
+      this.appendTaskTransaction(parent, { kind: 'dependency_status', dependencyStatus: { taskId: effect.sourceId, oldStatus: effect.oldStatus, newStatus: 'duplicate' } }, attribution, now);
+      this.event(parent.id, 'dependency_status_changed', 'A dependency changed status.', attribution);
+    }
+    // Carry only the source's explicit subscribers, author and automatic
+    // owner. Explicit merge additions override destination opt-out, without
+    // changing source preferences or representing the recipient as actor.
+    const parameters = ids.map(() => '?').join(',');
+    const recipients = this.database.prepare(`SELECT principal_id FROM (
+      SELECT principal_id FROM task_subscriptions WHERE task_id IN (${parameters}) AND state = 'subscribed'
+      UNION SELECT json_extract(data, '$.authorId') FROM entities WHERE id IN (${parameters})
+      UNION SELECT json_extract(data, '$.ownerId') FROM entities WHERE id IN (${parameters})
+    ) WHERE principal_id IS NOT NULL ORDER BY principal_id`);
+    for (const row of recipients.iterate(...ids, ...ids, ...ids) as Iterable<{ principal_id: string }>) this.changeTaskSubscription(target, row.principal_id, 'subscribed', 'merged', attribution, now);
   }
   createTaskComment(id: string, input: unknown, attribution?: ActorAttribution): TaskTransaction {
     return this.taskMutation(() => {

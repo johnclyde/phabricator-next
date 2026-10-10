@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { analyzeLocally } from '../shared/review';
 import { mountPath, normalizeBasePath } from '../shared/mount';
+import { isTaskClosed } from '../shared/tasks';
 import type { AppState, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 
 const help = `Phabricator Next — arc (initial CLI)
@@ -125,7 +126,7 @@ async function main() {
       if (!ownerId) throw new Error('Owner is not an available workspace account. Use a username, principal ID, me, all or unassigned.');
     }
     const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
-    const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? task.status === 'resolved' : task.status !== 'resolved'))
+    const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task.status) : !isTaskClosed(task.status)))
       .filter(task => owner === 'all' || task.ownerId === ownerId)
       .filter(task => !values.subscribed || state.followingTaskIds.includes(task.id))
       .sort((left, right) => (order === 'priority' ? ranks[right.priority] - ranks[left.priority] : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))

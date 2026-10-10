@@ -180,6 +180,25 @@ test('CLI task reads preserve mounts, filters and current object visibility with
       assert.deepEqual(JSON.parse(filtered.stdout).map((task: { id: string }) => task.id), ids, args.join(' '));
       assert.ok(!filtered.stdout.includes(hidden.id)); assert.ok(!filtered.stdout.includes(hidden.title));
     }
+    const duplicate = store.createTask({ title: 'A retained duplicate', ownerId: bob.id }, attribution);
+    store.mergeTask(duplicate.id, { taskId: other.id, expectedVersion: duplicate.version, expectedTargetVersion: other.version }, attribution);
+    const openAfterMerge = await read(['tasks', '--json']);
+    assert.equal(openAfterMerge.code, 0, openAfterMerge.stderr);
+    assert.deepEqual(JSON.parse(openAfterMerge.stdout).map((task: { id: string }) => task.id), [urgent.id, normal.id]);
+    const closedAfterMerge = await read(['tasks', '--status', 'closed', '--json']);
+    assert.equal(closedAfterMerge.code, 0, closedAfterMerge.stderr);
+    assert.deepEqual(JSON.parse(closedAfterMerge.stdout).map((task: { id: string }) => task.id), [closed.id, duplicate.id]);
+    const shownDuplicate = await read(['show', duplicate.id]);
+    assert.equal(shownDuplicate.code, 0, shownDuplicate.stderr);
+    assert.equal(JSON.parse(shownDuplicate.stdout).task.id, duplicate.id, 'the CLI retains the source task rather than following a redirect');
+    assert.equal(JSON.parse(shownDuplicate.stdout).task.status, 'duplicate');
+    assert.equal(JSON.parse(shownDuplicate.stdout).duplicateOf[0].id, other.id);
+    const otherPolicy = app.policies.policy(other.id, alice.id);
+    app.policies.setPolicy(other.id, { expectedVersion: otherPolicy.version, spaceId: otherPolicy.spaceId, view: { kind: 'principals', principalIds: [alice.id] }, edit: otherPolicy.rules.edit, interact: otherPolicy.rules.interact }, alice.id);
+    const filteredDuplicate = await read(['show', duplicate.id]);
+    assert.equal(filteredDuplicate.code, 0, filteredDuplicate.stderr);
+    assert.deepEqual(JSON.parse(filteredDuplicate.stdout).duplicateOf, []);
+    assert.ok(!filteredDuplicate.stdout.includes(other.id)); assert.ok(!filteredDuplicate.stdout.includes(other.title));
     for (const args of [['tasks', '--status', 'invalid'], ['tasks', '--order', 'invalid'], ['tasks', '--limit', '0'], ['tasks', '--limit', '1.5'], ['tasks', '--unassigned', '--owner', 'all'], ['tasks', '--owner', 'missing-user']]) {
       const invalid = await read(args); assert.equal(invalid.code, 1, args.join(' '));
     }

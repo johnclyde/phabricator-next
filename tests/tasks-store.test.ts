@@ -304,7 +304,7 @@ test('schema 6 migration adds an honest unknown-author baseline at migration tim
   const directory = mkdtempSync(join(tmpdir(), 'phab-task-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaSix(path); const started = Date.now(); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
     assert.equal(store.fresh, false);
     const detail = store.taskDetail(old.task.id); assert.deepEqual(detail.task, { ...old.task, ownerId: null, authorId: null, version: 1 });
     assert.deepEqual(detail.dependsOn, []); assert.deepEqual(detail.blocks, []);

@@ -334,7 +334,7 @@ test('task relation snapshots are invalidated across epoch changes while unrelat
   try {
     const client = createWorkspaceClient(activateSession(identity()));
     client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 1, ['S1']);
-    client.writeStored('task:T1', { dependsOn: [{ id: 'T2', title: 'Hidden next epoch' }], accessEpoch: 1 });
+    client.writeStored('task:T1', { dependsOn: [{ id: 'T2', title: 'Hidden next epoch' }], duplicateOf: [{ id: 'T2', title: 'Hidden duplicate' }], duplicates: [], accessEpoch: 1 });
     client.writeStored('task-draft:T1', { title: 'Keep my edit', expectedVersion: 1 });
     client.writeStored('task-comment:T1', { body: 'Keep my comment' });
     let release!: (response: Response) => void; let signal: AbortSignal | null | undefined; let changed = 0;
@@ -347,7 +347,7 @@ test('task relation snapshots are invalidated across epoch changes while unrelat
     assert.equal(client.readStored('task:T1', null), null);
     assert.deepEqual(client.readStored('task-draft:T1', null), { title: 'Keep my edit', expectedVersion: 1 });
     assert.deepEqual(client.readStored('task-comment:T1', null), { body: 'Keep my comment' });
-    release(Response.json({ transactions: [{ dependency: { taskId: 'T2' } }], accessEpoch: 1 }));
+    release(Response.json({ transactions: [{ dependency: { taskId: 'T2' } }, { merge: { taskId: 'T2', direction: 'merged_from' } }], accessEpoch: 1 }));
     await assert.rejects(pending, withCode('ACCESS_CHANGED'));
     assert.equal(client.writeStored('task:T1', { accessEpoch: 1, dependsOn: ['T2'] }), false);
   } finally { globalThis.fetch = fetch; lockSession(); }

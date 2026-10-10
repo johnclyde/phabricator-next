@@ -12,6 +12,8 @@ Schema 7 adds task history and dependency storage. Existing tasks gain version 1
 
 Schema 8 adds owner/author metadata and subscription preferences. Existing tasks start unassigned. An author is recovered only from an attributable original creation transaction whose identity, version and creation timestamp match the task; otherwise authorship remains unknown. This migration does not subscribe historical actors or rewrite old versions, snapshots or saved responses. A historical snapshot lacking ownership metadata means it was not recorded, rather than proving the task was unassigned then.
 
+Schema 9 adds immutable duplicate relationships. Existing tasks and all prior transaction, subscription and replay records are preserved; no duplicates are inferred from titles or comments.
+
 ## Assignment and subscriptions
 
 A task has one owner or is unassigned. Like upstream Maniphest, its owner automatically has view, edit and interact access, including access-rule editing, provided the owner can view the containing Space. Assignment cannot widen Space visibility. Editors may assign an enabled member even when that member cannot currently view the task or Space. Assignment controls explain this access effect; there is no administrator or author bypass.
@@ -30,6 +32,18 @@ The caller needs current edit access to A and view access to B. The inverse rela
 
 Task pages show **visible dependencies**, their current statuses and the inverse links. A filtered list is not evidence that every dependency is finished. Closing a task is an explicit status change; dependency completion neither automatically closes a parent nor prohibits manually closing it. Dependency changes require a live connection and are never queued offline.
 
+## Duplicate merging
+
+**Close As Duplicate** closes the current task as a duplicate of a selected destination. **Merge Duplicates In** closes one or more selected tasks into the current task, with up to 100 sources per atomic request. Both actions require current view and edit access on every endpoint. Selectors start with open tasks and can include closed tasks; the server does not require an open status. The confirmation retains the versions selected for every task. A stale version or unavailable endpoint aborts the entire operation.
+
+Each source keeps its own URL, description, author, owner, comments, source subscription preferences and dependency relationships. Its status becomes `duplicate`, and it receives a visible destination link and an attributed merge transaction. The destination keeps its current fields and status, gains inverse links and merge history, and explicitly subscribes the sources' authors, owners and effective subscribers. These explicit additions override destination opt-outs; they do not grant anyone access. The initiating actor is not subscribed merely for merging. Notification delivery remains a separate gap.
+
+There is no canonical-task redirect or automatic content migration. Duplicate links are durable directed relationships: a task may have several merge destinations, and duplicate cycles are allowed, as in the pinned upstream edge contract. A self-merge is rejected. Reopening a duplicate keeps its merge links and history; ordinary task editing cannot newly enter duplicate status. A fresh explicit merge into an existing destination can close it again and carry current followers over. That operation records new merge history while preserving the original link record; a saved idempotent retry never repeats those effects. Dependency cycles remain prohibited independently.
+
+All affected tasks advance once per merge operation, even when a task is also a dependent parent or depends on multiple merged sources. The source and destination transactions share an operation identifier. This implementation also records source status changes in dependent parent history, preserving the existing task-history invariant; upstream's merge-specific transaction does not produce its ordinary status-transaction parent notification. Parent status itself is unchanged unless that parent is explicitly selected as a source.
+
+Merging requires a live connection and is never queued. Visible links and merge history respect current access, including filtered history pagination and historical mutation retries. A saved retry rechecks edit access on every original endpoint and never repeats follower additions or borrows newer links. Pre-schema-9 saved detail responses may present empty duplicate lists as their historical state, without rewriting stored response bytes.
+
 ## Access and offline behavior
 
 Task details, comments, history, related task references and saved retries use current object and Space policies. Hidden related tasks are removed from dependency lists and relationship transactions before history pagination. Historical project values are redacted when the project is unavailable, without changing the stored evidence. Activity for relationship operations avoids embedding related task names or identifiers in free text.
@@ -41,10 +55,12 @@ Field drafts keep their original expected version, and comment drafts retain the
 ## API and CLI
 
 - `POST /api/tasks` takes `TaskInput` and returns `201 Task`.
-- `GET /api/tasks/:id` returns `TaskDetail`, including the first history page and visible dependency references.
+- `GET /api/tasks/:id` returns `TaskDetail`, including the first history page, visible dependency references, `duplicateOf` destinations and `duplicates` sources.
 - `PATCH /api/tasks/:id` takes `UpdateTaskInput` with `expectedVersion` and returns `Task`, or `{id,saved:true,accessLost:true,accessEpoch}` after a fresh authorized owner change removes the caller's view access.
 - `POST /api/tasks/:id/comments` takes `{body}` and returns `201 TaskTransaction`.
 - `POST /api/tasks/:id/dependencies` takes `{taskId, action: "add" | "remove", expectedVersion}` and returns `TaskDetail`.
+- `POST /api/tasks/:sourceId/merge` takes `{taskId: destinationId, expectedVersion, expectedTargetVersion}` and returns the source's `TaskDetail`.
+- `POST /api/tasks/:destinationId/merge-in` takes `{sources: [{taskId, expectedVersion}], expectedVersion}` and returns the destination's `TaskDetail`. The outer version belongs to the destination; every source has its own expected version.
 - `GET /api/tasks/:id/history?before=N&limit=N` returns `TaskHistory`; default 50, maximum 100, exclusive `before` cursor. Responses include the current access epoch.
 - `GET /api/tasks/:id/subscriptions?after=PRINCIPAL&limit=N` returns effective subscribers, the viewer's status and a next cursor; default 50, maximum 100, exclusive principal-ID ordering.
 - `GET /api/tasks/:id/subscriptions/:principalId` returns one preference, including version 0 for an absent preference, automatic following and effective subscription state.
@@ -52,7 +68,7 @@ Field drafts keep their original expected version, and comment drafts retain the
 
 Successful writes support the ordinary principal-scoped idempotency contract. Replays are filtered using current access while preserving their historical content; they do not borrow current fields or relationships. Historical task responses predating versioning are not assigned a fabricated current version.
 
-`npm run arc -- tasks` lists your assigned open and in-progress tasks, ordered by priority. `--owner all|me|unassigned|USERNAME`, `--unassigned` and `--subscribed` filter visible results; combine `--owner all --subscribed` to include tasks you follow that are assigned to others. A principal ID or `user:USERNAME` can disambiguate reserved owner names. `--status closed|all`, `--order priority|created|modified`, `--limit N` and `--json` are supported. `npm run arc -- show T123` prints the task detail and first history page. The server URL preserves configured path prefixes, and password workspaces require a scoped environment token. Full Arcanist/Conduit compatibility remains unfinished.
+`npm run arc -- tasks` lists your assigned open and in-progress tasks, ordered by priority. `--owner all|me|unassigned|USERNAME`, `--unassigned` and `--subscribed` filter visible results; combine `--owner all --subscribed` to include tasks you follow that are assigned to others. A principal ID or `user:USERNAME` can disambiguate reserved owner names. `--status closed|all` (closed includes resolved tasks and duplicates), `--order priority|created|modified`, `--limit N` and `--json` are supported. `npm run arc -- show T123` prints the task detail and first history page. The server URL preserves configured path prefixes, and password workspaces require a scoped environment token. Full Arcanist/Conduit compatibility remains unfinished.
 
 ## Upstream evidence and remaining work
 
@@ -60,4 +76,6 @@ The pinned upstream [task detail controller](https://github.com/phacility/phabri
 
 Owner access and automatic following are defined by the upstream [task object](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/storage/ManiphestTask.php). The [subscription editor](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/subscriptions/editor/PhabricatorSubscriptionsEditor.php) distinguishes explicit subscriptions from implicit following and preserved opt-outs.
 
-TASK-01, TASK-02, TASK-04 and P302 remain partial. Multiple project tags, configurable statuses/priorities/forms/fields, duplicate merging, workboards, bulk edits, comment revisions/removal, edit/comment locks, reporting, attachments, mentions, project subscribers, mute, notification delivery, auto-claim on closure, full graph browsing and import/export compatibility are not established by this slice. Upstream [comment editing](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/transactions/controller/PhabricatorApplicationTransactionCommentEditController.php) is a separate workflow; the current append-only comments do not implement it.
+The duplicate workflows follow the pinned [merge helpers](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/relationship/ManiphestTaskRelationship.php), [close-as-duplicate action](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/relationship/ManiphestTaskCloseAsDuplicateRelationship.php), [merge-in action](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/relationship/ManiphestTaskMergeInRelationship.php), and [duplicate edge](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/edge/ManiphestTaskIsDuplicateOfTaskEdgeType.php). Configurable duplicate statuses, closure metadata/reporting and Conduit interoperability remain gaps.
+
+TASK-01, TASK-02, TASK-04 and P302 remain partial. Multiple project tags, configurable statuses/priorities/forms/fields, workboards, bulk edits, comment revisions/removal, edit/comment locks, reporting, attachments, mentions, project subscribers, mute, notification delivery, auto-claim on closure, full graph browsing and import/export compatibility are not established by this slice. Upstream [comment editing](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/transactions/controller/PhabricatorApplicationTransactionCommentEditController.php) is a separate workflow; the current append-only comments do not implement it.

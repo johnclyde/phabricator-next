@@ -305,3 +305,25 @@
 .task-followers small { display: block; color: #718291; font-size: 11px; padding-top: 3px; }
 .task-subscribers form { margin-top: 16px; }
 @media (max-width: 650px) { .task-assignment-filter .field { max-width: none; } .task-assignment-filter select { min-height: 44px; } }
+
+.badge-duplicate { background: #eee9f6; color: #75618d; border-color: #d8cde5; }
+.task-duplicates h3 { font-size: 12px; color: #60798b; margin: 14px 0 8px; }
+.task-duplicate-links { list-style: none; padding: 0; margin: 0 0 12px; }
+.task-duplicate-links li { border-bottom: 1px solid #e0e7ec; padding: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.task-duplicate-links a { overflow-wrap: anywhere; font-size: 13px; }
+.task-merge-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+.task-merge-selection > .field { margin-top: 14px; }
+.task-merge-candidates { padding: 8px; margin: 10px 0; border: 1px solid #dce4ea; max-height: 270px; overflow: auto; border-radius: 3px; }
+.task-merge-candidates legend { color: #60798b; font-size: 12px; }
+.task-merge-candidates .checkbox { align-items: flex-start; }
+.task-merge-candidates .checkbox > span { overflow-wrap: anywhere; min-width: 0; }
+.task-merge-candidates .checkbox small { display: block; color: #718291; }
+.task-merge-picked { margin: 12px 0; font-size: 12px; }
+.task-merge-picked p { display: flex; gap: 8px; align-items: center; padding: 7px 0; overflow-wrap: anywhere; }
+.task-merge-picked button { margin-left: auto; }
+.task-merge-confirmation { padding: 12px; background: #edf5fb; border: 1px solid #b7cddb; border-radius: 3px; margin: 12px 0; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.task-merge-confirmation h3 { margin-top: 0; }
+.task-merge-confirmation p { margin: 8px 0; }
+.task-merge-confirmation ul { padding-left: 18px; }
+.task-merge-selection > .task-form-actions { margin-top: 12px; }
+@media (max-width: 650px) { .task-duplicate-links a { min-height: 44px; display: flex; align-items: center; } .task-merge-candidates .checkbox { min-height: 44px; } .task-merge-candidates input { min-height: 18px; } .task-merge-actions > button { flex: 1; } }

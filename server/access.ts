@@ -63,7 +63,7 @@ export class AccessLayer {
     return { ...this.store.subscriptionStatus(id, principalId), accessEpoch: this.policies.epoch() };
   }
   private visibleTaskTransaction(transaction: TaskTransaction): boolean {
-    const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId;
+    const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId ?? transaction.merge?.taskId;
     return !related || this.canView(related);
   }
   /** Filter only this response's evidence; retries must never borrow live history. */
@@ -74,6 +74,8 @@ export class AccessLayer {
       ...detail,
       dependsOn: detail.dependsOn.filter(task => this.canView(task.id)),
       blocks: detail.blocks.filter(task => this.canView(task.id)),
+      duplicateOf: detail.duplicateOf.filter(task => this.canView(task.id)),
+      duplicates: detail.duplicates.filter(task => this.canView(task.id)),
       history: {
         ...detail.history, transactions, accessEpoch: this.policies.epoch(),
         nextBefore: detail.history.nextBefore === null ? null : transactions.at(-1)?.sequence ?? null,
@@ -155,6 +157,18 @@ export class AccessLayer {
       const id = record(input)?.taskId;
       if (typeof id !== 'string' || !/^T[1-9]\d*$/.test(id) || !this.canView(id)) throw new HttpError(400, 'Reference unavailable.');
     }
+    if (method === 'POST' && /^\/api\/tasks\/T\d+\/(merge|merge-in)$/.test(path)) {
+      const data = record(input);
+      let selected: unknown[];
+      if (path.endsWith('/merge-in')) {
+        if (!Array.isArray(data?.sources) || data.sources.length < 1 || data.sources.length > 100) throw new HttpError(400, 'Choose between 1 and 100 tasks to merge.');
+        selected = data.sources.map(source => record(source)?.taskId);
+      } else selected = [data?.taskId];
+      for (const id of selected) {
+        if (typeof id !== 'string' || !/^T[1-9]\d*$/.test(id) || !this.canView(id)) throw new HttpError(400, 'Reference unavailable.');
+        this.require(id, 'edit');
+      }
+    }
     if (method === 'POST' && CREATES.has(path)) {
       const access = record(record(input)?.access);
       const id = access?.spaceId ?? 'S1';
@@ -215,6 +229,18 @@ export class AccessLayer {
     // without borrowing newer application records from the live revision.
     detail.suggestionApplications = [];
   }
+  private legacyTaskMergeSnapshot(detail: Record<string, unknown>): void {
+    if (Array.isArray(detail.duplicateOf) && Array.isArray(detail.duplicates)) return;
+    const history = record(detail.history);
+    if (detail.duplicateOf !== undefined || detail.duplicates !== undefined || !Array.isArray(history?.transactions)
+      || history.transactions.some(transaction => !record(transaction) || record(transaction)!.kind === 'merge' || record(transaction)!.merge !== undefined)) {
+      throw new HttpError(409, 'This saved task response cannot be safely replayed. Reload the task.');
+    }
+    // Schema 7/8 task details predate duplicate relations. Their empty graph
+    // is historical evidence, not permission to fetch today's relationships.
+    detail.duplicateOf = [];
+    detail.duplicates = [];
+  }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
   present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false): MutationResponse {
     let target = this.target(method, path);
@@ -236,7 +262,10 @@ export class AccessLayer {
     const result = this.redact(response.body);
     const detail = record(result);
     if (detail && /^\/api\/tasks\/T\d+\/subscriptions$/.test(path)) return { status: response.status, body: { ...detail, accessEpoch: this.policies.epoch() } };
-    if (detail && record(detail.task)) return { status: response.status, body: this.taskSnapshot(result as TaskDetail) };
+    if (detail && record(detail.task)) {
+      this.legacyTaskMergeSnapshot(detail);
+      return { status: response.status, body: this.taskSnapshot(result as TaskDetail) };
+    }
     const revisionId = record(detail?.revision)?.id;
     const id = revisionId ?? record(detail?.document)?.id;
     if (detail && typeof id === 'string') {
