@@ -149,6 +149,8 @@ export function createApp(options: AppOptions = {}): App {
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input) };
         const document = /^\/api\/documents\/(W\d+)$/.exec(path);
         if (method === 'PUT' && document) return { status: 200, body: store.updateDocument(document[1]!, input) };
+        const restore = /^\/api\/documents\/(W\d+)\/restore$/.exec(path);
+        if (method === 'POST' && restore) return { status: 200, body: store.restoreDocument(restore[1]!, input) };
         const revision = /^\/api\/revisions\/([DPL]\d+)(?:\/(versions|comments))?$/.exec(path);
         if (revision && method === 'PATCH' && !revision[2]) return { status: 200, body: store.updateRevision(revision[1]!, input) };
         if (revision && method === 'POST' && revision[2] === 'versions') return { status: 201, body: store.createVersion(revision[1]!, input) };
@@ -183,6 +185,25 @@ export function createApp(options: AppOptions = {}): App {
       if (req.method === 'GET') {
         if (path === '/api/health') { send(res, 200, { ok: true }); return; }
         if (path === '/api/state') { send(res, 200, store.state(ai())); return; }
+        const document = /^\/api\/documents\/(W\d+)(?:\/(history)|\/versions\/([^/]+))?$/.exec(path);
+        if (document) {
+          const positiveParameter = (value: string, name: string): number => {
+            if (!/^[1-9]\d*$/.test(value)) throw new HttpError(400, `${name} must be a positive integer.`);
+            return integer(Number(value), name);
+          };
+          if (document[2]) {
+            for (const name of url.searchParams.keys()) {
+              if (!['before', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'History accepts only one before cursor and one limit.');
+            }
+            const before = url.searchParams.get('before'); const limit = url.searchParams.get('limit');
+            send(res, 200, store.documentHistory(document[1]!, {
+              ...(before === null ? {} : { before: positiveParameter(before, 'before') }),
+              ...(limit === null ? {} : { limit: positiveParameter(limit, 'limit') }),
+            })); return;
+          }
+          if (url.search) throw new HttpError(400, 'Document read URLs may not contain query parameters.');
+          send(res, 200, document[3] ? store.documentVersion(document[1]!, positiveParameter(document[3], 'version')) : store.documentDetail(document[1]!)); return;
+        }
         const match = /^\/api\/revisions\/([DPL]\d+)(\/export)?$/.exec(path);
         if (match) {
           const detail = store.detail(match[1]!);

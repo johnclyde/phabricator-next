@@ -9,7 +9,11 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 - `POST /api/tasks` TaskInput → Task; `PATCH /api/tasks/:id` partial TaskInput → Task
 - `POST /api/projects` `{name,description?,color?}` → Project
 - `POST /api/repositories` `{name,remoteUrl,description?,defaultBranch?}` → Repository (registry only; no remote fetch)
-- `POST /api/documents` DocumentInput → WikiDocument; `PUT /api/documents/:id` DocumentInput (expectedVersion required) → WikiDocument
+- `POST /api/documents` DocumentInput → WikiDocument; `PUT /api/documents/:id` DocumentInput (expectedVersion required) → WikiDocument. Optional `message` records an edit summary; every edit appends immutable content history.
+- `GET /api/documents/:id` → WikiDetail: current document, first 20 history summaries and activity.
+- `GET /api/documents/:id/history?before=N&limit=N` → WikiHistory: summaries descending by version, exclusive `before` cursor, limit 1–100 (default 20), `nextBefore` and `firstAvailableVersion`. Missing versions and malformed cursors fail explicitly.
+- `GET /api/documents/:id/versions/:number` → WikiVersion: immutable title, slug, content, author, timestamp, edit summary, kind and restored-from version.
+- `POST /api/documents/:id/restore` `{version,expectedVersion,message?}` → WikiDocument: append selected historical title/content as a new version, retain the current slug and all historical records. Never queued offline; this is not upstream draft/publication-pointer behavior.
 - `POST /api/revisions` CreateRevisionInput → RevisionDetail
 - `GET /api/revisions/:id` → RevisionDetail
 - `POST /api/revisions/:id/versions` CreateVersionInput → RevisionDetail; append immutable version; always reset to needs_review; reject stale expectedVersion
@@ -23,3 +27,5 @@ Local single-user mode, loopback bind only; strict origin/host checks on server;
 `shared/review.ts` supplies `analyzeLocally(kind, files): ReviewAnalysis`; `server/ai.ts` supplies `analyzeWithAI(kind, files, provider?: 'openai' | 'ollama'): Promise<ReviewAnalysis>` and `aiConfiguration()`. Local review has real deterministic checks and is labelled local, not AI. Default fixtures are explicit demo content, seeded only for fresh DB unless disabled.
 
 RevisionKind supports code, paper and document (general prose/legal draft). Local model review uses provider `ollama`, is explicit and requires OLLAMA_MODEL; no model downloads or implicit remote fallback.
+
+Schema 2 migrates each pre-history wiki document into one `legacy` snapshot at its actual current version, with unknown author (`null`) and its existing last-edit timestamp. Earlier unavailable versions are not synthesized. New writes record the local actor; authenticated authorship remains future work. Read/compare can use individually cached wiki versions offline, but restoring requires a live current document.

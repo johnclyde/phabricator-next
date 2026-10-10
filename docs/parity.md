@@ -76,7 +76,7 @@ These identifiers are internal tracking keys. The rows describe required accepta
 | PROJECT-03 | Real workboards | Ordered per-project columns and card positions are independent of task status. Move cards through a touch/keyboard action, survive reload, handle concurrent ordering, and support a task on multiple boards. |
 | PROJECT-04 | Board administration | Column edit/hide, WIP limits, triggers, board enable/disable, filtering, bulk moves and policy failures are visible and attributable. |
 
-The current task-status columns and project tag list do not establish workboard parity. The current wiki's edit counter alone does not establish historical version storage. These are concrete distinctions to verify during the respective implementation slices.
+The current task-status columns and project tag list do not establish workboard parity. The WIKI-01 local slice now stores immutable snapshots, edit summaries, paged history and comparisons; restore-as-new is distinct from upstream publication-pointer semantics. Authenticated authorship, hierarchy, drafts/publication, policies and interoperability remain gaps. See the roadmap for verified implementation slices.
 
 ## Every active and historical upstream application directory
 

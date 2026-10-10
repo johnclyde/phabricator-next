@@ -13,7 +13,8 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | F005 | Paper and prose drafts with source/word comparisons | Implemented first slice; no PDF or DOCX engine |
 | F006 | Offline checks, drafts, snapshot reads and mutation outbox | Implemented first slice; conflicts require attention |
 | F007 | Hosted and local model review adapters | Implemented; credentials/runtime required; live provider evaluation pending |
-| F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent |
+| F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent; direct D/P/L/W object navigation supported |
+| F009 | Wiki history and comparisons (WIKI-01 local slice) | Implemented immutable content versions, summaries, paging, arbitrary version comparison and restore-as-new; legacy migration preserves only known content; authenticated authorship and WIKI-02–04 remain gaps |
 
 ## Next: useful document iteration
 

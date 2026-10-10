@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDocument } from '../shared/types.ts';
+import type { Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
@@ -26,7 +26,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 1) throw new Error(`Database schema ${version} is newer than this application supports.`);
+    if (version > 2) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -43,6 +43,23 @@ export class Store {
       PRAGMA user_version = 1;
       COMMIT;
     `);
+    if (version < 2) {
+      try {
+        this.transaction(() => {
+          this.database.exec(`
+            CREATE TABLE wiki_versions (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES entities(id), number INTEGER NOT NULL CHECK(number > 0), data TEXT NOT NULL CHECK(json_valid(data)), UNIQUE(document_id, number));
+            CREATE TRIGGER wiki_versions_no_update BEFORE UPDATE ON wiki_versions BEGIN SELECT RAISE(ABORT, 'Wiki versions are immutable'); END;
+            CREATE TRIGGER wiki_versions_no_delete BEFORE DELETE ON wiki_versions BEGIN SELECT RAISE(ABORT, 'Wiki versions are immutable'); END;
+          `);
+          // Schema 1 kept only the latest document. Preserve exactly that known
+          // snapshot and version number; earlier edits and authors are unknown.
+          for (const document of this.all<WikiDocument>('document')) this.saveWikiVersion(document, {
+            kind: 'legacy', author: null, message: 'Latest content preserved from the previous storage format. Earlier history is unavailable.', restoredFrom: null,
+          });
+          this.database.exec('PRAGMA user_version = 2');
+        });
+      } catch (error) { this.database.close(); throw error; }
+    }
   }
 
   close(): void { this.database.close(); }
@@ -130,18 +147,72 @@ export class Store {
     };
     this.save('task', task); this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`); return task;
   }
-  createDocument(input: unknown): WikiDocument { return this.writeDocument(input); }
-  updateDocument(id: string, input: unknown): WikiDocument { return this.writeDocument(input, this.get<WikiDocument>('document', id)); }
-  private writeDocument(input: unknown, current?: WikiDocument): WikiDocument {
-    const data = object(input, ['title', 'slug', 'content', 'expectedVersion']);
+  private documentMutation(work: () => WikiDocument): WikiDocument {
+    // A savepoint preserves atomic history even for callers outside mutate(),
+    // and composes with the transaction used for replay and demo seeding.
+    this.database.exec('SAVEPOINT wiki_document_write');
+    try { const document = work(); this.database.exec('RELEASE wiki_document_write'); return document; }
+    catch (error) { this.database.exec('ROLLBACK TO wiki_document_write; RELEASE wiki_document_write'); throw error; }
+  }
+  createDocument(input: unknown): WikiDocument { return this.documentMutation(() => this.writeDocument(input)); }
+  updateDocument(id: string, input: unknown): WikiDocument { return this.documentMutation(() => this.writeDocument(input, this.get<WikiDocument>('document', id))); }
+  restoreDocument(id: string, input: unknown): WikiDocument {
+    return this.documentMutation(() => {
+      const data = object(input, ['version', 'expectedVersion', 'message']);
+      const current = this.get<WikiDocument>('document', id);
+      if (integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This document changed. Reload before restoring.');
+      const selected = this.documentVersion(id, integer(data.version, 'version'));
+      return this.writeDocument({
+        title: selected.title, content: selected.content, slug: current.slug, expectedVersion: current.version,
+        message: data.message === undefined ? `Restored content from version ${selected.number}. Current slug retained.` : data.message,
+      }, current, selected.number);
+    });
+  }
+  private writeDocument(input: unknown, current?: WikiDocument, restoredFrom: number | null = null): WikiDocument {
+    const data = object(input, ['title', 'slug', 'content', 'expectedVersion', 'message']);
     if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This document changed. Reload before saving.');
     if (!current && data.expectedVersion !== undefined) throw new HttpError(400, 'expectedVersion is only used when updating a document.');
     const slug = string(data.slug, 'Slug', 160);
     if (!/^[a-z0-9]+(?:[-/][a-z0-9]+)*$/.test(slug)) throw new HttpError(400, 'Slug must contain lowercase letters, numbers, hyphens, or slash-separated paths.');
     if (this.all<WikiDocument>('document').some(doc => doc.slug === slug && doc.id !== current?.id)) throw new HttpError(409, 'A document with this slug already exists.');
+    const message = optionalString(data.message, 'Message', 10_000, current ? 'Updated document' : 'Initial version');
     const now = new Date().toISOString();
     const document: WikiDocument = { id: current?.id ?? this.nextId('document', 'W'), title: string(data.title, 'Title'), slug, content: string(data.content, 'Content', 500_000, true), version: (current?.version ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now };
-    this.save('document', document); this.event(document.id, current ? 'updated' : 'created', `Saved document ${document.title}, version ${document.version}.`); return document;
+    if (!Number.isSafeInteger(document.version)) throw new HttpError(409, 'This document has reached the supported version limit.');
+    this.save('document', document);
+    this.saveWikiVersion(document, { kind: restoredFrom === null ? current ? 'edit' : 'create' : 'restore', author: 'You', message, restoredFrom });
+    this.event(document.id, restoredFrom === null ? current ? 'updated' : 'created' : 'restored', restoredFrom === null
+      ? `Saved document ${document.title}, version ${document.version}.`
+      : `Restored content from version ${restoredFrom} as version ${document.version}. Current slug retained.`);
+    return document;
+  }
+  private saveWikiVersion(document: WikiDocument, metadata: Pick<WikiVersion, 'kind' | 'author' | 'message' | 'restoredFrom'>): WikiVersion {
+    const version: WikiVersion = {
+      id: randomUUID(), documentId: document.id, number: document.version, title: document.title,
+      slug: document.slug, content: document.content, createdAt: document.updatedAt, ...metadata,
+    };
+    this.database.prepare('INSERT INTO wiki_versions (id, document_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, document.id, version.number, JSON.stringify(version));
+    return version;
+  }
+  documentHistory(id: string, options: { before?: number; limit?: number } = {}): WikiHistory {
+    this.get<WikiDocument>('document', id);
+    const before = options.before === undefined ? null : integer(options.before, 'before');
+    const limit = options.limit === undefined ? 20 : integer(options.limit, 'limit');
+    if (limit > 100) throw new HttpError(400, 'limit must be at most 100.');
+    const rows = this.database.prepare("SELECT json_remove(data, '$.content') AS data FROM wiki_versions WHERE document_id = ? AND (? IS NULL OR number < ?) ORDER BY number DESC LIMIT ?").all(id, before, before, limit + 1) as JsonRow[];
+    const versions = rows.slice(0, limit).map(row => JSON.parse(row.data) as WikiVersionSummary);
+    const first = this.database.prepare('SELECT MIN(number) AS number FROM wiki_versions WHERE document_id = ?').get(id) as { number: number };
+    return { versions, nextBefore: rows.length > limit ? versions[versions.length - 1]!.number : null, firstAvailableVersion: first.number };
+  }
+  documentVersion(id: string, number: number): WikiVersion {
+    this.get<WikiDocument>('document', id);
+    integer(number, 'version');
+    const row = this.database.prepare('SELECT data FROM wiki_versions WHERE document_id = ? AND number = ?').get(id, number) as JsonRow | undefined;
+    if (!row) throw new HttpError(404, `Version ${number} of document ${id} was not found.`);
+    return JSON.parse(row.data) as WikiVersion;
+  }
+  documentDetail(id: string): WikiDetail {
+    return { document: this.get<WikiDocument>('document', id), history: this.documentHistory(id), activity: this.activities(id) };
   }
   createRevision(input: unknown): RevisionDetail {
     const data = object(input, ['title', 'summary', 'kind', 'files', 'repositoryId', 'projectId']);
