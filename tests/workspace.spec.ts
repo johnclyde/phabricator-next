@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import { storageKey } from '../client/mount';
+import type { AppState } from '../shared/types';
 
 test('tasks persist across reloads and typed commands navigate on desktop and mobile', async ({ page }, info) => {
   const errors: string[] = [];
@@ -61,10 +63,16 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   await page.screenshot({ path: `.data/${info.project.name}-review.png`, fullPage: true });
 });
 
-test('first-visit shell works offline and queued edits replay exactly once', async ({ page, context }, info) => {
+test('first-visit shell works offline and queued edits replay exactly once', async ({ page, context, baseURL }, info) => {
   await page.goto('./#tasks');
   await expect(page.getByRole('heading', { name: 'Maniphest', exact: true })).toBeVisible();
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await expect(page.getByRole('button', { name: 'Create Task', exact: true })).toBeEnabled();
+  const snapshotKey = storageKey('state', new URL(baseURL!).pathname);
+  await expect.poll(() => page.evaluate(key => {
+    const snapshot = JSON.parse(localStorage.getItem(key) || 'null') as AppState | null;
+    return Boolean(snapshot?.canCreate && snapshot.spaces.some(space => space.id === 'S1' && !space.archived));
+  }, snapshotKey)).toBe(true);
   await context.setOffline(true);
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Maniphest', exact: true })).toBeVisible();

@@ -9,6 +9,67 @@ const identity = (name = 'alice'): SessionState => ({ mode: 'password', workspac
 const access = (id: string, edit = true, interact = true): ObjectAccess => ({ policy: { objectId: id, spaceId: 'S1', version: 1, rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit, interact, managePolicy: edit }, viewLabel: 'Workspace members', editLabel: 'Workspace members', interactLabel: 'Workspace members' });
 const withCode = (code: string) => (error: unknown) => error instanceof RequestError && error.code === code;
 
+test('task writes verify initial access once before dispatch and retain guards for later epoch changes', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const session = activateSession(identity()); const client = createWorkspaceClient(session);
+    client.writeStored('state', { accessEpoch: 7, access: { T1: access('T1'), T2: access('T2') } });
+    let releaseState!: (response: Response) => void;
+    const writes: { body: string; release: (response: Response) => void }[] = [];
+    let reads = 0;
+    globalThis.fetch = async (path, options) => {
+      if (String(path).endsWith('/state')) { reads++; return await new Promise<Response>(resolve => { releaseState = resolve; }); }
+      return await new Promise<Response>(resolve => { writes.push({ body: String(options?.body), release: resolve }); });
+    };
+    const first = client.request('/api/tasks/T1', { method: 'PATCH', body: { status: 'resolved', expectedVersion: 1 } });
+    const second = client.request('/api/tasks/T2/projects', { method: 'POST', body: { action: 'add', projectIds: ['PROJ1'], expectedVersion: 4 } });
+    assert.equal(reads, 1, 'concurrent startup writes share permission verification');
+    assert.equal(writes.length, 0, 'cached permissions alone cannot send a task write');
+    releaseState(Response.json({ accessEpoch: 7, access: { T1: access('T1'), T2: access('T2') } }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(writes.length, 2);
+    assert.deepEqual(JSON.parse(writes[0]!.body), { status: 'resolved', expectedVersion: 1 });
+    assert.deepEqual(JSON.parse(writes[1]!.body), { action: 'add', projectIds: ['PROJ1'], expectedVersion: 4 });
+    client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 7);
+    writes[0]!.release(Response.json({ id: 'T1', status: 'resolved', version: 2 }));
+    assert.deepEqual(await first, { id: 'T1', status: 'resolved', version: 2 });
+    client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 8);
+    writes[1]!.release(Response.json({ task: { id: 'T2', projectIds: ['PROJ1'] }, accessEpoch: 7 }));
+    await assert.rejects(second, withCode('ACCESS_CHANGED'));
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('initial task verification cannot send a newly quarantined queued change', async () => {
+  const storage = localStorageFixture(); const fetch = globalThis.fetch;
+  try {
+    const client = storage.reopen();
+    const item = queuedTask('T1'); client.writeStored('outbox', [item]);
+    let calls = 0;
+    globalThis.fetch = async path => { calls++; assert.ok(String(path).endsWith('/state')); return Response.json({ accessEpoch: 1, access: { T1: access('T1', false) } }); };
+    await assert.rejects(client.request(item.path, { method: item.method, body: item.body, id: item.id, queued: true }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(calls, 1);
+    assert.deepEqual(client.quarantinedDrafts().map(draft => draft.value), [item]);
+  } finally { storage.close(); globalThis.fetch = fetch; }
+});
+
+test('failed, malformed or superseded initial task verification never dispatches the write', async () => {
+  const fetch = globalThis.fetch; const body = { status: 'resolved', expectedVersion: 1 };
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); let calls = 0;
+    globalThis.fetch = async path => { calls++; assert.ok(String(path).endsWith('/state')); throw new TypeError('Failed to fetch'); };
+    await assert.rejects(client.request('/api/tasks/T1', { method: 'PATCH', body }), TypeError);
+    globalThis.fetch = async path => { calls++; assert.ok(String(path).endsWith('/state')); return Response.json({}); };
+    await assert.rejects(client.request('/api/tasks/T1', { method: 'PATCH', body }), withCode('ACCESS_CHANGED'));
+    let release!: (response: Response) => void;
+    globalThis.fetch = async path => { calls++; assert.ok(String(path).endsWith('/state')); return await new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/tasks/T1', { method: 'PATCH', body });
+    activateSession(identity('bob'));
+    release(Response.json({ accessEpoch: 1, access: { T1: access('T1') } }));
+    await assert.rejects(pending, /session changed/i);
+    assert.equal(calls, 3, 'failed verification releases its shared promise for an explicit later attempt');
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
 test('known view revocation quarantines only affected drafts and rejects a late successful response even after access returns', async () => {
   const fetch = globalThis.fetch;
   try {
@@ -533,5 +594,63 @@ test('saved ownership operations are durably held instead of replaying access ch
     const reopened = storage.reopen(); let sent = 0; globalThis.fetch = async () => { sent++; return Response.json({}); };
     await assert.rejects(reopened.request(assignment.path, { method: assignment.method, body: assignment.body, id: assignment.id, queued: true }), withCode('ACTION_FORBIDDEN'));
     assert.equal(sent, 0); assert.equal(reopened.quarantinedDrafts().length, 2);
+  } finally { globalThis.fetch = fetch; storage.close(); }
+});
+
+test('legacy project replacement drafts and mixed queued patches are recovered whole while unrelated field deltas and creation aliases remain usable', async () => {
+  const storage = localStorageFixture(); const fetch = globalThis.fetch;
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 1, ['S1']);
+    const mixed = { title: 'Keep all mixed work', description: 'New description too', projectId: 'PROJ1', expectedVersion: 1, changed: ['title', 'projectId'] };
+    const unrelated = { title: 'Usable title edit', projectId: 'PROJ2', expectedVersion: 1, changed: ['title'] };
+    client.writeStored('task-draft:T1', mixed); client.writeStored('task-draft:T2', unrelated);
+    const patch = { ...queuedTask('T1'), body: { title: 'Whole queued edit', projectId: null, expectedVersion: 1 } };
+    const creation: PendingMutation = { id: 'legacy-create', path: '/api/tasks', method: 'POST', body: { title: 'Legacy creation', projectId: 'PROJ1' }, label: 'Create task', createdAt: '2026-10-10' };
+    client.writeStored('outbox', [patch, queuedTask('T2'), creation]);
+    assert.deepEqual(client.readStored('task-draft:T1', null), null);
+    assert.deepEqual(client.readStored('task-draft:T2', null), unrelated);
+    assert.deepEqual(client.readStored<PendingMutation[]>('outbox', []).map(item => item.id), ['T2', 'legacy-create']);
+    assert.deepEqual(new Set(client.quarantinedDrafts().map(item => item.key)), new Set(['task-draft:T1', 'outbox:T1']));
+    assert.deepEqual(client.quarantinedDrafts().find(item => item.key === 'task-draft:T1')?.value, mixed);
+    const reopened = storage.reopen(); let sends = 0; globalThis.fetch = async () => { sends++; return Response.json({}); };
+    await assert.rejects(reopened.request(patch.path, { method: patch.method, body: patch.body, id: patch.id, queued: true }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(sends, 0); assert.equal(reopened.quarantinedDrafts().length, 2);
+  } finally { globalThis.fetch = fetch; storage.close(); }
+});
+
+test('project-tag drafts share task edit quarantine, failed-write retention and independent physical-copy cleanup', async () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ T1: access('T1') }, 1, ['S1']);
+    const key = 'task-projects:T1';
+    const saved = { action: 'add', projectIds: ['PROJ1'], expectedVersion: 1 };
+    const newer = { action: 'set', projectIds: [], expectedVersion: 1 };
+    client.writeStored(key, saved); storage.failWrites(true); client.writeStored(key, newer);
+    assert.equal(client.removeStoredIfEqual(key, newer), true);
+    assert.deepEqual(client.readStored(key, null), saved, 'clearing a submitted memory copy must preserve differing durable tags');
+    client.writeStored(key, newer);
+    client.reconcileAccess({ T1: access('T1', false, true) }, 2, ['S1']);
+    assert.equal(client.quarantinedDrafts().length, 2);
+    client.reconcileAccess({ T1: access('T1') }, 3, ['S1']);
+    assert.equal(client.draftIsHeld(key), true); assert.equal(client.readStored(key, null), null);
+    storage.failWrites(false); assert.equal(client.retryQuarantineStorage(), true);
+    const reopened = storage.reopen(); assert.equal(reopened.draftIsHeld(key), true);
+    assert.deepEqual(new Set(reopened.quarantinedDrafts().map(item => JSON.stringify(item.value))), new Set([JSON.stringify(saved), JSON.stringify(newer)]));
+  } finally { storage.close(); }
+});
+
+test('versioned tag outbox operations replay their unchanged payload and stop at conflicts without erasing recovery work', async () => {
+  const storage = localStorageFixture(); const fetch = globalThis.fetch;
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ T1: access('T1') }, 1, ['S1']);
+    const change: PendingMutation = { id: 'tag-change', path: '/api/tasks/T1/projects', method: 'POST', body: { action: 'remove', projectIds: ['PROJ1'], expectedVersion: 4 }, label: 'Remove tag', createdAt: '2026-10-10' };
+    client.writeStored('outbox', [change]);
+    let body: unknown;
+    globalThis.fetch = async (_path, options) => { body = JSON.parse(String(options?.body)); return Response.json({ error: 'Task changed from version 4. Reload and review.', code: 'VERSION_CONFLICT' }, { status: 409 }); };
+    await assert.rejects(client.request(change.path, { method: change.method, body: change.body, id: change.id, queued: true }), withCode('VERSION_CONFLICT'));
+    assert.deepEqual(body, change.body); assert.deepEqual(client.readStored('outbox', []), [change]);
+    client.reconcileAccess({ T1: access('T1', false, true) }, 2, ['S1']);
+    assert.deepEqual(client.readStored('outbox', []), []);
+    assert.deepEqual(client.quarantinedDrafts()[0]!.value, change);
   } finally { globalThis.fetch = fetch; storage.close(); }
 });

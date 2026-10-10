@@ -23,13 +23,14 @@ export function contentHash(sourceFiles: SourceFile[]): string {
 export class Store {
   readonly database: DatabaseSync;
   readonly fresh: boolean;
+  private taskProjectsReady = false;
   constructor(options: StoreOptions = {}) {
     const path = options.path ?? '.data/phabricator.sqlite';
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 9) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 10) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -165,6 +166,27 @@ export class Store {
         });
       } catch (error) { this.database.close(); throw error; }
     }
+    if (version < 10) {
+      try {
+        this.transaction(() => {
+          this.database.exec(`
+            CREATE TABLE task_projects (task_id TEXT NOT NULL REFERENCES entities(id), project_id TEXT NOT NULL REFERENCES entities(id), PRIMARY KEY(task_id, project_id));
+            CREATE INDEX task_projects_project ON task_projects(project_id, task_id);
+          `);
+          // Canonical edges are new storage, not new edits. Leave all existing
+          // entity, history and replay JSON exactly as it was recorded.
+          const rows = this.database.prepare("SELECT id, data FROM entities WHERE kind = 'task'").all() as { id: string; data: string }[];
+          for (const row of rows) {
+            const old = JSON.parse(row.data) as { projectId?: unknown };
+            if (old.projectId === null || old.projectId === undefined) continue;
+            if (typeof old.projectId !== 'string' || !/^PROJ[1-9]\d*$/.test(old.projectId) || !this.database.prepare("SELECT 1 FROM entities WHERE id = ? AND kind = 'project'").get(old.projectId)) throw new Error(`Task ${row.id} has an invalid legacy project reference. Repair it before upgrading.`);
+            this.database.prepare('INSERT INTO task_projects (task_id, project_id) VALUES (?, ?)').run(row.id, old.projectId);
+          }
+          this.database.exec('PRAGMA user_version = 10');
+        });
+      } catch (error) { this.database.close(); throw error; }
+    }
+    this.taskProjectsReady = true;
   }
 
   close(): void { this.database.close(); }
@@ -205,15 +227,32 @@ export class Store {
   private get<T extends Entity>(kind: Kind, id: string): T {
     const row = this.database.prepare('SELECT data FROM entities WHERE kind = ? AND id = ?').get(kind, id) as JsonRow | undefined;
     if (!row) throw new HttpError(404, `${kind} ${id} was not found.`);
-    return JSON.parse(row.data) as T;
+    const value = JSON.parse(row.data) as T;
+    return kind === 'task' && this.taskProjectsReady ? this.hydrateTask(value as Task) as T : value;
   }
   private all<T extends Entity>(kind: Kind): T[] {
-    return (this.database.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid DESC').all(kind) as JsonRow[]).map(row => JSON.parse(row.data) as T);
+    const values = (this.database.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid DESC').all(kind) as JsonRow[]).map(row => JSON.parse(row.data) as T);
+    if (kind !== 'task' || !this.taskProjectsReady) return values;
+    const projects = new Map<string, string[]>();
+    for (const row of this.database.prepare('SELECT task_id, project_id FROM task_projects ORDER BY task_id, project_id').all() as { task_id: string; project_id: string }[]) {
+      const ids = projects.get(row.task_id) ?? []; ids.push(row.project_id); projects.set(row.task_id, ids);
+    }
+    return values.map(value => this.hydrateTask(value as Task, projects.get(value.id) ?? []) as T);
+  }
+  private hydrateTask(value: Task, projectIds?: string[]): Task {
+    const { projectId: _legacyProjectId, projectIds: _oldProjectIds, ...metadata } = value as Task & { projectId?: unknown };
+    return { ...metadata, projectIds: projectIds ?? (this.database.prepare('SELECT project_id FROM task_projects WHERE task_id = ? ORDER BY project_id').all(value.id) as { project_id: string }[]).map(row => row.project_id) };
   }
   private save(kind: Kind, value: Entity): void {
-    const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, JSON.stringify(value));
+    let metadata: Entity | Omit<Task, 'projectIds'> = value;
+    if (kind === 'task' && this.taskProjectsReady) {
+      const { projectId: _legacyProjectId, projectIds: _projectIds, ...rest } = value as Task & { projectId?: unknown };
+      metadata = rest;
+    }
+    const json = JSON.stringify(metadata);
+    const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
     if (created.changes) registerDefaultPolicy(this.database, value.id);
-    else this.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify(value), value.id);
+    else this.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(json, value.id);
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -258,7 +297,7 @@ export class Store {
     if (!Number.isSafeInteger(task.version) || task.version < 1 || !Number.isSafeInteger(task.version + 1)) throw new HttpError(409, 'This task has reached the supported version limit.');
     return { ...task, version: task.version + 1, updatedAt: now };
   }
-  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
+  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge' | 'project'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
     const last = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id) as { sequence: number };
     const sequence = last.sequence + 1;
     if (!Number.isSafeInteger(sequence) || sequence < 1) throw new HttpError(409, 'This task has reached the supported history limit.');
@@ -275,15 +314,16 @@ export class Store {
       if (fromId === toId) return 0;
       const rows = this.database.prepare("SELECT data FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? ORDER BY id").all(fromId) as JsonRow[];
       for (const row of rows) {
-        const task = JSON.parse(row.data) as Task;
+        const task = this.hydrateTask(JSON.parse(row.data) as Task);
         this.updateTask(task.id, { expectedVersion: task.version, ownerId: toId }, attribution);
       }
       return rows.length;
     });
   }
   private writeTask(input: unknown, current?: Task, attribution?: ActorAttribution): Task {
-    const fields: TaskField[] = ['title', 'description', 'status', 'priority', 'projectId', 'ownerId'];
-    const data = object(input, current ? [...fields, 'expectedVersion'] : fields);
+    const fields: Exclude<TaskField, 'projectId'>[] = ['title', 'description', 'status', 'priority', 'ownerId'];
+    const data = object(input, current ? [...fields, 'expectedVersion', 'projectIds', 'projectId'] : [...fields, 'projectIds', 'projectId']);
+    if (current && ('projectId' in data || 'projectIds' in data)) throw new HttpError(400, 'Change project tags with the separate task projects action.');
     if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before saving.');
     if (current && !fields.some(field => data[field] !== undefined)) throw new HttpError(400, 'At least one task field is required.');
     const now = new Date().toISOString();
@@ -292,15 +332,17 @@ export class Store {
       description: data.description === undefined && current ? current.description : optionalString(data.description, 'Description'),
       status: data.status === undefined ? current?.status ?? 'open' : data.status === 'duplicate' && current?.status === 'duplicate' ? 'duplicate' as const : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
       priority: data.priority === undefined ? current?.priority ?? 'normal' : choice(data.priority, 'priority', ['low', 'normal', 'high', 'urgent']),
-      projectId: data.projectId === undefined && current ? current.projectId : this.reference(data.projectId, 'project'),
       ownerId: data.ownerId === undefined && current ? current.ownerId : data.ownerId === undefined || data.ownerId === null ? null : this.taskPrincipal(data.ownerId),
     };
+    if (!current && 'projectIds' in data && 'projectId' in data) throw new HttpError(400, 'Use projectIds or the legacy projectId field, not both.');
+    const projectIds = current?.projectIds ?? this.taskProjectIds('projectIds' in data ? data.projectIds : data.projectId === undefined || data.projectId === null ? [] : [data.projectId]);
     const changes: TaskFieldChange[] = current ? fields.filter(field => values[field] !== current[field]).map(field => ({ field, oldValue: current[field], newValue: values[field] })) : [];
     if (current && changes.length === 0) return current;
-    const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, authorId: attribution ? this.taskPrincipal(attribution.principalId) : null, version: 1, createdAt: now, updatedAt: now };
+    const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, projectIds, authorId: attribution ? this.taskPrincipal(attribution.principalId) : null, version: 1, createdAt: now, updatedAt: now };
     const parents = current && task.status !== current.status
       ? (this.database.prepare('SELECT task_id FROM task_dependencies WHERE dependency_id = ? ORDER BY task_id').all(task.id) as { task_id: string }[]).map(row => this.advanceTask(this.get<Task>('task', row.task_id), now)) : [];
     this.save('task', task);
+    if (!current) for (const projectId of projectIds) this.database.prepare('INSERT INTO task_projects (task_id, project_id) VALUES (?, ?)').run(task.id, projectId);
     this.appendTaskTransaction(task, current ? { kind: 'edit', changes } : { kind: 'create', snapshot: task }, attribution, now);
     this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`, attribution);
     if (task.ownerId !== (current?.ownerId ?? null)) {
@@ -317,12 +359,45 @@ export class Store {
     }
     return task;
   }
+  private taskProjectIds(value: unknown): string[] {
+    if (!Array.isArray(value) || value.length > 100) throw new HttpError(400, 'projectIds must contain at most 100 project IDs.');
+    const ids = value.map(value => {
+      const id = string(value, 'Project ID', 50);
+      if (!/^PROJ[1-9]\d*$/.test(id)) throw new HttpError(400, 'Choose a valid project.');
+      return id;
+    });
+    if (new Set(ids).size !== ids.length) throw new HttpError(400, 'Choose each project only once.');
+    for (const id of ids) this.reference(id, 'project');
+    return ids.sort();
+  }
+  updateTaskProjects(id: string, input: unknown, attribution?: ActorAttribution): TaskDetail {
+    return this.taskMutation(() => {
+      const data = object(input, ['action', 'projectIds', 'expectedVersion']);
+      const action = choice(data.action, 'action', ['add', 'remove', 'set']);
+      const current = this.get<Task>('task', id);
+      if (integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before changing project tags.');
+      const selected = this.taskProjectIds(data.projectIds);
+      const selectedSet = new Set(selected); const existing = new Set(current.projectIds);
+      const removed = action === 'add' ? [] : current.projectIds.filter(projectId => action === 'set' ? !selectedSet.has(projectId) : selectedSet.has(projectId));
+      const added = action === 'remove' ? [] : selected.filter(projectId => !existing.has(projectId));
+      if (!removed.length && !added.length) return this.taskDetail(id);
+      const now = new Date().toISOString(); const operationId = randomUUID();
+      const task = this.advanceTask(current, now);
+      for (const projectId of removed) this.database.prepare('DELETE FROM task_projects WHERE task_id = ? AND project_id = ?').run(id, projectId);
+      for (const projectId of added) this.database.prepare('INSERT INTO task_projects (task_id, project_id) VALUES (?, ?)').run(id, projectId);
+      this.save('task', task);
+      for (const projectId of removed) this.appendTaskTransaction(task, { kind: 'project', project: { projectId, action: 'removed', operationId } }, attribution, now);
+      for (const projectId of added) this.appendTaskTransaction(task, { kind: 'project', project: { projectId, action: 'added', operationId } }, attribution, now);
+      this.event(id, 'projects_changed', 'Updated project tags.', attribution);
+      return this.taskDetail(id);
+    });
+  }
   taskHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): TaskHistory {
     this.get<Task>('task', id);
     const cursor = before === undefined ? null : integer(before, 'before');
     const size = integer(limit, 'limit');
     if (size > 100) throw new HttpError(400, 'limit must be at most 100.');
-    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)));
+    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)) && (!item.project || visible(item.project.projectId)));
     const pageStatement = this.database.prepare(cursor === null
       ? 'SELECT data FROM task_transactions WHERE task_id = ? ORDER BY sequence DESC'
       : 'SELECT data FROM task_transactions WHERE task_id = ? AND sequence < ? ORDER BY sequence DESC');
@@ -390,7 +465,7 @@ export class Store {
     for (const endpoint of [{ taskId: targetId, expectedVersion: expectedTargetVersion }, ...sources]) {
       const row = this.database.prepare("SELECT data FROM entities WHERE kind = 'task' AND id = ?").get(endpoint.taskId) as JsonRow | undefined;
       if (!row) throw new HttpError(404, 'A selected task is unavailable.', 'TASK_UNAVAILABLE');
-      const task = JSON.parse(row.data) as Task;
+      const task = this.hydrateTask(JSON.parse(row.data) as Task);
       if (task.version !== endpoint.expectedVersion) throw new HttpError(409, 'A selected task changed. Reload before merging.');
       originals.set(task.id, task);
     }
@@ -513,7 +588,7 @@ export class Store {
       if (dependencyId === id) throw new HttpError(400, 'A task cannot depend on itself.');
       const row = this.database.prepare("SELECT data FROM entities WHERE kind = 'task' AND id = ?").get(dependencyId) as JsonRow | undefined;
       if (!row) throw new HttpError(404, 'Dependency task was not found.', 'TASK_UNAVAILABLE');
-      const dependency = JSON.parse(row.data) as Task;
+      const dependency = this.hydrateTask(JSON.parse(row.data) as Task);
       const exists = Boolean(this.database.prepare('SELECT 1 FROM task_dependencies WHERE task_id = ? AND dependency_id = ?').get(id, dependencyId));
       if ((action === 'add') === exists) throw new HttpError(409, action === 'add' ? 'This dependency already exists.' : 'This dependency no longer exists.');
       if (action === 'add' && this.database.prepare(`WITH RECURSIVE reachable(id) AS (

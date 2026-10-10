@@ -41,6 +41,42 @@ async function signIn(page: Page, index: number) {
   await expect(page.locator('.signed-in-user')).toHaveText(authAccounts[index]!.displayName);
 }
 
+test('a cached task status waits for initial access verification and preserves its successful save', async ({ page }, info) => {
+  const task = await createTask(page, info, 'Startup status');
+  await page.goto('./#tasks');
+  let releaseState!: () => void; let releaseOldest!: () => void; let holding = true; let heldReads = 0; let readIndex = 0;
+  const stateGate = new Promise<void>(resolve => { releaseState = resolve; });
+  const oldestGate = new Promise<void>(resolve => { releaseOldest = resolve; });
+  const writes: unknown[] = [];
+  await page.route('**/api/state', async route => {
+    const oldest = readIndex++ === 0;
+    const response = await route.fetch();
+    if (holding) { heldReads++; await stateGate; }
+    if (oldest) await oldestGate;
+    await route.fulfill({ response, ...(oldest ? { headers: { ...response.headers(), 'X-Test-Delayed-State': 'oldest' } } : {}) });
+  });
+  page.on('request', request => { if (request.method() === 'PATCH' && request.url().endsWith(`/tasks/${task.id}`)) writes.push(request.postDataJSON()); });
+  try {
+    await page.reload();
+    const status = page.getByRole('combobox', { name: `Status of ${task.id}: ${task.title}`, exact: true });
+    await expect(status).toHaveValue('open');
+    await expect.poll(() => heldReads).toBeGreaterThanOrEqual(2);
+    await status.selectOption('resolved');
+    await expect.poll(() => heldReads).toBeGreaterThanOrEqual(3);
+    expect(writes).toEqual([]);
+    holding = false; releaseState();
+    await expect(status).toHaveValue('resolved');
+    expect(writes).toEqual([{ status: 'resolved', expectedVersion: task.version }]);
+    await expect(page.getByRole('status')).toContainText(`${task.id} updated`);
+    const delayed = page.waitForResponse(response => response.headers()['x-test-delayed-state'] === 'oldest');
+    releaseOldest(); await (await delayed).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(status).toHaveValue('resolved');
+    expect(await page.evaluate(id => Object.keys(localStorage).filter(key => key.endsWith(':state')).flatMap(key => (JSON.parse(localStorage.getItem(key)!) as AppState).tasks).find(item => item.id === id)?.status, task.id)).toBe('resolved');
+    await page.reload(); await expect(status).toHaveValue('resolved');
+  } finally { holding = false; releaseState(); releaseOldest(); }
+});
+
 test('task pages preserve exact field history, comments and manual dependencies with voice navigation', async ({ page }, info) => {
   const dependency = await createTask(page, info, 'Collect citations');
   const task = await createTask(page, info, 'Prepare manuscript', 'open');
@@ -151,7 +187,7 @@ test('task relationship revocation clears loaded history while preserving unrela
     await bob.getByRole('button', { name: 'Save Task', exact: true }).click();
     await expect(bob.getByRole('heading', { level: 1 })).toContainText(`Edited visible parent ${marker}`);
     const actual = await api<TaskDetail>(page, `/tasks/${task.id}`);
-    expect(actual.task.projectId).toBe(project.id);
+    expect(actual.task.projectIds).toContain(project.id);
     expect(actual.task.description).toBe('Shared task body');
     await bob.reload();
     await expect(bob.locator('body')).not.toContainText(related.title);

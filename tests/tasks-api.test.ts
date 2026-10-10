@@ -122,29 +122,27 @@ test('task comments, field edits and dependencies enforce distinct capabilities 
   } finally { await app.close(); }
 });
 
-test('history filters related tasks before pagination and redacts old and new project references', async () => {
+test('history filters related tasks and project tag transactions before pagination', async () => {
   const app = await start();
   try {
     const first = await app.create<Project>('alice', '/api/projects', { name: 'Secret first project' });
     const second = await app.create<Project>('alice', '/api/projects', { name: 'Secret second project' });
     const task = await app.create<Task>('alice', '/api/tasks', { title: 'Shared task', projectId: first.id });
     const target = await app.task('Secret dependency title');
-    await app.edit(task.id, { projectId: second.id });
+    assert.equal((await app.request('alice', `/api/tasks/${task.id}/projects`, 'POST', { expectedVersion: task.version, action: 'set', projectIds: [second.id] })).status, 200);
     await app.depend(task.id, target.id);
     await app.create('alice', `/api/tasks/${task.id}/comments`, { body: 'Visible note one.' });
     await app.edit(target.id, { status: 'resolved' });
     await app.create('alice', `/api/tasks/${task.id}/comments`, { body: 'Visible note two.' });
-    await app.edit(task.id, { projectId: null });
+    assert.equal((await app.request('alice', `/api/tasks/${task.id}/projects`, 'POST', { expectedVersion: (await app.detail(task.id)).task.version, action: 'set', projectIds: [] })).status, 200);
     for (const id of [first.id, second.id, target.id]) await app.policy(id, { view: members(app.alice.id), edit: members(app.alice.id), interact: members(app.alice.id) });
     const detail = await app.detail(task.id, 'bob');
-    assert.deepEqual(detail.dependsOn, []); assert.equal(detail.task.projectId, null);
+    assert.deepEqual(detail.dependsOn, []); assert.deepEqual(detail.task.projectIds, []);
     const serialized = JSON.stringify(detail);
     for (const marker of [first.id, second.id, target.id, 'Secret dependency title', 'Secret first project', 'Secret second project']) assert.ok(!serialized.includes(`"${marker}"`), marker);
     assert.equal(detail.history.transactions.some(item => item.kind === 'dependency' || item.kind === 'dependency_status'), false);
-    const changes = detail.history.transactions.flatMap(item => item.changes || []).filter(change => change.field === 'projectId');
-    assert.ok(changes.some(change => change.oldValueHidden && change.newValueHidden));
-    assert.ok(changes.some(change => change.oldValueHidden && change.newValue === null && !change.newValueHidden));
-    assert.equal(detail.history.transactions.find(item => item.snapshot)?.snapshot?.projectId, null);
+    assert.equal(detail.history.transactions.some(item => item.kind === 'project'), false);
+    assert.deepEqual(detail.history.transactions.find(item => item.snapshot)?.snapshot?.projectIds, []);
     const expected = detail.history.transactions.map(item => item.id);
     const paged: string[] = []; let before: number | null = null;
     do {

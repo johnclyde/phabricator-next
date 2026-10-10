@@ -15,7 +15,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- diff --title "Title" --kind paper FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
-  npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
+  npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- show P2|T1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
@@ -28,6 +28,7 @@ Hosted review is always explicit.
 tasks lists your assigned open tasks by default. --owner all includes all visible
 owners; --unassigned selects unowned tasks. --subscribed selects tasks you follow.
 Use a principal ID or user:USERNAME to disambiguate reserved owner filter names.
+--project selects a visible project ID or exact name; repeat it to require all tags.
 show T1 includes the current task, visible dependencies, and the first history page.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
@@ -43,7 +44,7 @@ async function main() {
       server: { type: 'string', default: process.env.PHABRICATOR_URL || 'http://127.0.0.1:4310' },
       version: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
       status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' },
-      owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
+      project: { type: 'string', multiple: true }, owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -125,10 +126,18 @@ async function main() {
       if (!ownerId && state.tasks.some(task => task.ownerId === owner)) ownerId = owner;
       if (!ownerId) throw new Error('Owner is not an available workspace account. Use a username, principal ID, me, all or unassigned.');
     }
+    const projectIds = (values.project || []).map(value => {
+      const byId = state.projects.find(project => project.id === value);
+      if (byId) return byId.id;
+      const matches = state.projects.filter(project => project.name.toLocaleLowerCase() === value.toLocaleLowerCase());
+      if (matches.length !== 1) throw new Error('Project is unavailable or its name is ambiguous. Use a visible project ID or exact name.');
+      return matches[0]!.id;
+    });
     const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
     const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task.status) : !isTaskClosed(task.status)))
       .filter(task => owner === 'all' || task.ownerId === ownerId)
       .filter(task => !values.subscribed || state.followingTaskIds.includes(task.id))
+      .filter(task => projectIds.every(id => task.projectIds.includes(id)))
       .sort((left, right) => (order === 'priority' ? ranks[right.priority] - ranks[left.priority] : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))
       .slice(0, limit);
     if (values.json) console.log(JSON.stringify(tasks, null, 2));

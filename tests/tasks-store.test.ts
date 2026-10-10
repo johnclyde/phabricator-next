@@ -23,11 +23,11 @@ test('task creation and edits preserve attributed snapshots and exact structured
   const store = new Store({ path: ':memory:' });
   try {
     const project = store.createProject({ name: 'Paper project' }, alice);
-    const task = create(store); assert.equal(task.version, 1);
+    const task = store.createTask({ title: 'Prepare the revised paper', description: 'Keep the record exact.', projectIds: [project.id] }, alice); assert.equal(task.version, 1);
     const created = store.taskHistory(task.id).transactions.find(item => item.kind === 'create')!;
     assert.equal(created.kind, 'create'); assert.equal(created.sequence, 1); assert.equal(created.taskVersion, 1);
     assert.equal(created.actor, alice.displayName); assert.deepEqual(created.attribution, alice); assert.deepEqual(created.snapshot, task);
-    const updated = store.updateTask(task.id, { expectedVersion: 1, title: 'Prepare the final draft', description: '  Preserve whitespace.\n', status: 'in_progress', priority: 'urgent', projectId: project.id }, bob);
+    const updated = store.updateTask(task.id, { expectedVersion: 1, title: 'Prepare the final draft', description: '  Preserve whitespace.\n', status: 'in_progress', priority: 'urgent' }, bob);
     assert.equal(updated.version, 2); assert.equal(updated.createdAt, task.createdAt);
     const edited = store.taskHistory(task.id).transactions[0]!;
     assert.equal(edited.kind, 'edit'); assert.equal(edited.sequence, 3); assert.equal(edited.taskVersion, 2);
@@ -37,7 +37,6 @@ test('task creation and edits preserve attributed snapshots and exact structured
       { field: 'description', oldValue: task.description, newValue: updated.description },
       { field: 'status', oldValue: 'open', newValue: 'in_progress' },
       { field: 'priority', oldValue: 'normal', newValue: 'urgent' },
-      { field: 'projectId', oldValue: null, newValue: project.id },
     ]);
     const first = store.createTaskComment(task.id, { body: '  First independent comment.\n' }, alice);
     const second = store.createTaskComment(task.id, { body: 'A concurrent response.' }, bob);
@@ -55,10 +54,10 @@ test('task edits enforce CAS and strict input without needless versions or histo
   const store = new Store({ path: ':memory:' });
   try {
     const task = create(store); const before = snapshot(store);
-    assert.deepEqual(store.updateTask(task.id, { expectedVersion: 1, title: task.title, status: task.status, projectId: null }, bob), task);
+    assert.deepEqual(store.updateTask(task.id, { expectedVersion: 1, title: task.title, status: task.status }, bob), task);
     assert.deepEqual(snapshot(store), before);
     for (const input of [{}, { expectedVersion: 1 }, { title: 'No CAS' }, { expectedVersion: 0, title: 'Bad CAS' },
-      { expectedVersion: 1, title: '' }, { expectedVersion: 1, status: 'unknown' }, { expectedVersion: 1, projectId: 'PROJ999' },
+      { expectedVersion: 1, title: '' }, { expectedVersion: 1, status: 'unknown' }, { expectedVersion: 1, projectId: 'PROJ999' }, { expectedVersion: 1, projectIds: [] },
       { expectedVersion: 1, priority: 'high', version: 99 }]) assert.throws(() => store.updateTask(task.id, input, alice), status(400));
     assert.throws(() => store.updateTask(task.id, { expectedVersion: 2, title: 'Stale' }, alice), status(409));
     for (const input of [{ body: '' }, { body: '  ' }, { body: 'x'.repeat(20_001) }, { body: '\0' }, { body: 'No forged actor.', actor: 'Anyone' }, { body: 'No comment CAS.', expectedVersion: 1 }]) assert.throws(() => store.createTaskComment(task.id, input, bob), status(400));
@@ -260,7 +259,7 @@ test('a task writer waits for SQLite before reading CAS state, including a depen
   } finally { if (worker) await worker.terminate(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-function schemaSix(path: string): { task: Omit<Task, 'version' | 'ownerId' | 'authorId'>; other: string; replay: string; activity: string } {
+function schemaSix(path: string): { task: Omit<Task, 'version' | 'ownerId' | 'authorId' | 'projectIds'> & { projectId: null }; other: string; replay: string; activity: string } {
   const database = new DatabaseSync(path); const now = '2021-06-01T12:00:00.000Z';
   const task = { id: 'T7', title: 'Existing task', description: 'Only the latest stored description.', status: 'in_progress' as const, priority: 'high' as const, projectId: null, createdAt: now, updatedAt: '2025-10-01T12:00:00.000Z' };
   const replay = JSON.stringify(task, null, 2);
@@ -304,9 +303,9 @@ test('schema 6 migration adds an honest unknown-author baseline at migration tim
   const directory = mkdtempSync(join(tmpdir(), 'phab-task-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaSix(path); const started = Date.now(); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     assert.equal(store.fresh, false);
-    const detail = store.taskDetail(old.task.id); assert.deepEqual(detail.task, { ...old.task, ownerId: null, authorId: null, version: 1 });
+    const detail = store.taskDetail(old.task.id); const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(detail.task, { ...metadata, projectIds: [], ownerId: null, authorId: null, version: 1 });
     assert.deepEqual(detail.dependsOn, []); assert.deepEqual(detail.blocks, []);
     assert.equal(detail.history.transactions.length, 1); const legacy = detail.history.transactions[0]!;
     assert.equal(legacy.kind, 'legacy'); assert.equal(legacy.actor, null); assert.equal(legacy.attribution, undefined);

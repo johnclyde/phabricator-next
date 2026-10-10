@@ -199,6 +199,37 @@ test('CLI task reads preserve mounts, filters and current object visibility with
     assert.equal(filteredDuplicate.code, 0, filteredDuplicate.stderr);
     assert.deepEqual(JSON.parse(filteredDuplicate.stdout).duplicateOf, []);
     assert.ok(!filteredDuplicate.stdout.includes(other.id)); assert.ok(!filteredDuplicate.stdout.includes(other.title));
+    const writing = store.createProject({ name: 'Paper writing' });
+    const citations = store.createProject({ name: 'Citation checks' });
+    const secretProject = store.createProject({ name: 'Private project marker' });
+    app.policies.configureNew(secretProject.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
+    for (const [taskId, projectIds] of [[normal.id, [writing.id, citations.id, secretProject.id]], [urgent.id, [writing.id]], [hidden.id, [writing.id, citations.id]]] as [string, string[]][]) {
+      store.updateTaskProjects(taskId, { action: 'set', projectIds, expectedVersion: store.taskDetail(taskId).task.version }, attribution);
+    }
+    for (const [filters, expected] of [
+      [['--project', writing.id], [urgent.id, normal.id]],
+      [['--project', 'PAPER WRITING'], [urgent.id, normal.id]],
+      [['--project', writing.id, '--project', citations.id], [normal.id]],
+      [['--project', citations.name], [normal.id]],
+      [['--project', writing.id, '--project', writing.id], [urgent.id, normal.id]],
+    ] as [string[], string[]][]) {
+      const filtered = await read(['tasks', '--owner', 'all', ...filters, '--json']);
+      assert.equal(filtered.code, 0, filtered.stderr);
+      assert.deepEqual(JSON.parse(filtered.stdout).map((task: { id: string }) => task.id), expected);
+      assert.ok(!filtered.stdout.includes(secretProject.id)); assert.ok(!filtered.stdout.includes(secretProject.name));
+      assert.ok(!filtered.stdout.includes(hidden.id)); assert.ok(!filtered.stdout.includes(hidden.title));
+    }
+    const tagged = await read(['show', normal.id]);
+    assert.equal(tagged.code, 0, tagged.stderr);
+    assert.deepEqual(JSON.parse(tagged.stdout).task.projectIds, [writing.id, citations.id].sort());
+    assert.equal(JSON.parse(tagged.stdout).task.projectId, undefined);
+    assert.ok(!tagged.stdout.includes(secretProject.id)); assert.ok(!tagged.stdout.includes(secretProject.name));
+    const hiddenProjectFilter = await read(['tasks', '--project', secretProject.id]);
+    const missingProjectFilter = await read(['tasks', '--project', 'PROJ99999']);
+    assert.equal(hiddenProjectFilter.code, 1); assert.equal(hiddenProjectFilter.stderr, missingProjectFilter.stderr);
+    store.createProject({ name: citations.name });
+    const ambiguousProject = await read(['tasks', '--project', citations.name]);
+    assert.equal(ambiguousProject.code, 1); assert.match(ambiguousProject.stderr, /ambiguous/);
     for (const args of [['tasks', '--status', 'invalid'], ['tasks', '--order', 'invalid'], ['tasks', '--limit', '0'], ['tasks', '--limit', '1.5'], ['tasks', '--unassigned', '--owner', 'all'], ['tasks', '--owner', 'missing-user']]) {
       const invalid = await read(args); assert.equal(invalid.code, 1, args.join(' '));
     }

@@ -246,7 +246,7 @@ test('schema 5 migration preserves original bytes and provenance; old replay get
   const directory = mkdtempSync(join(tmpdir(), 'phab-suggestion-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaFive(path); const store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     assert.deepEqual(store.detail('P1'), { ...old.detail, suggestionApplications: [] });
     for (const [table, bytes] of old.bytes) assert.deepEqual((raw(store, table) as { data: string }[]).map(row => row.data), bytes);
     assert.equal(store.detail('P1').comments[0]!.attribution, undefined);

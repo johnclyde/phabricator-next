@@ -20,6 +20,9 @@ test('voice task creation is a draft command and preserves content case', () => 
   assert.deepEqual(parseCommand('Search for Smith 2021'), { type: 'search', query: 'Smith 2021' });
   assert.deepEqual(parseCommand('show in progress'), { type: 'filter', value: 'in_progress' });
   assert.deepEqual(parseCommand('read summary'), { type: 'summary' });
+  assert.deepEqual(parseCommand('show tasks in project Research Papers'), { type: 'taskProjectFilter', project: 'Research Papers' });
+  assert.deepEqual(parseCommand('open tasks in project PROJ2'), { type: 'taskProjectFilter', project: 'PROJ2' });
+  assert.equal(parseCommand('add project tag Research to this task').type, 'unknown');
   assert.deepEqual(parseCommand('show my tasks'), { type: 'taskFilter', value: 'mine' });
   assert.deepEqual(parseCommand('show duplicate'), { type: 'filter', value: 'duplicate' });
   assert.equal(parseCommand('merge this task as duplicate').type, 'unknown');
@@ -52,6 +55,9 @@ test('offline queue permits only supported idempotent mutation routes', () => {
   assert.equal(canQueue('/api/tasks', 'POST'), true);
   assert.equal(canQueue('/api/tasks/T1', 'PATCH'), true);
   assert.equal(canQueue('/api/tasks/T1/comments', 'POST'), true);
+  assert.equal(canQueue('/api/tasks/T1/projects', 'POST', { action: 'add', projectIds: ['PROJ1'], expectedVersion: 2 }), true);
+  assert.equal(canQueue('/api/tasks/T1/projects/extra', 'POST'), false);
+  assert.equal(canQueue('/api/tasks', 'POST', { title: 'Legacy creation', projectId: 'PROJ1' }), true);
   assert.equal(canQueue('/api/tasks/T1/dependencies', 'POST'), false);
   assert.equal(canQueue('/api/tasks/T1/merge', 'POST'), false);
   assert.equal(canQueue('/api/tasks/T1/merge-in', 'POST'), false);

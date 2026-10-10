@@ -63,7 +63,7 @@ export class AccessLayer {
     return { ...this.store.subscriptionStatus(id, principalId), accessEpoch: this.policies.epoch() };
   }
   private visibleTaskTransaction(transaction: TaskTransaction): boolean {
-    const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId ?? transaction.merge?.taskId;
+    const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId ?? transaction.merge?.taskId ?? transaction.project?.projectId;
     return !related || this.canView(related);
   }
   /** Filter only this response's evidence; retries must never borrow live history. */
@@ -100,7 +100,8 @@ export class AccessLayer {
         return change;
       }
       return Object.fromEntries(Object.entries(object).map(([key, child]) => [key,
-        (key === 'projectId' || key === 'repositoryId') && typeof child === 'string' && !this.canView(child) ? null : visit(child),
+        key === 'projectIds' && Array.isArray(child) ? child.filter(id => typeof id === 'string' && this.canView(id))
+          : (key === 'projectId' || key === 'repositoryId') && typeof child === 'string' && !this.canView(child) ? null : visit(child),
       ]));
     };
     return visit(value) as T;
@@ -114,6 +115,10 @@ export class AccessLayer {
       const valid = typeof id === 'string' && (key === 'projectId' ? /^PROJ[1-9]\d*$/ : /^R[1-9]\d*$/).test(id);
       if (!valid || !this.canView(id as string)) throw new HttpError(400, 'Reference unavailable.');
     }
+  }
+  private projectReferences(value: unknown): void {
+    if (!Array.isArray(value) || value.length > 100) throw new HttpError(400, 'Choose at most 100 project tags.');
+    for (const id of value) if (typeof id !== 'string' || !/^PROJ[1-9]\d*$/.test(id) || !this.canView(id)) throw new HttpError(400, 'Reference unavailable.');
   }
   private principalReference(value: unknown, active = true, taskId?: string): string {
     const account = typeof value === 'string' ? this.auth.listAccounts().find(item => item.id === value) : undefined;
@@ -138,7 +143,9 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
-    if ((method === 'POST' && CREATES.has(path)) || (method === 'PATCH' && path.startsWith('/api/tasks/'))) this.references(input);
+    if (method === 'POST' && CREATES.has(path)) this.references(input);
+    if (method === 'POST' && path === '/api/tasks' && record(input)?.projectIds !== undefined) this.projectReferences(record(input)!.projectIds);
+    if (method === 'POST' && /^\/api\/tasks\/T\d+\/projects$/.test(path)) this.projectReferences(record(input)?.projectIds);
     if ((method === 'POST' && path === '/api/tasks') || (method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path))) {
       const ownerId = record(input)?.ownerId;
       const current = method === 'PATCH' ? this.store.database.prepare("SELECT json_extract(data, '$.ownerId') AS ownerId FROM entities WHERE id = ?").get(target!.id) as { ownerId: unknown } | undefined : undefined;
@@ -241,6 +248,22 @@ export class AccessLayer {
     detail.duplicateOf = [];
     detail.duplicates = [];
   }
+  private taskProjectSnapshot(task: Record<string, unknown>): Record<string, unknown> {
+    const invalid = () => new HttpError(409, 'This saved task response cannot be safely replayed. Reload the task.');
+    const validId = (id: unknown): id is string => typeof id === 'string' && /^PROJ[1-9]\d*$/.test(id);
+    let projectIds: string[];
+    if (task.projectIds !== undefined) {
+      if (!Array.isArray(task.projectIds) || !task.projectIds.every(validId) || new Set(task.projectIds).size !== task.projectIds.length || task.projectId !== undefined) throw invalid();
+      projectIds = [...task.projectIds];
+    } else {
+      if (!Object.hasOwn(task, 'projectId') || (task.projectId !== null && !validId(task.projectId))) throw invalid();
+      projectIds = task.projectId === null ? [] : [task.projectId as string];
+    }
+    // Normalize only the response's task shape, never historical snapshots or
+    // stored evidence. An old scalar says nothing about today's project tags.
+    const { projectId: _legacy, ...snapshot } = task;
+    return { ...snapshot, projectIds };
+  }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
   present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false): MutationResponse {
     let target = this.target(method, path);
@@ -259,13 +282,18 @@ export class AccessLayer {
     } else if (target) this.require(target.id, target.capability);
     if (path.startsWith('/api/policies/') && target) return { status: response.status, body: this.describe(target.id) };
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
-    const result = this.redact(response.body);
+    const normalized = body && record(body.task) ? { ...body, task: this.taskProjectSnapshot(record(body.task)!) }
+      : body && typeof body.id === 'string' && /^T[1-9]\d*$/.test(body.id) && path.startsWith('/api/tasks') ? this.taskProjectSnapshot(body) : response.body;
+    const taskDetail = record(normalized);
+    if (taskDetail && record(taskDetail.task)) {
+      this.legacyTaskMergeSnapshot(taskDetail);
+      // Filter whole relationship events before scalar redaction can replace
+      // their project identity and accidentally retain a hidden placeholder.
+      return { status: response.status, body: this.taskSnapshot(normalized as TaskDetail) };
+    }
+    const result = this.redact(normalized);
     const detail = record(result);
     if (detail && /^\/api\/tasks\/T\d+\/subscriptions$/.test(path)) return { status: response.status, body: { ...detail, accessEpoch: this.policies.epoch() } };
-    if (detail && record(detail.task)) {
-      this.legacyTaskMergeSnapshot(detail);
-      return { status: response.status, body: this.taskSnapshot(result as TaskDetail) };
-    }
     const revisionId = record(detail?.revision)?.id;
     const id = revisionId ?? record(detail?.document)?.id;
     if (detail && typeof id === 'string') {

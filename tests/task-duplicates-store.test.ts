@@ -184,9 +184,9 @@ test('merge links, endpoint and parent versions, subscriptions, history, activit
       "CREATE TRIGGER fail_merge BEFORE INSERT ON idempotency BEGIN SELECT RAISE(ABORT, 'Injected replay failure'); END;",
     ];
     for (const trigger of triggers) { store.database.exec(trigger); assert.throws(attempt, /Injected/); assert.deepEqual(snapshot(store), before); store.database.exec('DROP TRIGGER fail_merge'); }
-    const task = current(store, parent.id); store.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify({ ...task, version: Number.MAX_SAFE_INTEGER }), task.id);
+    const task = current(store, parent.id); const originalJson = (store.database.prepare('SELECT data FROM entities WHERE id = ?').get(task.id) as { data: string }).data; store.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify({ ...task, version: Number.MAX_SAFE_INTEGER }), task.id);
     const exhausted = snapshot(store); assert.throws(attempt, status(409)); assert.deepEqual(snapshot(store), exhausted);
-    store.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify(task), task.id); assert.deepEqual(snapshot(store), before);
+    store.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(originalJson, task.id); assert.deepEqual(snapshot(store), before);
     const result = attempt(); assert.equal(result.status, 201); const after = snapshot(store);
     assert.deepEqual(store.mutate('batch-once', 'fingerprint', () => { throw new Error('No second merge'); }), result); assert.deepEqual(snapshot(store), after);
   } finally { store.close(); }
@@ -229,7 +229,8 @@ test('merges acquire the writer lock before checking endpoint versions', { timeo
   } finally { if (worker) await worker.terminate(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-function schemaEight(path: string): { task: Task; rows: unknown[]; replay: string } {
+type LegacyTask = Omit<Task, 'projectIds'> & { projectId: string | null };
+function schemaEight(path: string): { task: LegacyTask; rows: unknown[]; replay: string } {
   const db = new DatabaseSync(path); const now = '2026-10-02T12:00:00.000Z';
   try {
     // Build the historical schema directly. No current Store is opened and
@@ -264,8 +265,8 @@ function schemaEight(path: string): { task: Task; rows: unknown[]; replay: strin
       CREATE INDEX task_subscriptions_principal ON task_subscriptions(principal_id, state, task_id);
       INSERT INTO sequences (name, value) VALUES ('task', 2);
     `);
-    const task: Task = { id: 'T1', title: 'Historical source', description: 'Keep exact content.', status: 'open', priority: 'high', ownerId: bob.principalId, authorId: alice.principalId, projectId: null, version: 4, createdAt: now, updatedAt: now };
-    const target: Task = { ...task, id: 'T2', title: 'Historical destination', status: 'resolved', version: 2, authorId: null, ownerId: null };
+    const task: LegacyTask = { id: 'T1', title: 'Historical source', description: 'Keep exact content.', status: 'open', priority: 'high', ownerId: bob.principalId, authorId: alice.principalId, projectId: null, version: 4, createdAt: now, updatedAt: now };
+    const target: LegacyTask = { ...task, id: 'T2', title: 'Historical destination', status: 'resolved', version: 2, authorId: null, ownerId: null };
     for (const item of [task, target]) {
       db.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?)').run(item.id, 'task', JSON.stringify(item, null, 2));
       const history: TaskTransaction = { id: `old-${item.id}`, taskId: item.id, sequence: 1, taskVersion: item.version, kind: 'legacy', actor: null, createdAt: now, snapshot: item };
@@ -286,9 +287,9 @@ test('schema 9 adds empty duplicate storage while preserving actual schema 8 tas
   const directory = mkdtempSync(join(tmpdir(), 'phab-merge-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaEight(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     assert.deepEqual([...tables.filter(table => table !== 'task_duplicates'), 'versions'].map(table => raw(store, table)), old.rows);
-    assert.deepEqual(current(store, old.task.id), old.task); assert.deepEqual(store.taskDetail(old.task.id).duplicateOf, []); assert.deepEqual(store.taskDetail('T2').duplicates, []);
+    const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(current(store, old.task.id), { ...metadata, projectIds: [] }); assert.deepEqual(store.taskDetail(old.task.id).duplicateOf, []); assert.deepEqual(store.taskDetail('T2').duplicates, []);
     assert.deepEqual(raw(store, 'task_duplicates'), []);
     assert.equal((store.database.prepare('SELECT body FROM idempotency WHERE key = ?').get('historical') as { body: string }).body, old.replay);
     store.close(); store = new Store({ path });
@@ -308,6 +309,6 @@ test('schema 9 migration failure rolls back its table and version without modify
     assert.equal(database.prepare("SELECT 1 FROM sqlite_master WHERE name = 'task_duplicates'").get(), undefined);
     assert.deepEqual([...tables.filter(table => table !== 'task_duplicates'), 'versions'].map(table => database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()), old.rows);
     database.exec('DROP TABLE task_duplicates_target'); const store = new Store({ path });
-    try { assert.deepEqual(current(store, old.task.id), old.task); assert.deepEqual(raw(store, 'task_duplicates'), []); } finally { store.close(); }
+    try { const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(current(store, old.task.id), { ...metadata, projectIds: [] }); assert.deepEqual(raw(store, 'task_duplicates'), []); } finally { store.close(); }
   } finally { database.close(); rmSync(directory, { recursive: true, force: true }); }
 });

@@ -162,7 +162,7 @@ test('hidden references are redacted on reads, preserved by unrelated edits, and
     const task = await app.create<Task>('alice', '/api/tasks', { title: 'Shared task', projectId: project.id });
     const revision = await app.create<RevisionDetail>('alice', '/api/revisions', { ...paper, projectId: project.id, repositoryId: repository.id });
     const state = (await app.request<AppState>('bob', '/api/state')).body;
-    assert.equal(state.tasks[0]!.projectId, null);
+    assert.deepEqual(state.tasks[0]!.projectIds, []);
     assert.equal(state.revisions[0]!.projectId, null); assert.equal(state.revisions[0]!.repositoryId, null);
     assert.doesNotMatch(JSON.stringify(state), /Confidential project name|Confidential repository name|confidential\.git/);
     for (const suffix of ['', '/export']) {
@@ -173,9 +173,9 @@ test('hidden references are redacted on reads, preserved by unrelated edits, and
     const editBody = { title: 'Edited without changing the project', expectedVersion: task.version };
     const editHeaders = { 'Idempotency-Key': 'redact-reference-on-replay' };
     const edited = await app.request<Task>('bob', `/api/tasks/${task.id}`, 'PATCH', editBody, editHeaders);
-    assert.equal(edited.status, 200); assert.equal(edited.body.projectId, null);
+    assert.equal(edited.status, 200); assert.deepEqual(edited.body.projectIds, []);
     assert.deepEqual(await app.request<Task>('bob', `/api/tasks/${task.id}`, 'PATCH', editBody, editHeaders), edited);
-    assert.equal((await app.request<AppState>('alice', '/api/state')).body.tasks[0]!.projectId, project.id);
+    assert.deepEqual((await app.request<AppState>('alice', '/api/state')).body.tasks[0]!.projectIds, [project.id]);
     const hiddenProject = await app.request('bob', '/api/tasks', 'POST', { title: 'Invalid reference', projectId: project.id });
     const missingProject = await app.request('bob', '/api/tasks', 'POST', { title: 'Invalid reference', projectId: 'PROJ999999' });
     assert.equal(hiddenProject.status, 400); assert.deepEqual(hiddenProject, missingProject); assert.equal(hiddenProject.body.error, 'Reference unavailable.');
