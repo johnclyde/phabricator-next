@@ -6,6 +6,12 @@ export { RequestError } from './session';
 export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
 export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
 export function canQueue(path: string, method: MutationMethod, body?: unknown): boolean {
+  if (path === '/api/projects' && method === 'POST') {
+    if (!body || typeof body !== 'object') return false;
+    const input = body as { memberIds?: unknown; access?: unknown };
+    return (input.memberIds === undefined || (Array.isArray(input.memberIds) && input.memberIds.length === 0)) && (input.access === undefined || Boolean(input.access && typeof input.access === 'object' && Object.keys(input.access).every(key => key === 'spaceId')));
+  }
+  if (/^\/api\/projects\/PROJ\d+$/.test(path) && method === 'PATCH') return Boolean(body && typeof body === 'object' && 'expectedVersion' in body && Number.isSafeInteger(body.expectedVersion) && Number(body.expectedVersion) > 0 && Object.keys(body).every(key => ['expectedVersion', 'name', 'description', 'status', 'color', 'colorKey', 'icon', 'aliases'].includes(key)));
   if ((path === '/api/tasks' || /^\/api\/tasks\/T\d+$/.test(path)) && body && typeof body === 'object' && 'ownerId' in body && (method === 'PATCH' || body.ownerId !== null)) return false;
   return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+\/(comments|projects)$/.test(path) && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
 }
@@ -13,13 +19,13 @@ export function isNetworkError(error: unknown): boolean { return error instanceo
 function objectFromPath(path: string): string | null { return /^\/api\/(?:revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
 function queuedObject(item: PendingMutation): string | null {
   const id = objectFromPath(item.path); if (id) return id;
-  if (item.method !== 'POST' || !['/api/tasks', '/api/documents'].includes(item.path)) return null;
+  if (item.method !== 'POST' || !['/api/tasks', '/api/documents', '/api/projects'].includes(item.path)) return null;
   const body = item.body as { access?: { spaceId?: unknown } } | null;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:revision|wiki|task|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:'); }
-function isTaskDraftKey(key: string): boolean { return key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:'); }
+function objectFromKey(key: string): string | null { return /^(?:revision|wiki|task|project|project-draft|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || key.startsWith('project-draft:'); }
+function isRetainedDraftKey(key: string): boolean { return key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || key.startsWith('project-draft:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function unavailable(): RequestError { return new RequestError('This object is unavailable or you no longer have access. Unsaved drafts have been set aside for export.', 404, 'OBJECT_UNAVAILABLE'); }
 
@@ -48,12 +54,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     try { for (let i = 0; i < localStorage.length; i++) { const key = localStorage.key(i); if (key?.startsWith(contentKey(''))) entries.push([key.slice(contentKey('').length), localStorage.getItem(key) || 'null']); } } catch { /* Unavailable storage stays unreadable. */ }
     // Keep failed task writes separately from durable bytes: another tab may
     // have saved a different draft, and both copies must remain recoverable.
-    for (const [key, value] of session.memory) if (isTaskDraftKey(key)) entries.push([key, value]);
+    for (const [key, value] of session.memory) if (isRetainedDraftKey(key)) entries.push([key, value]);
     return entries;
   };
-  const rawRead = (key: string): string | null => { if (durable && isTaskDraftKey(key)) { const retained = session?.memory.get(`${key}:unsaved-memory`) || session?.memory.get(key); if (retained) return retained; } try { return durable ? localStorage.getItem(contentKey(key)) : session?.memory.get(key) || null; } catch { return null; } };
-  const rawWrite = (key: string, value: unknown): boolean => { try { const json = JSON.stringify(value); if (durable) { localStorage.setItem(contentKey(key), json); if (isTaskDraftKey(key)) session?.memory.delete(`${key}:unsaved-memory`); } else session?.memory.set(key, json); return true; } catch { if (durable && isTaskDraftKey(key) && !key.endsWith(':unsaved-memory')) session?.memory.set(`${key}:unsaved-memory`, JSON.stringify(value)); return false; } };
-  const rawRemove = (key: string): boolean => { try { if (durable) { localStorage.removeItem(contentKey(key)); if (isTaskDraftKey(key)) { session?.memory.delete(key); session?.memory.delete(`${key}:unsaved-memory`); } } else session?.memory.delete(key); return true; } catch { return false; } };
+  const rawRead = (key: string): string | null => { if (durable && isRetainedDraftKey(key)) { const retained = session?.memory.get(`${key}:unsaved-memory`) || session?.memory.get(key); if (retained) return retained; } try { return durable ? localStorage.getItem(contentKey(key)) : session?.memory.get(key) || null; } catch { return null; } };
+  const rawWrite = (key: string, value: unknown): boolean => { try { const json = JSON.stringify(value); if (durable) { localStorage.setItem(contentKey(key), json); if (isRetainedDraftKey(key)) session?.memory.delete(`${key}:unsaved-memory`); } else session?.memory.set(key, json); return true; } catch { if (durable && isRetainedDraftKey(key) && !key.endsWith(':unsaved-memory')) session?.memory.set(`${key}:unsaved-memory`, JSON.stringify(value)); return false; } };
+  const rawRemove = (key: string): boolean => { try { if (durable) { localStorage.removeItem(contentKey(key)); if (isRetainedDraftKey(key)) { session?.memory.delete(key); session?.memory.delete(`${key}:unsaved-memory`); } } else session?.memory.delete(key); return true; } catch { return false; } };
   const rawRemoveMatching = (key: string, expected: unknown): boolean => {
     const expectedJson = JSON.stringify(expected);
     try {
@@ -61,7 +67,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       // memory copy over a different durable draft saved by another tab.
       if (durable && localStorage.getItem(contentKey(key)) === expectedJson) localStorage.removeItem(contentKey(key));
       if (session?.memory.get(key) === expectedJson) session.memory.delete(key);
-      if (durable && isTaskDraftKey(key) && !key.endsWith(':unsaved-memory') && session?.memory.get(`${key}:unsaved-memory`) === expectedJson) session.memory.delete(`${key}:unsaved-memory`);
+      if (durable && isRetainedDraftKey(key) && !key.endsWith(':unsaved-memory') && session?.memory.get(`${key}:unsaved-memory`) === expectedJson) session.memory.delete(`${key}:unsaved-memory`);
       return true;
     } catch { return false; }
   };
@@ -127,7 +133,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session)) return;
     session.taskSnapshotGeneration += 1;
     for (const controller of session.taskReadControllers) if (controller !== except) controller.abort();
-    if (remove) for (const [key] of savedEntries()) if (key.startsWith('task:')) rawRemove(key);
+    if (remove) for (const [key] of savedEntries()) if (key.startsWith('task:') || key.startsWith('project:')) rawRemove(key);
     for (const listener of session.taskSnapshotListeners) listener();
   };
   let holdingLegacy = false;
@@ -135,6 +141,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || holdingLegacy) return;
     holdingLegacy = true;
     try {
+      for (const item of rawOutbox()) if (/^\/api\/projects\/PROJ\d+$/.test(item.path) && !canQueue(item.path, item.method, item.body) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older project change has no valid source version or includes an operation that requires an online review. Export and review it explicitly; automatic submission stopped.' });
+      for (const [key, json] of savedEntries()) if (key.startsWith('project-draft:') && !session.quarantinedDrafts.has(key)) { try { const draft = JSON.parse(json) as { expectedVersion?: unknown }; if (!Number.isSafeInteger(draft.expectedVersion) || Number(draft.expectedVersion) < 1) quarantine({ key, objectId: objectFromKey(key)!, value: draft, reason: 'This older project draft has no recorded source version. Export the entire draft and review it against the current project before saving.' }); } catch { /* Preserve unreadable original bytes. */ } }
       for (const item of rawOutbox()) if (((item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path)) || (item.method === 'POST' && item.path === '/api/tasks')) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
         const body = item.body as { expectedVersion?: unknown; ownerId?: unknown; projectId?: unknown; projectIds?: unknown } | null;
         if (item.method === 'PATCH' && body && ('projectId' in body || 'projectIds' in body)) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This saved field change uses an older project replacement format. Export the whole change, then review ordinary fields and project tags separately. Automatic submission is stopped.' }); continue; }
@@ -155,7 +163,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const changed = (event: StorageEvent) => {
         if (!sessionIsActive(session)) return;
         if (event.key === null || event.key === contentKey('quarantine-ready') || event.key?.startsWith(contentKey('quarantined-drafts:'))) { syncDurableQuarantine(); quarantineChanged(); }
-        if (event.key === null || (event.key?.startsWith(contentKey('task:')) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
+        if (event.key === null || ((event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
       };
       window.addEventListener('storage', changed);
       session.cleanupCallbacks.add(() => window.removeEventListener('storage', changed));
@@ -163,21 +171,21 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   }
   const hasDraftHold = (key: string): boolean => {
     if (session?.quarantinedDrafts.has(key)) return true;
-    if (!isTaskDraftKey(key)) return false;
+    if (!isRetainedDraftKey(key)) return false;
     const base = key.replace(/:unsaved-memory$/, '');
     return Boolean(session?.quarantinedDrafts.has(base) || session?.quarantinedDrafts.has(`${base}:unsaved-memory`));
   };
   const draftIsHeld = (key: string): boolean => { syncDurableQuarantine(); return sessionIsActive(session) && hasDraftHold(key); };
   const readStored = <T,>(key: string, fallback: T): T => {
     syncDurableQuarantine();
-    if (key === 'outbox' || key.startsWith('task-draft:')) holdLegacyTaskUpdates();
+    if (key === 'outbox' || key.startsWith('task-draft:') || key.startsWith('project-draft:')) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (key.startsWith('task:') && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if ((key.startsWith('task:') || key.startsWith('project:')) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '')) return false;
-    if (key.startsWith('task:') && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
+    if ((key.startsWith('task:') || key.startsWith('project:')) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
     if (blockedDraft(key)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); }
     if (hasDraftHold(key)) return false;
     if (key === 'outbox' && Array.isArray(value)) {
@@ -276,7 +284,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (options?.queued) { holdLegacyTaskUpdates(); if (!canQueue(path, options.method, options.body)) throw new RequestError('This operation requires an explicit online save and cannot submit from the outbox.', 403, 'ACTION_FORBIDDEN'); }
     if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
-    const taskRequest = /^\/api\/tasks\/T\d+(?:[/?]|$)/.test(path);
+    const taskRequest = /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
     if (options && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
@@ -284,7 +292,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       initialTaskAccessVerification ??= request('/api/state').finally(() => { initialTaskAccessVerification = null; });
       await initialTaskAccessVerification;
       assertSession(session);
-      if (session.accessEpoch < 0) throw new RequestError('Workspace access could not be verified. Reconnect before saving this task.', 409, 'ACCESS_CHANGED');
+      if (session.accessEpoch < 0) throw new RequestError('Workspace access could not be verified. Reconnect before saving this object.', 409, 'ACCESS_CHANGED');
       syncDurableQuarantine();
       if (options.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
       if (options.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
@@ -294,24 +302,26 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (objectId && !objectId.startsWith('S') && !session.objectGenerations.has(objectId)) session.objectGenerations.set(objectId, 0);
     const objectGeneration = objectId ? session.objectGenerations.get(objectId) || 0 : 0;
     const ownershipMutation = options?.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && options.body && typeof options.body === 'object' && 'ownerId' in options.body;
+    const projectMutation = Boolean(options && /^\/api\/projects\/PROJ\d+(?:\/(membership|members|watchers|silence))?$/.test(path));
     let taskGeneration = session.taskSnapshotGeneration;
     if (objectId && session.unavailableObjects.has(objectId)) throw unavailable();
     const capabilities = objectId ? session.objectCapabilities.get(objectId) : null;
     const subscription = /^\/api\/tasks\/T\d+\/subscriptions$/.test(path) && options?.method === 'POST' ? options.body as { principalId?: unknown; action?: unknown } | null : null;
     const selfId = session.state.account?.id || `local:${session.state.workspaceId}`;
-    const mutationAllowed = capabilities && (subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
+    const projectSelfOperation = projectMutation && (/\/(membership|silence)$/.test(path) || (path.endsWith('/watchers') && options?.body && typeof options.body === 'object' && 'principalId' in options.body && options.body.principalId === selfId));
+    const mutationAllowed = capabilities && (projectSelfOperation ? true : subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
     if (options && capabilities && !mutationAllowed) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
-      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError('Task visibility changed while loading. Reload the task; unsaved drafts are retained.', 409, 'ACCESS_CHANGED');
+      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
     };
     const controller = new AbortController();
     session.controllers.add(controller);
     if (taskRequest && !options) session.taskReadControllers.add(controller);
     // A committed handoff may revoke this object's access before its receipt arrives.
     // Session invalidation still aborts it; object invalidation must allow the receipt.
-    if (objectId && !ownershipMutation) session.objectControllers.set(controller, objectId);
+    if (objectId && !ownershipMutation && !projectMutation) session.objectControllers.set(controller, objectId);
     const headers: Record<string, string> = {};
     if (session.state.sessionContext) headers['X-Session-Context'] = session.state.sessionContext;
     if (options) {
@@ -325,7 +335,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const data: unknown = await response.json();
       // A committed reassignment may remove the caller's view. This content-free receipt
       // remains a success even when a concurrent refresh already observed that loss.
-      if (response.ok && ownershipMutation && data && typeof data === 'object' && 'id' in data && data.id === objectId && 'saved' in data && data.saved === true && 'accessLost' in data && data.accessLost === true && 'accessEpoch' in data && Number.isSafeInteger(data.accessEpoch)) {
+      if (response.ok && (ownershipMutation || projectMutation) && data && typeof data === 'object' && 'id' in data && data.id === objectId && 'saved' in data && data.saved === true && 'accessLost' in data && data.accessLost === true && 'accessEpoch' in data && Number.isSafeInteger(data.accessEpoch)) {
         assertSession(session); session.accessEpoch = Math.max(session.accessEpoch, Number(data.accessEpoch)); invalidateObjects([objectId!]);
         return { id: objectId, saved: true, accessLost: true, accessEpoch: data.accessEpoch } as T;
       }
@@ -362,12 +372,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || durable) return [];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:');
+      return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || key.startsWith('project-draft:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value }))];
   };
   const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
-  return { session, durable, unavailableObject, onAccessChange, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  return { session, durable, unavailableObject, onAccessChange, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.

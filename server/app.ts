@@ -130,7 +130,8 @@ export function createApp(options: AppOptions = {}): App {
     }
     const authorize = () => { auth.revalidate(context, scope); access.authorize(method, path, input); };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
-    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed);
+    const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path);
+    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed);
     store.read(authorize);
     const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
     // Preserve legacy local retries, while every authenticated principal has a
@@ -192,6 +193,15 @@ export function createApp(options: AppOptions = {}): App {
           return { status: 200, body: updated };
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
+        const project = /^\/api\/projects\/(PROJ\d+)(?:\/(members|membership|watchers|silence))?$/.exec(path);
+        if (project && method === 'PATCH' && !project[2]) return { status: 200, body: store.updateProject(project[1]!, input, attribution) };
+        if (project && method === 'POST') {
+          const id = project[1]!;
+          if (project[2] === 'members') return { status: 200, body: store.updateProjectMembers(id, input, attribution) };
+          if (project[2] === 'membership') return { status: 200, body: store.updateProjectMembership(id, input, attribution) };
+          if (project[2] === 'watchers') return { status: 200, body: store.updateProjectWatcher(id, input, attribution) };
+          if (project[2] === 'silence') return { status: 200, body: store.updateProjectSilence(id, input, attribution) };
+        }
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
         const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies|subscriptions|merge|merge-in|projects)$/.exec(path);
         if (method === 'POST' && taskAction?.[2] === 'subscriptions') return { status: 200, body: store.updateTaskSubscription(taskAction[1]!, input, attribution) };
@@ -274,6 +284,22 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          if (path === '/api/projects/resolve') {
+            if (url.searchParams.getAll('slug').length !== 1 || [...url.searchParams.keys()].some(name => name !== 'slug')) throw new HttpError(400, 'Project resolution requires exactly one slug parameter.');
+            send(res, 200, access.resolveProject(url.searchParams.get('slug')!)); return;
+          }
+          const project = /^\/api\/projects\/(PROJ\d+)(?:\/(history|members|watchers|preferences))?$/.exec(path);
+          if (project) {
+            const id = project[1]!; const section = project[2]; access.require(id);
+            const allowed = section === 'history' ? ['before', 'limit'] : section === 'members' || section === 'watchers' ? ['after', 'limit'] : [];
+            for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid project read parameters.');
+            const positive = (name: string): number | undefined => { const value = url.searchParams.get(name); if (value === null) return undefined; if (!/^[1-9]\d*$/.test(value)) throw new HttpError(400, `${name} must be a positive integer.`); return integer(Number(value), name); };
+            const result = section === 'history' ? access.projectHistory(id, positive('before'), positive('limit'))
+              : section === 'members' ? access.projectMembers(id, url.searchParams.get('after') ?? undefined, positive('limit'))
+                : section === 'watchers' ? access.projectWatchers(id, url.searchParams.get('after') ?? undefined, positive('limit'))
+                  : section === 'preferences' ? access.projectPreferences(id) : access.project(id);
+            send(res, 200, result); return;
+          }
           if (path === '/api/spaces') { send(res, 200, policies.spaces(context.principalId).map(space => access.space(space))); return; }
           const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
           if (space) { send(res, 200, access.space(policies.getSpace(space[1]!, context.principalId))); return; }

@@ -4,16 +4,19 @@ Every current project, repository record, task, wiki document, and code/paper/pr
 
 ## Rules
 
-Each rule permits either workspace members or an explicit list of stable principal IDs. An empty list permits nobody. The member directory is visible throughout the authenticated workspace; this is not an anonymous-user audience.
+Ordinary object and Space rules permit either workspace members or an explicit list of stable principal IDs. Project rules additionally permit members of that project. An empty list permits nobody. The member directory is visible throughout the authenticated workspace; this is not an anonymous-user audience.
 
 | Capability | Permitted operations |
 | --- | --- |
 | View | Read the object and its history, source, comments, evidence, exports and activity |
 | Edit | Change content/status, add versions, restore wiki content and edit the object's access rules; also requires view |
 | Interact | Add comments or record deterministic/local-model/hosted-model reviews; also requires view |
+| Join Project | Join the project when its join rule allows; project editors may join automatically; requires view |
 | Manage Space | Change Space settings and its view/manage rules; does not grant edit access to its contents |
 
-Task owners automatically have view, edit and interact access, including policy editing, subject to their Space's view rule. This is upstream Maniphest behavior. Assignment can therefore grant or remove access even when explicit object rules are unchanged; it advances the workspace access epoch. Authorship and subscription membership grant no access.
+Task owners automatically have view, edit and interact access, including policy editing, subject to their Space's view rule. This is upstream Maniphest behavior. Assignment can therefore grant or remove access even when explicit object rules are unchanged; it advances the workspace access epoch. Authorship and task subscription preferences grant no access.
+
+Project members automatically have view access to their own project inside a visible Space. This grants no automatic edit/interact access and no access to tagged tasks. Membership changes advance the access epoch; self leave or an authorized removal can voluntarily remove access. Watching grants no access. See [project contracts](projects.md).
 
 New Spaces default to creator-only view and management. This is an explicit member rule, not a permanent creator bypass. Changing a rule requires retaining one's own view and edit access. Another authorized editor can later remove that access. Token scopes independently restrict operations even where an object permits them. Missing policies deny access.
 
@@ -23,7 +26,7 @@ Existing objects migrate to `S1`, the shared default Space, with explicit worksp
 
 Protected reads capture credential checks, policy checks and serialization in one SQLite snapshot. Mutations acquire the writer lock before revalidating authority. Current access is checked before disclosing a saved retry response, including retries of object creation. Hidden/missing objects both return `404 OBJECT_UNAVAILABLE`; a visible object without the required capability returns `403 ACTION_FORBIDDEN`. Policy and Space edits require an expected policy/Space version, independently of source content versions.
 
-The state endpoint filters objects and activity before returning data to the browser. Current browser filtering/search and spoken summaries operate only on that filtered data. A visible task or revision referring to a hidden project/repository returns a null reference while retaining its stored relationship. Supplying a hidden or nonexistent reference produces the same generic validation error. Source text and user-authored prose are not rewritten or scanned to conceal mentions; avoid writing secrets into an otherwise shared object's content.
+The state endpoint filters objects and activity before returning data to the browser. Current browser filtering/search and spoken summaries operate only on that filtered data. A visible task or revision referring to a hidden project/repository omits the reference (or returns null for a scalar reference) while retaining its stored relationship. Supplying a hidden or nonexistent reference produces the same generic validation error. Source text and user-authored prose are not rewritten or scanned to conceal mentions; avoid writing secrets into an otherwise shared object's content.
 
 Reviews require view and interact access before source is read or sent to the explicitly selected provider, and again before evidence is committed. Revocation while a provider is running discards the late evidence. It cannot recall source already transmitted by an authorized request. Policy changes produce attributable activity without disclosing hidden destination names in object activity. Access edits do not rewrite immutable source history.
 
@@ -41,10 +44,11 @@ Authenticated content and drafts remain in tab memory. Export work before sign-o
 - `POST /api/spaces` accepts `name`, optional `description`, and optional `view`/`edit` audiences. `PATCH /api/spaces/S1` requires `expectedVersion` and accepts updated settings or `archived`.
 - `GET /api/policies/W1` returns the policy, effective capabilities, and descriptive labels. `PUT /api/policies/W1` requires `expectedVersion`, `spaceId`, `view`, `edit`, and `interact`.
 - Entity creation accepts optional `access: { spaceId, view?, edit?, interact? }`. Omitted rules grant workspace members, subject to Space visibility.
+- Project creation and policy updates additionally support `join`; older policy updates which omit it preserve the current join rule. `{ "kind": "project-members" }` applies only to the containing project, never to a Space or another object.
 - Audiences use `{ "kind": "workspace" }` or `{ "kind": "principals", "principalIds": ["stable-account-id"] }`.
 
-Schema 4 migration is transactional and preserves existing content, versions and replay records. It does not fabricate ownership. Older binaries must refuse this schema. Back up the database before upgrading. Before activating password mode, local-only member grants require an explicit terminal handoff to an enabled account; see [authentication](authentication.md). Local task ownership also requires an explicit handoff before password activation. This preserves selected-member privacy; there is no administrator or creator bypass.
+Schema 4 migration is transactional and preserves existing content, versions and replay records. It does not fabricate ownership. Older binaries must refuse this schema. Back up the database before upgrading. Before activating password mode, local-only member grants require an explicit terminal handoff to an enabled account; see [authentication](authentication.md). Local task ownership, active project membership and local principals in project join rules also require an explicit handoff before password activation. This preserves selected-member privacy; there is no administrator or creator bypass.
 
 ## Remaining parity
 
-Project membership/custom policy rules, inherited wiki hierarchy, file/attachment access, full-text indexes, subscriptions outside tasks, service/agent identity kinds and legacy policy import are not implemented. Member-directory concealment and fine-grained application creation capabilities are also absent. Wiki slugs remain globally unique: a generic unavailable-slug response hides the matching document but still reveals occupancy. The application remains loopback-only; reusable TLS/proxy hosting and authenticated durable offline storage are separate milestones in [the tracker](roadmap.md).
+Project-member audiences on other objects, general custom policy rules, inherited wiki hierarchy, file/attachment access, full-text indexes, notification delivery, service/agent identity kinds and legacy policy import are not implemented. Member-directory concealment and fine-grained application creation capabilities are also absent. Wiki slugs remain globally unique: a generic unavailable-slug response hides the matching document but still reveals occupancy. The application remains loopback-only; reusable TLS/proxy hosting and authenticated durable offline storage are separate milestones in [the tracker](roadmap.md).

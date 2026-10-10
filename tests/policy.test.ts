@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Audience, ObjectPolicy, Space } from '../shared/policy.ts';
+import type { Audience, ObjectPolicy, ProjectPolicy, Space } from '../shared/policy.ts';
 import { audienceAllows, audienceLabel, effectiveAccess, spaceAccess } from '../shared/policy.ts';
 import { initializePolicies, PolicyStore, registerDefaultPolicy } from '../server/policy.ts';
 
@@ -24,6 +24,18 @@ function insert(db: DatabaseSync, id: string) {
   db.prepare('INSERT INTO entities(id, data) VALUES (?, ?)').run(id, '{}');
   registerDefaultPolicy(db, id);
 }
+
+test('project capabilities distinguish automatic member view, own-member rules, editor join and the outer Space boundary', () => {
+  const space: Space = { id: 'S1', name: 'Shared', description: '', version: 1, archived: false, isDefault: true, view: shared, edit: selected('alice') };
+  const policy: ProjectPolicy = { kind: 'project', objectId: 'PROJ1', spaceId: space.id, version: 1, rules: { view: selected('alice'), edit: selected('alice'), interact: selected('alice'), join: selected() } };
+  assert.deepEqual(effectiveAccess(policy, space, 'bob', false, true), { view: true, edit: false, interact: false, managePolicy: false, join: false });
+  assert.equal(effectiveAccess(policy, space, 'alice').join, true, 'editors may join even when join rule excludes them');
+  assert.equal(effectiveAccess(policy, space, 'bob', true, false).view, false, 'task-owner boolean never grants project authority');
+  assert.equal(effectiveAccess(policy, { ...space, view: selected('alice') }, 'bob', false, true).view, false);
+  const members = { kind: 'project-members' } as const;
+  assert.equal(audienceAllows(members, 'bob'), false); assert.equal(audienceAllows(members, 'bob', true), true); assert.equal(audienceAllows(members, '', true), false); assert.equal(audienceLabel(members), 'Project members');
+  assert.deepEqual(effectiveAccess({ ...policy, rules: { view: members, edit: members, interact: members, join: members } }, space, 'bob', false, true), { view: true, edit: true, interact: true, managePolicy: true, join: true });
+});
 
 test('migration assigns every existing object to an explicit shared Space without inventing ownership', () => {
   const { db, policies } = database();

@@ -1,24 +1,34 @@
 export type Capability = 'view' | 'edit' | 'interact';
+export type ProjectCapability = Capability | 'join';
 export type Audience = { kind: 'workspace' } | { kind: 'principals'; principalIds: string[] };
+export type ProjectAudience = Audience | { kind: 'project-members' };
 export interface PolicyRules { view: Audience; edit: Audience; interact: Audience }
-export interface ObjectPolicy { objectId: string; spaceId: string; version: number; rules: PolicyRules }
+export interface ProjectPolicyRules { view: ProjectAudience; edit: ProjectAudience; interact: ProjectAudience; join: ProjectAudience }
+export interface OrdinaryObjectPolicy { kind?: 'object'; objectId: string; spaceId: string; version: number; rules: PolicyRules }
+export interface ProjectPolicy { kind: 'project'; objectId: string; spaceId: string; version: number; rules: ProjectPolicyRules }
+export type ObjectPolicy = OrdinaryObjectPolicy | ProjectPolicy;
 export interface Space { id: string; name: string; description: string; version: number; isDefault: boolean; archived: boolean; view: Audience; edit: Audience }
-export interface EffectiveAccess { view: boolean; edit: boolean; interact: boolean; managePolicy: boolean }
-export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; automatic?: { kind: 'task-owner'; principalId: string } }
+export interface EffectiveAccess { view: boolean; edit: boolean; interact: boolean; managePolicy: boolean; join?: boolean }
+export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; joinLabel?: string; automatic?: { kind: 'task-owner'; principalId: string } | { kind: 'project-member' } }
 export interface NewObjectAccessInput { spaceId: string; view?: Audience; edit?: Audience; interact?: Audience }
+export interface NewProjectAccessInput { spaceId: string; view?: ProjectAudience; edit?: ProjectAudience; interact?: ProjectAudience; join?: ProjectAudience }
 export interface CreateSpaceInput { name: string; description?: string; view?: Audience; edit?: Audience }
 export interface UpdateSpaceInput { expectedVersion: number; name?: string; description?: string; view?: Audience; edit?: Audience; archived?: boolean }
 export interface SetPolicyInput { expectedVersion: number; spaceId: string; view: Audience; edit: Audience; interact: Audience }
+export interface SetProjectPolicyInput { expectedVersion: number; spaceId: string; view: ProjectAudience; edit: ProjectAudience; interact: ProjectAudience; join: ProjectAudience }
 
 /** Membership is established by the caller; an empty identity is never a member. */
-export function audienceAllows(audience: Audience, principalId: string): boolean {
-  return Boolean(principalId) && (audience.kind === 'workspace' || audience.principalIds.includes(principalId));
+export function audienceAllows(audience: ProjectAudience, principalId: string, projectMember = false): boolean {
+  return Boolean(principalId) && (audience.kind === 'workspace' || (audience.kind === 'project-members' ? projectMember : audience.principalIds.includes(principalId)));
 }
 
-export function effectiveAccess(policy: ObjectPolicy, space: Space, principalId: string, automatic = false): EffectiveAccess {
-  const view = policy.spaceId === space.id && audienceAllows(space.view, principalId) && (automatic || audienceAllows(policy.rules.view, principalId));
-  const edit = view && (automatic || audienceAllows(policy.rules.edit, principalId));
-  return { view, edit, interact: view && (automatic || audienceAllows(policy.rules.interact, principalId)), managePolicy: edit };
+export function effectiveAccess(policy: ObjectPolicy, space: Space, principalId: string, automatic = false, projectMember = false): EffectiveAccess {
+  const project = policy.kind === 'project';
+  const owner = !project && automatic;
+  const member = project && projectMember;
+  const view = policy.spaceId === space.id && audienceAllows(space.view, principalId) && (owner || member || audienceAllows(policy.rules.view, principalId, member));
+  const edit = view && (owner || audienceAllows(policy.rules.edit, principalId, member));
+  return { view, edit, interact: view && (owner || audienceAllows(policy.rules.interact, principalId, member)), managePolicy: edit, ...(project ? { join: view && (edit || audienceAllows(policy.rules.join, principalId, member)) } : {}) };
 }
 
 export function spaceAccess(space: Space, principalId: string): EffectiveAccess {
@@ -28,8 +38,9 @@ export function spaceAccess(space: Space, principalId: string): EffectiveAccess 
 }
 
 /** Describes an explicit rule, never infers privacy from a Space's name. */
-export function audienceLabel(audience: Audience): string {
+export function audienceLabel(audience: ProjectAudience): string {
   if (audience.kind === 'workspace') return 'Workspace members';
+  if (audience.kind === 'project-members') return 'Project members';
   const count = audience.principalIds.length;
   return count === 0 ? 'No one' : count === 1 ? '1 selected member' : `${count} selected members`;
 }

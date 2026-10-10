@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { Audience, Capability, EffectiveAccess, ObjectAccess, ObjectPolicy, PolicyRules, Space } from '../shared/policy.ts';
+import type { Audience, Capability, ProjectCapability, ProjectAudience, EffectiveAccess, ObjectAccess, ObjectPolicy, PolicyRules, Space } from '../shared/policy.ts';
 import { audienceLabel, effectiveAccess, spaceAccess } from '../shared/policy.ts';
 import { HttpError, integer, object, optionalString, string } from './validation.ts';
 
@@ -44,8 +44,17 @@ export function initializePolicies(database: DatabaseSync): void {
 
 /** Call immediately after inserting a new entity, in the same transaction. */
 export function registerDefaultPolicy(database: DatabaseSync, id: string): void {
-  const policy: ObjectPolicy = { objectId: id, spaceId: 'S1', version: 1, rules: sharedRules() };
+  const policy: ObjectPolicy = id.startsWith('PROJ') ? { kind: 'project', objectId: id, spaceId: 'S1', version: 1, rules: { ...sharedRules(), join: workspace() } } : { objectId: id, spaceId: 'S1', version: 1, rules: sharedRules() };
   database.prepare('INSERT INTO object_policies (object_id, space_id, data) VALUES (?, ?, ?)').run(id, 'S1', JSON.stringify(policy));
+}
+
+/** Schema 11 migration: enrich current project rules, never historical evidence. */
+export function upgradeProjectPolicies(database: DatabaseSync): void {
+  for (const row of database.prepare("SELECT p.object_id, p.data FROM object_policies p JOIN entities e ON e.id = p.object_id WHERE e.kind = 'project'").all() as { object_id: string; data: string }[]) {
+    const policy = JSON.parse(row.data) as ObjectPolicy;
+    if (policy.kind === 'project') continue;
+    database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify({ ...policy, kind: 'project', rules: { ...policy.rules, join: workspace() } }), row.object_id);
+  }
 }
 
 export class PolicyStore {
@@ -63,13 +72,17 @@ export class PolicyStore {
     const row = this.database.prepare("SELECT json_extract(data, '$.ownerId') AS owner_id FROM entities WHERE id = ?").get(id) as { owner_id: unknown } | undefined;
     return typeof row?.owner_id === 'string' ? row.owner_id : null;
   }
+  private projectMember(id: string, principalId: string): boolean {
+    if (!id.startsWith('PROJ') || !this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_relations'").get()) return false;
+    return Boolean(this.database.prepare("SELECT 1 FROM project_relations WHERE project_id = ? AND principal_id = ? AND relation = 'member' AND active = 1").get(id, principalId));
+  }
   private resolved(id: string, principalId: string): { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null } | undefined {
     if (!isObjectId(id) || !this.member(principalId)) return undefined;
     const row = this.database.prepare("SELECT p.data, s.data AS space_data, CASE WHEN substr(e.id, 1, 1) = 'T' THEN json_extract(e.data, '$.ownerId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
     if (!row) return undefined;
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
     const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
-    return { policy, space, capabilities: effectiveAccess(policy, space, principalId, ownerId === principalId), ownerId };
+    return { policy, space, capabilities: effectiveAccess(policy, space, principalId, ownerId === principalId, this.projectMember(id, principalId)), ownerId };
   }
   spaces(principalId: string): Space[] {
     if (!this.member(principalId)) return [];
@@ -88,7 +101,7 @@ export class PolicyStore {
     }
     return this.resolved(id, principalId)?.capabilities ?? denied();
   }
-  require(id: string, principalId: string, capability: Capability): void {
+  require(id: string, principalId: string, capability: ProjectCapability): void {
     const access = this.access(id, principalId);
     if (!access.view) throw notFound();
     if (!access[capability]) throw new HttpError(403, `This object does not allow ${capability} access.`, 'ACTION_FORBIDDEN');
@@ -102,8 +115,8 @@ export class PolicyStore {
     const result = this.resolved(id, principalId);
     if (!result?.capabilities.view) throw notFound();
     const { policy, space, capabilities, ownerId } = result;
-    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? '; task owner also has access' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}`;
-    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(ownerId ? { automatic: { kind: 'task-owner' as const, principalId: ownerId } } : {}) };
+    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? '; task owner also has access' : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}`;
+    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join; requires project and Space view access`, automatic: { kind: 'project-member' as const } } : ownerId ? { automatic: { kind: 'task-owner' as const, principalId: ownerId } } : {}) };
   }
   private audience(input: unknown): Audience {
     const data = object(input, ['kind', 'principalIds']);
@@ -118,6 +131,10 @@ export class PolicyStore {
     });
     if (new Set(ids).size !== ids.length) throw new HttpError(400, 'Selected members must not contain duplicate IDs.');
     return { kind: 'principals', principalIds: ids.sort() };
+  }
+  private projectAudience(input: unknown): ProjectAudience {
+    if (input && typeof input === 'object' && 'kind' in input && input.kind === 'project-members') { object(input, ['kind']); return { kind: 'project-members' }; }
+    return this.audience(input);
   }
   private destination(id: unknown, principalId: string, currentSpaceId?: string): Space {
     if (typeof id !== 'string' || !isSpaceId(id)) throw new HttpError(400, 'Space ID is invalid.');
@@ -165,10 +182,12 @@ export class PolicyStore {
     return transaction(this.database, () => {
       this.require(id, principalId, 'edit');
       const current = this.policy(id, principalId);
-      const data = object(input, ['expectedVersion', 'spaceId', 'view', 'edit', 'interact']);
+      const project = current.kind === 'project';
+      const data = object(input, ['expectedVersion', 'spaceId', 'view', 'edit', 'interact', ...(project ? ['join'] : [])]);
       const space = this.destination(data.spaceId, principalId, current.spaceId);
-      const policy: ObjectPolicy = { objectId: id, spaceId: space.id, version: this.version(current.version, data.expectedVersion), rules: { view: this.audience(data.view), edit: this.audience(data.edit), interact: this.audience(data.interact) } };
-      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId));
+      const base = { objectId: id, spaceId: space.id, version: this.version(current.version, data.expectedVersion) };
+      const policy: ObjectPolicy = project ? { ...base, kind: 'project', rules: { view: this.projectAudience(data.view), edit: this.projectAudience(data.edit), interact: this.projectAudience(data.interact), join: data.join === undefined ? current.rules.join : this.projectAudience(data.join) } } : { ...base, rules: { view: this.audience(data.view), edit: this.audience(data.edit), interact: this.audience(data.interact) } };
+      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId, this.projectMember(id, principalId)));
       this.save(policy); return policy;
     });
   }
@@ -180,10 +199,12 @@ export class PolicyStore {
       if (!row) throw notFound();
       const current = JSON.parse(row.data) as ObjectPolicy;
       if (current.version !== 1) throw new HttpError(409, 'Initial access can only be configured for a new object.');
-      const data = input === undefined ? {} : object(input, ['spaceId', 'view', 'edit', 'interact']);
+      const project = current.kind === 'project';
+      const data = input === undefined ? {} : object(input, ['spaceId', 'view', 'edit', 'interact', ...(project ? ['join'] : [])]);
       const space = this.destination(input === undefined ? 'S1' : data.spaceId, principalId);
-      const policy: ObjectPolicy = { objectId: id, spaceId: space.id, version: 1, rules: { view: data.view === undefined ? workspace() : this.audience(data.view), edit: data.edit === undefined ? workspace() : this.audience(data.edit), interact: data.interact === undefined ? workspace() : this.audience(data.interact) } };
-      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId));
+      const base = { objectId: id, spaceId: space.id, version: 1 };
+      const policy: ObjectPolicy = project ? { ...base, kind: 'project', rules: { view: data.view === undefined ? workspace() : this.projectAudience(data.view), edit: data.edit === undefined ? workspace() : this.projectAudience(data.edit), interact: data.interact === undefined ? workspace() : this.projectAudience(data.interact), join: data.join === undefined ? workspace() : this.projectAudience(data.join) } } : { ...base, rules: { view: data.view === undefined ? workspace() : this.audience(data.view), edit: data.edit === undefined ? workspace() : this.audience(data.edit), interact: data.interact === undefined ? workspace() : this.audience(data.interact) } };
+      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId, this.projectMember(id, principalId)));
       this.save(policy); return policy;
     });
   }

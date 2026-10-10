@@ -4,7 +4,9 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskSubscriptionPage, TaskSubscriptionState, TaskSubscriptionStatus, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
-import { initializePolicies, registerDefaultPolicy } from './policy.ts';
+import { initializePolicies, registerDefaultPolicy, upgradeProjectPolicies } from './policy.ts';
+import { initializeProjects, ProjectStore } from './projects.ts';
+import type { ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectPreferences, ProjectWatchersPage } from '../shared/projects.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
 import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
 
@@ -24,13 +26,14 @@ export class Store {
   readonly database: DatabaseSync;
   readonly fresh: boolean;
   private taskProjectsReady = false;
+  private projects: ProjectStore;
   constructor(options: StoreOptions = {}) {
     const path = options.path ?? '.data/phabricator.sqlite';
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 10) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 11) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -187,6 +190,11 @@ export class Store {
       } catch (error) { this.database.close(); throw error; }
     }
     this.taskProjectsReady = true;
+    if (version < 11) {
+      try { this.transaction(() => { initializeProjects(this.database); upgradeProjectPolicies(this.database); this.database.exec('PRAGMA user_version = 11'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id) });
   }
 
   close(): void { this.database.close(); }
@@ -225,12 +233,14 @@ export class Store {
     return `${prefix}${row.value}`;
   }
   private get<T extends Entity>(kind: Kind, id: string): T {
+    if (kind === 'project' && this.projects) return this.projects.get(id) as T;
     const row = this.database.prepare('SELECT data FROM entities WHERE kind = ? AND id = ?').get(kind, id) as JsonRow | undefined;
     if (!row) throw new HttpError(404, `${kind} ${id} was not found.`);
     const value = JSON.parse(row.data) as T;
     return kind === 'task' && this.taskProjectsReady ? this.hydrateTask(value as Task) as T : value;
   }
   private all<T extends Entity>(kind: Kind): T[] {
+    if (kind === 'project' && this.projects) return this.projects.all() as T[];
     const values = (this.database.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid DESC').all(kind) as JsonRow[]).map(row => JSON.parse(row.data) as T);
     if (kind !== 'task' || !this.taskProjectsReady) return values;
     const projects = new Map<string, string[]>();
@@ -271,15 +281,23 @@ export class Store {
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], accessEpoch: 0, canCreate: false, ai, mode };
+    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
-    const data = object(input, ['name', 'description', 'color']);
-    const color = data.color === undefined ? '#5b83b5' : string(data.color, 'Color', 7);
-    if (!/^#[a-f\d]{6}$/i.test(color)) throw new HttpError(400, 'Color must be a six-digit hexadecimal color.');
-    const project: Project = { id: this.nextId('project', 'PROJ'), name: string(data.name, 'Name'), description: optionalString(data.description, 'Description'), color };
-    this.save('project', project); this.event(project.id, 'created', `Created project ${project.name}.`, attribution); return project;
+    return this.projects.create(input, attribution);
   }
+  getProject(id: string): Project { return this.projects.get(id); }
+  projectDetail(id: string, viewerId: string): ProjectDetail { return this.projects.detail(id, viewerId); }
+  projectHistory(id: string, before?: number, limit?: number): ProjectHistory { return this.projects.history(id, before, limit); }
+  projectMembers(id: string, viewerId: string, after?: string, limit?: number): ProjectMembersPage { return this.projects.members(id, viewerId, after, limit); }
+  projectWatchers(id: string, viewerId: string, after?: string, limit?: number): ProjectWatchersPage { return this.projects.watchers(id, viewerId, after, limit); }
+  projectPreferences(id: string, viewerId: string): ProjectPreferences { return this.projects.preferences(id, viewerId); }
+  updateProject(id: string, input: unknown, attribution?: ActorAttribution): ProjectDetail { return this.projects.update(id, input, attribution); }
+  updateProjectMembers(id: string, input: unknown, attribution?: ActorAttribution): ProjectDetail { return this.projects.updateMembers(id, input, attribution); }
+  updateProjectMembership(id: string, input: unknown, attribution: ActorAttribution): ProjectDetail { return this.projects.updateMembership(id, input, attribution); }
+  updateProjectWatcher(id: string, input: unknown, attribution: ActorAttribution): ProjectDetail { return this.projects.updateWatcher(id, input, attribution); }
+  updateProjectSilence(id: string, input: unknown, attribution: ActorAttribution): ProjectPreferences { return this.projects.updateSilence(id, input, attribution); }
+  transferLocalProjectMemberships(fromId: string, toId: string, attribution: ActorAttribution): number { return this.projects.transferMemberships(fromId, toId, attribution); }
   createRepository(input: unknown, attribution?: ActorAttribution): Repository {
     const data = object(input, ['name', 'remoteUrl', 'description', 'defaultBranch']);
     const repository: Repository = { id: this.nextId('repository', 'R'), name: string(data.name, 'Name'), remoteUrl: remoteUrl(data.remoteUrl), description: optionalString(data.description, 'Description'), defaultBranch: data.defaultBranch === undefined ? 'main' : string(data.defaultBranch, 'Default branch') };

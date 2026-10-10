@@ -209,6 +209,7 @@ test('CLI task reads preserve mounts, filters and current object visibility with
     for (const [filters, expected] of [
       [['--project', writing.id], [urgent.id, normal.id]],
       [['--project', 'PAPER WRITING'], [urgent.id, normal.id]],
+      [['--project', '#paper_writing'], [urgent.id, normal.id]],
       [['--project', writing.id, '--project', citations.id], [normal.id]],
       [['--project', citations.name], [normal.id]],
       [['--project', writing.id, '--project', writing.id], [urgent.id, normal.id]],
@@ -227,13 +228,63 @@ test('CLI task reads preserve mounts, filters and current object visibility with
     const hiddenProjectFilter = await read(['tasks', '--project', secretProject.id]);
     const missingProjectFilter = await read(['tasks', '--project', 'PROJ99999']);
     assert.equal(hiddenProjectFilter.code, 1); assert.equal(hiddenProjectFilter.stderr, missingProjectFilter.stderr);
-    store.createProject({ name: citations.name });
+    const ambiguousLegacyProject = store.createProject({ name: 'Legacy citation project' });
+    store.database.prepare("UPDATE project_profiles SET data = json_set(data, '$.name', ?) WHERE project_id = ?").run(citations.name, ambiguousLegacyProject.id);
     const ambiguousProject = await read(['tasks', '--project', citations.name]);
     assert.equal(ambiguousProject.code, 1); assert.match(ambiguousProject.stderr, /ambiguous/);
     for (const args of [['tasks', '--status', 'invalid'], ['tasks', '--order', 'invalid'], ['tasks', '--limit', '0'], ['tasks', '--limit', '1.5'], ['tasks', '--unassigned', '--owner', 'all'], ['tasks', '--owner', 'missing-user']]) {
       const invalid = await read(args); assert.equal(invalid.code, 1, args.join(' '));
     }
     for (const output of [open, resolved, limited, shown, denied]) assert.ok(!`${output.stdout}${output.stderr}`.includes(token.token));
+  } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('CLI project reads preserve mounts, membership filters and private profiles with a read-only token', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'phab-cli-projects-'));
+  const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+  const alice = await provision.createAccount({ username: 'alice', displayName: 'Alice', password: 'test-only-project-cli-password' });
+  const bob = await provision.createAccount({ username: 'bob', displayName: 'Bob', password: 'test-only-project-cli-password' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/tools/projects/' });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/tools/projects/`;
+  const token = app.auth.createToken(bob.id, { name: 'Project read fixture', scopes: ['read'] });
+  const attribution = { principalId: bob.id, displayName: bob.displayName, credentialId: 'cli-fixture', requestId: 'cli-fixture' };
+  const paths: string[] = [];
+  app.server.prependListener('request', req => paths.push(req.url || ''));
+  try {
+    const alpha = store.createProject({ name: 'Alpha research', aliases: ['research-notes'], memberIds: [bob.id] });
+    const beta = store.createProject({ name: 'Beta writing' });
+    const archived = store.createProject({ name: 'Archived study', memberIds: [bob.id] });
+    const hidden = store.createProject({ name: 'Hidden project marker' });
+    store.updateProject(archived.id, { status: 'archived', expectedVersion: archived.version }, attribution);
+    store.updateProjectWatcher(alpha.id, { principalId: bob.id, action: 'watch', expectedVersion: 0 }, attribution);
+    store.updateProjectWatcher(beta.id, { principalId: bob.id, action: 'watch', expectedVersion: 0 }, attribution);
+    store.updateProjectWatcher(hidden.id, { principalId: bob.id, action: 'watch', expectedVersion: 0 }, attribution);
+    app.policies.configureNew(hidden.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
+    const read = (args: string[]) => runCommand(root, [...args, '--server', server], token.token);
+    for (const [filters, expected] of [
+      [[], [alpha.id, beta.id]], [['--joined'], [alpha.id]], [['--watching'], [alpha.id, beta.id]],
+      [['--joined', '--watching'], [alpha.id]], [['--joined', '--status', 'all'], [alpha.id, archived.id]],
+      [['--status', 'archived'], [archived.id]], [['--status', 'all', '--limit', '1'], [alpha.id]],
+    ] as [string[], string[]][]) {
+      const result = await read(['projects', ...filters, '--json']);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout).map((project: { id: string }) => project.id), expected, filters.join(' '));
+      assert.ok(!result.stdout.includes(hidden.id)); assert.ok(!result.stdout.includes(hidden.name));
+      assert.ok(!`${result.stdout}${result.stderr}`.includes(token.token));
+    }
+    const shown = await read(['show', alpha.id]);
+    assert.equal(shown.code, 0, shown.stderr);
+    const detail = JSON.parse(shown.stdout);
+    assert.equal(detail.project.id, alpha.id); assert.equal(detail.project.primarySlug, 'alpha_research');
+    assert.deepEqual(detail.project.aliases, ['research-notes']);
+    assert.equal(detail.viewer.membership.active, true); assert.equal(detail.viewer.watching.active, true);
+    assert.equal(detail.history.transactions.at(-1).kind, 'create');
+    const denied = await read(['show', hidden.id]); const missing = await read(['show', 'PROJ99999']);
+    assert.equal(denied.code, 1); assert.equal(denied.stderr, missing.stderr);
+    for (const args of [['projects', '--status', 'open'], ['projects', '--limit', '0'], ['projects', '--limit', '1.5'], ['projects', alpha.id]]) assert.equal((await read(args)).code, 1);
+    assert.ok(paths.length > 0); assert.ok(paths.every(path => path.startsWith('/tools/projects/api/')));
   } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
 });
 

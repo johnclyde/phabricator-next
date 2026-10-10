@@ -90,7 +90,7 @@ test('dependency deltas update inverse references and both histories, while stat
       assert.equal(change.kind, 'dependency_status'); assert.deepEqual(change.dependencyStatus, { taskId: child.id, oldStatus: 'open', newStatus: 'resolved' });
       assert.deepEqual(change.attribution, bob); assert.equal(change.taskVersion, detail.task.version);
       assert.equal(detail.dependsOn[0]!.status, 'resolved'); assert.equal(detail.dependsOn[0]!.version, resolved.version);
-      assert.doesNotMatch(JSON.stringify(detail.activity.filter(item => item.action.startsWith('dependency_'))), new RegExp(child.id + '|' + child.title));
+      assert.doesNotMatch(JSON.stringify(detail.activity.filter(item => item.action.startsWith('dependency_'))), new RegExp(`\\b${child.id}\\b|${child.title}`));
       assert.throws(() => store.updateTask(previous.id, { expectedVersion: previous.version, title: 'Missed dependency status.' }, alice), status(409));
     }
     store.updateTask(child.id, { expectedVersion: resolved.version, status: 'open' }, bob);
@@ -143,7 +143,7 @@ test('task history paginates only visible transactions and never reports hidden 
     const first = store.taskHistory(parent.id, undefined, 2, visible);
     assert.deepEqual(first.transactions.map(item => item.kind), ['comment', 'subscription']);
     assert.equal(first.nextBefore, first.transactions[1]!.sequence); assert.equal(first.firstAvailableSequence, 1);
-    assert.doesNotMatch(JSON.stringify(first), new RegExp(secret.id + '|Hidden prerequisite'));
+    assert.doesNotMatch(JSON.stringify(first), new RegExp(`\\b${secret.id}\\b|Hidden prerequisite`));
     const middle = store.taskHistory(parent.id, first.nextBefore!, 2, visible);
     assert.deepEqual(middle.transactions.map(item => item.kind), ['dependency', 'subscription']);
     const last = store.taskHistory(parent.id, middle.nextBefore!, 2, visible);
@@ -303,7 +303,7 @@ test('schema 6 migration adds an honest unknown-author baseline at migration tim
   const directory = mkdtempSync(join(tmpdir(), 'phab-task-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaSix(path); const started = Date.now(); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
     assert.equal(store.fresh, false);
     const detail = store.taskDetail(old.task.id); const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(detail.task, { ...metadata, projectIds: [], ownerId: null, authorId: null, version: 1 });
     assert.deepEqual(detail.dependsOn, []); assert.deepEqual(detail.blocks, []);

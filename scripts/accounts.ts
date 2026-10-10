@@ -82,7 +82,7 @@ async function main(): Promise<void> {
   if (values['password-stdin'] && !['create', 'reset'].includes(command)) throw new Error('--password-stdin is only used with create or reset.');
   const store = createStore({ path: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite') });
   try {
-    const auth = createAuth({ database: store.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true, transferTaskOwners: (fromId, toId, attribution) => store.transferTaskOwners(fromId, toId, attribution) });
+    const auth = createAuth({ database: store.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true, transferTaskOwners: (fromId, toId, attribution) => store.transferTaskOwners(fromId, toId, attribution), transferLocalProjectMemberships: (fromId, toId, attribution) => store.transferLocalProjectMemberships(fromId, toId, attribution) });
     if (command === 'list') { console.log(JSON.stringify(auth.listAccounts(), null, 2)); return; }
     if (command === 'create') {
       const created = await auth.createAccount({ username: username!, displayName: values.name ?? username!, password: await password(Boolean(values['password-stdin'])) });
@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     if (command === 'disable' || command === 'enable') { auth.setAccountDisabled(account.id, command === 'disable'); console.log(`${account.username} ${command === 'disable' ? 'disabled; credentials revoked' : 'enabled'}.`); }
     if (command === 'transfer-local') {
       const result = auth.transferLocalPolicies(account.id);
-      console.log(`Transferred local-only grants to ${result.account.username} (${result.account.id}): ${result.spaces} Space(s), ${result.objects} object(s), ${result.tasks} task owner(s). Password authentication remains inactive.`);
+      console.log(`Transferred local-only grants to ${result.account.username} (${result.account.id}): ${result.spaces} Space(s), ${result.objects} object(s), ${result.tasks} task owner(s), ${result.projectMemberships} project membership(s). Password authentication remains inactive.`);
     }
     if (command === 'tokens') console.log(JSON.stringify(auth.listTokens(account.id), null, 2));
     if (command === 'revoke') { if (!tokenId) throw new Error('Provide the token ID to revoke.'); auth.revokeToken(account.id, tokenId); console.log('Access token revoked.'); }

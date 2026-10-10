@@ -40,7 +40,7 @@ PDF builds belong in isolated workers with pinned toolchains, time/memory limits
 
 The server remains loopback-only, with either local single-user mode or password-authenticated shared workspace membership. Strict Host/Origin validation prevents ordinary websites from operating it; content and request sizes are bounded. Files are stored as data, never executed. API keys remain server-side. Mobile layout works today. Password sessions, CSRF protection and scoped CLI tokens are implemented; object/Space rules restrict current objects, history, exports, activity and review requests. Remote phone access still needs TLS and trusted proxies.
 
-Object policies, restrictive Spaces and scoped tokens are implemented for the current application surface. Distinct human/service/agent kinds, project membership, auditable agent capabilities and retention controls remain required platform work. Search, model context, notifications and exports must enforce the same policies as object reads. A prompt is not an access-control boundary.
+Object policies, restrictive Spaces and scoped tokens are implemented for the current application surface. Project membership grants Space-bounded visibility on the project, with separate join rules and independent watch preferences. Distinct human/service/agent kinds, project audiences on other objects, auditable agent capabilities and retention controls remain required platform work. Search, model context, notifications and exports must enforce the same policies as object reads. A prompt is not an access-control boundary.
 
 ## ADR 006: portable application, separate site operations
 

@@ -2,13 +2,13 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'no
 import type { IncomingMessage } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AuthContext, AuthMode, AuthScope, AuthToken, PublicAccount, SessionState } from '../shared/auth.ts';
-import type { Audience, ObjectPolicy, Space } from '../shared/policy.ts';
+import type { ProjectAudience, ObjectPolicy, Space } from '../shared/policy.ts';
 import type { Activity, ActorAttribution } from '../shared/types.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import { HttpError, string } from './validation.ts';
 
-export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
-export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number }
+export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
+export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number; projectMemberships: number }
 type AccountRow = { id: string; username: string; display_name: string; disabled: number; salt: string; password_hash: string; password_scheme: string };
 type SessionRow = { id: string; account_id: string; context: string; expires_at: number };
 type TokenRow = { id: string; account_id: string; name: string; scopes: string; created_at: number; expires_at: number; revoked: number };
@@ -35,12 +35,14 @@ export class Auth {
   private readonly challengeCookie: string;
   private readonly provisioning: boolean;
   private readonly transferTaskOwners: AuthOptions['transferTaskOwners'];
+  private readonly transferLocalProjectMemberships: AuthOptions['transferLocalProjectMemberships'];
   private deriving = 0;
   constructor(options: AuthOptions) {
     this.database = options.database;
     this.mode = options.mode;
     this.provisioning = options.provisioning ?? false;
     this.transferTaskOwners = options.transferTaskOwners;
+    this.transferLocalProjectMemberships = options.transferLocalProjectMemberships;
     this.basePath = normalizeBasePath(options.basePath);
     this.now = options.now ?? Date.now;
     this.database.exec(`
@@ -83,13 +85,14 @@ export class Auth {
   private meta(name: string): string | undefined { return (this.database.prepare('SELECT value FROM auth_meta WHERE name = ?').get(name) as { value: string } | undefined)?.value; }
   private requirePortablePolicies(): void {
     const localPrincipal = `local:${this.workspaceId}`;
+    if (this.localProjectMemberships(localPrincipal)) throw new Error('Password authentication cannot be activated while project membership references the local-only principal. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No memberships were transferred.');
     if (this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entities'").get()
       && this.database.prepare("SELECT 1 FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? LIMIT 1").get(localPrincipal)) {
       throw new Error('Password authentication cannot be activated while task ownership references the local-only principal. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No task owners were reassigned.');
     }
     const tables = [
       { name: 'policy_spaces', paths: ['$.view.principalIds', '$.edit.principalIds'] },
-      { name: 'object_policies', paths: ['$.rules.view.principalIds', '$.rules.edit.principalIds', '$.rules.interact.principalIds'] },
+      { name: 'object_policies', paths: ['$.rules.view.principalIds', '$.rules.edit.principalIds', '$.rules.interact.principalIds', '$.rules.join.principalIds'] },
     ];
     for (const table of tables) {
       if (!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table.name)) continue;
@@ -99,6 +102,10 @@ export class Auth {
         if (grant) throw new Error('Password authentication cannot be activated while policies reference the local-only principal. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No access rules were reassigned.');
       }
     }
+  }
+  private localProjectMemberships(principalId: string): boolean {
+    return Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_relations'").get()
+      && this.database.prepare("SELECT 1 FROM project_relations WHERE principal_id = ? AND relation = 'member' AND active = 1 LIMIT 1").get(principalId));
   }
   private writeTransaction<T>(work: () => T): T {
     this.database.exec('SAVEPOINT auth_credentials_write');
@@ -285,14 +292,14 @@ export class Auth {
         if (!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)) throw new Error('Workspace policies are not initialized. Run the accounts command with the current application version.');
       }
       const localPrincipal = `local:${this.workspaceId}`;
-      const transfer = (audience: Audience): Audience => audience.kind === 'principals' && audience.principalIds.includes(localPrincipal)
+      const transfer = <T extends ProjectAudience>(audience: T): T => (audience.kind === 'principals' && audience.principalIds.includes(localPrincipal)
         ? { kind: 'principals', principalIds: [...new Set(audience.principalIds.map(id => id === localPrincipal ? account.id : id))] }
-        : audience;
+        : audience) as T;
       const nextVersion = (version: number): number => {
         if (!Number.isSafeInteger(version) || version < 1 || !Number.isSafeInteger(version + 1)) throw new HttpError(409, 'A policy has reached the supported version limit. No grants were transferred.');
         return version + 1;
       };
-      const result: LocalPolicyTransfer = { account: publicAccount(account), spaces: 0, objects: 0, tasks: 0 };
+      const result: LocalPolicyTransfer = { account: publicAccount(account), spaces: 0, objects: 0, tasks: 0, projectMemberships: 0 };
       const requestId = randomUUID();
       const createdAt = new Date(this.now()).toISOString();
       const audit = (objectId: string) => {
@@ -318,13 +325,14 @@ export class Auth {
       const objects = this.database.prepare(`SELECT object_id, data FROM object_policies AS policy WHERE
         EXISTS (SELECT 1 FROM json_each(policy.data, '$.rules.view.principalIds') WHERE value = ?) OR
         EXISTS (SELECT 1 FROM json_each(policy.data, '$.rules.edit.principalIds') WHERE value = ?) OR
-        EXISTS (SELECT 1 FROM json_each(policy.data, '$.rules.interact.principalIds') WHERE value = ?)
-      `).all(localPrincipal, localPrincipal, localPrincipal) as { object_id: string; data: string }[];
+        EXISTS (SELECT 1 FROM json_each(policy.data, '$.rules.interact.principalIds') WHERE value = ?) OR
+        EXISTS (SELECT 1 FROM json_each(policy.data, '$.rules.join.principalIds') WHERE value = ?)
+      `).all(localPrincipal, localPrincipal, localPrincipal, localPrincipal) as { object_id: string; data: string }[];
       for (const row of objects) {
         const original = JSON.parse(row.data) as ObjectPolicy;
-        const view = transfer(original.rules.view); const edit = transfer(original.rules.edit); const interact = transfer(original.rules.interact);
-        if (view === original.rules.view && edit === original.rules.edit && interact === original.rules.interact) continue;
-        const policy: ObjectPolicy = { ...original, version: nextVersion(original.version), rules: { view, edit, interact } };
+        const policy: ObjectPolicy = original.kind === 'project'
+          ? { ...original, version: nextVersion(original.version), rules: { view: transfer(original.rules.view), edit: transfer(original.rules.edit), interact: transfer(original.rules.interact), join: transfer(original.rules.join) } }
+          : { ...original, version: nextVersion(original.version), rules: { view: transfer(original.rules.view), edit: transfer(original.rules.edit), interact: transfer(original.rules.interact) } };
         this.database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify(policy), row.object_id);
         audit(row.object_id); result.objects += 1;
       }
@@ -332,6 +340,11 @@ export class Auth {
         if (!this.transferTaskOwners) throw new Error('Task ownership transfer requires the current accounts command. No grants or owners were transferred.');
         result.tasks = this.transferTaskOwners(localPrincipal, account.id, { principalId: `operator:${this.workspaceId}`, displayName: 'Terminal operator', credentialId: null, requestId });
         if (!Number.isSafeInteger(result.tasks) || result.tasks < 1 || this.database.prepare("SELECT 1 FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? LIMIT 1").get(localPrincipal)) throw new Error('Task ownership transfer was incomplete. No grants or owners were transferred.');
+      }
+      if (this.localProjectMemberships(localPrincipal)) {
+        if (!this.transferLocalProjectMemberships) throw new Error('Project membership transfer requires the current accounts command. No grants, owners or memberships were transferred.');
+        result.projectMemberships = this.transferLocalProjectMemberships(localPrincipal, account.id, { principalId: `operator:${this.workspaceId}`, displayName: 'Terminal operator', credentialId: null, requestId });
+        if (!Number.isSafeInteger(result.projectMemberships) || result.projectMemberships < 1 || this.localProjectMemberships(localPrincipal)) throw new Error('Project membership transfer was incomplete. No grants, owners or memberships were transferred.');
       }
       if (result.spaces || result.objects) {
         const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name = 'epoch'").get() as { value: number }).value;

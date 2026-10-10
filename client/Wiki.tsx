@@ -70,7 +70,9 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
     void load();
     return () => { loadGeneration.current += 1; };
   }, [load, currentVersion, online]);
-  useEffect(() => { setSelected(null); }, [currentVersion]);
+  // A null selection follows the current head. An explicitly chosen immutable
+  // version remains selected when workspace discovery or a background edit
+  // changes the head; only the reader's action should leave that version.
 
   const loadVersion = useCallback((number: number): Promise<WikiVersion | null> => {
     if (unavailableObject(id)) return Promise.resolve(null);

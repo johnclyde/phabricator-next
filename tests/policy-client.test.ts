@@ -654,3 +654,62 @@ test('versioned tag outbox operations replay their unchanged payload and stop at
     assert.deepEqual(client.quarantinedDrafts()[0]!.value, change);
   } finally { globalThis.fetch = fetch; storage.close(); }
 });
+
+test('project detail and people caches clear on policy epochs while independent exact metadata drafts remain recoverable', async () => {
+  const fetch = globalThis.fetch; const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 1, ['S1']);
+    client.writeStored('project:PROJ1', { project: { name: 'Loaded profile' }, accessEpoch: 1 });
+    client.writeStored('project:PROJ1:members', { members: [{ principalId: 'alice' }], accessEpoch: 1 });
+    const draft = { expectedVersion: 3, values: { description: 'Unsaved metadata' }, changed: ['description'] };
+    client.writeStored('project-draft:PROJ1', draft); client.writeStored('project-draft:PROJ2', { expectedVersion: 1, values: { name: 'Other project' }, changed: ['name'] });
+    let release!: (response: Response) => void; let signal: AbortSignal | null | undefined;
+    globalThis.fetch = async (_path, options) => { signal = options?.signal; return await new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/projects/PROJ1/members');
+    client.reconcileAccess({ PROJ1: access('PROJ1', false), PROJ2: access('PROJ2') }, 2, ['S1']);
+    assert.equal(signal?.aborted, true); assert.equal(client.readStored('project:PROJ1', null), null); assert.equal(client.readStored('project:PROJ1:members', null), null);
+    assert.equal(client.writeStored('project:PROJ1', { project: { name: 'Late private cache callback' }, accessEpoch: 1 }), false);
+    assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [draft]);
+    assert.notEqual(client.readStored('project-draft:PROJ2', null), null);
+    release(Response.json({ members: [{ principalId: 'alice' }], accessEpoch: 1 }));
+    await assert.rejects(pending, withCode('ACCESS_CHANGED'));
+    const reopened = storage.reopen(); assert.deepEqual(reopened.quarantinedDrafts().map(item => item.value), [draft]);
+    reopened.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 3, ['S1']);
+    assert.equal(reopened.readStored('project-draft:PROJ1', null), null);
+    await reopened.discardQuarantinedDraft('project-draft:PROJ1'); assert.equal(reopened.quarantinedDrafts().length, 0);
+  } finally { storage.close(); globalThis.fetch = fetch; }
+});
+
+test('project metadata draft retention compares memory and durable bytes independently and older unversioned work is held whole', () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ PROJ1: access('PROJ1') }, 1, ['S1']);
+    const key = 'project-draft:PROJ1'; const durable = { expectedVersion: 2, values: { name: 'Newer saved draft' }, changed: ['name'] }; const memory = { expectedVersion: 1, values: { name: 'Failed local write' }, changed: ['name'] };
+    client.writeStored(key, durable); storage.failWrites(true); assert.equal(client.writeStored(key, memory), false); storage.failWrites(false);
+    assert.equal(client.removeStoredIfEqual(key, memory), true); assert.deepEqual(client.readStored(key, null), durable);
+    const legacy = { name: 'Old draft without known source', description: 'Keep all fields' };
+    storage.stored.set(client.storageKey(key), JSON.stringify(legacy));
+    const queued: PendingMutation = { id: 'legacy-project', path: '/api/projects/PROJ1', method: 'PATCH', body: { name: 'Old queued name' }, label: 'Legacy project metadata', createdAt: '2026-10-10' };
+    const create: PendingMutation = { id: 'project-create', path: '/api/projects', method: 'POST', body: { name: 'Explicit creation', color: '#123456' }, label: 'Create project', createdAt: '2026-10-10' };
+    client.writeStored('outbox', [queued, create]); assert.equal(client.readStored(key, null), null);
+    assert.deepEqual(client.readStored('outbox', []), [create]); assert.deepEqual(new Set(client.quarantinedDrafts().map(item => JSON.stringify(item.value))), new Set([JSON.stringify(legacy), JSON.stringify(queued)]));
+  } finally { storage.close(); }
+});
+
+test('a committed project leave receipt survives known view loss without exposing stale project content or replaying metadata drafts', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1'), T1: access('T1') }, 1, ['S1']);
+    client.writeStored('project:PROJ1', { project: { name: 'Private project' }, accessEpoch: 1 });
+    const draft = { expectedVersion: 1, values: { name: 'Unsaved project edit' }, changed: ['name'] }; client.writeStored('project-draft:PROJ1', draft);
+    assert.deepEqual(client.draftRecords(), [{ key: 'project-draft:PROJ1', value: draft }], 'protected session export includes ordinary project metadata drafts before access changes');
+    client.writeStored('task-comment:T1', { body: 'Unrelated task comment' });
+    let release!: (response: Response) => void; let signal: AbortSignal | null | undefined;
+    globalThis.fetch = async (_path, options) => { signal = options?.signal; return await new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/projects/PROJ1/membership', { method: 'POST', body: { action: 'leave', expectedVersion: 1 } });
+    client.reconcileAccess({ T1: access('T1') }, 2, ['S1']); assert.equal(signal?.aborted, false);
+    release(Response.json({ id: 'PROJ1', saved: true, accessLost: true, accessEpoch: 2 }));
+    assert.deepEqual(await pending, { id: 'PROJ1', saved: true, accessLost: true, accessEpoch: 2 });
+    assert.equal(client.readStored('project:PROJ1', null), null); assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [draft]); assert.deepEqual(client.readStored('task-comment:T1', null), { body: 'Unrelated task comment' });
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});

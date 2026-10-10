@@ -1,5 +1,7 @@
 import type { EffectiveAccess, NewObjectAccessInput, ObjectAccess, Space } from './policy';
 import type { PublicAccount } from './auth';
+import type { Project } from './projects';
+export type { Project, ProjectSnapshot, ProjectField, ProjectFieldChange, ProjectStatus, ProjectIcon, ProjectColorKey, ProjectRelation, ProjectRelationStatus, ProjectPreferences, ProjectTransaction, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectDetail, ProjectAccessLostAcknowledgement, ProjectLegacyAcknowledgement, ProjectUpdateResult, ProjectInput, UpdateProjectInput, ProjectMembersInput, ProjectMembershipInput, ProjectWatcherInput, ProjectSilenceInput } from './projects';
 
 export type RevisionKind = 'code' | 'paper' | 'document';
 export type RevisionStatus = 'draft' | 'needs_review' | 'changes_requested' | 'accepted' | 'closed';
@@ -7,7 +9,6 @@ export type TaskStatus = 'open' | 'in_progress' | 'resolved' | 'duplicate';
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 export interface ActorAttribution { principalId: string; displayName: string; credentialId: string | null; requestId: string }
 export interface SourceFile { path: string; content: string }
-export interface Project { id: string; name: string; description: string; color: string }
 export interface Repository { id: string; name: string; remoteUrl: string; description: string; defaultBranch: string }
 export interface Task { id: string; title: string; description: string; status: TaskStatus; priority: Priority; projectIds: string[]; ownerId: string | null; authorId: string | null; version: number; createdAt: string; updatedAt: string }
 export type TaskSnapshot = Omit<Task, 'ownerId' | 'authorId' | 'projectIds'> & Partial<Pick<Task, 'ownerId' | 'authorId' | 'projectIds'>> & { projectId?: string | null };
@@ -43,7 +44,7 @@ export interface ReviewAnalysis { summary: string; findings: Finding[]; provider
 export interface ReviewRun extends ReviewAnalysis { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; contentHash: string; createdAt: string }
 export interface Activity { attribution?: ActorAttribution; id: string; objectId: string; actor: string; action: string; detail: string; createdAt: string }
 export type SpaceSummary = Space & { capabilities: EffectiveAccess };
-export interface AppState { projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
+export interface AppState { projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
 export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; threads: ReviewThread[]; threadEvents: ReviewThreadEvent[]; suggestionApplications: SuggestionApplication[]; reviews: ReviewRun[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; repositoryId?: string | null; projectId?: string | null }
 export interface CreateVersionInput { files: SourceFile[]; message: string; expectedVersion: number }

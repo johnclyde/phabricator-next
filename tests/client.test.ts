@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { discussionSummary, parseCommand } from '../client/voice.ts';
+import { discussionSummary, parseCommand, projectMatches } from '../client/voice.ts';
 import type { ReviewComment, RevisionVersion, ReviewThread } from '../shared/types.ts';
 import { canQueue, RequestError, isNetworkError } from '../client/offline.ts';
 import { applicationBase, applicationPath, storageKey } from '../client/mount.ts';
@@ -197,4 +197,25 @@ test('observing password mode invalidates a prior offline-local grant even when 
 test('voice opens numbered tasks without performing implicit mutations', () => {
   for (const input of ['open T12', 'open T 12', 'open task 12', 'open task12', 'show the task 12']) assert.deepEqual(parseCommand(input), { type: 'openObject', id: 'T12' });
   for (const input of ['resolve task 12', 'close T12', 'add dependency T12', 'open task 0']) assert.equal(parseCommand(input).type, 'unknown');
+});
+
+test('project commands navigate names and filters without changing membership', () => {
+  assert.equal(projectMatches({ id: 'PROJ1', name: 'Research Group', primarySlug: 'research_group', aliases: ['other_alias'] }, '#Research Group'), true);
+  assert.equal(projectMatches({ id: 'PROJ1', name: 'Research Group', primarySlug: 'research_group', aliases: ['other_alias'] }, 'other alias'), true);
+  assert.deepEqual(parseCommand('open project Research Group'), { type: 'openProject', project: 'Research Group' });
+  assert.deepEqual(parseCommand('open PROJ 12'), { type: 'openProject', project: 'PROJ12' });
+  assert.deepEqual(parseCommand('show watching projects'), { type: 'projectFilter', value: 'watching' });
+  assert.deepEqual(parseCommand('show joined projects'), { type: 'projectFilter', value: 'joined' });
+  for (const input of ['join project Research', 'watch project Research', 'leave project Research', 'archive project Research', 'silence project Research']) assert.equal(parseCommand(input).type, 'unknown');
+});
+
+test('offline project writes are limited to exact metadata and creations without membership or explicit policy changes', () => {
+  assert.equal(canQueue('/api/projects', 'POST', { name: 'Research' }), true);
+  assert.equal(canQueue('/api/projects', 'POST', { name: 'Research', memberIds: [], access: { spaceId: 'S1' } }), true);
+  assert.equal(canQueue('/api/projects', 'POST', { name: 'Research', memberIds: ['alice'] }), false);
+  assert.equal(canQueue('/api/projects', 'POST', { name: 'Research', access: { spaceId: 'S1', join: { kind: 'workspace' } } }), false);
+  assert.equal(canQueue('/api/projects/PROJ1', 'PATCH', { name: 'Renamed', aliases: ['other'], expectedVersion: 2 }), true);
+  assert.equal(canQueue('/api/projects/PROJ1', 'PATCH', { name: 'No version' }), false);
+  for (const field of ['memberIds', 'access', 'watching', 'silenced']) assert.equal(canQueue('/api/projects/PROJ1', 'PATCH', { expectedVersion: 2, [field]: [] }), false);
+  for (const section of ['membership', 'members', 'watchers', 'silence']) assert.equal(canQueue(`/api/projects/PROJ1/${section}`, 'POST', { expectedVersion: 2 }), false);
 });

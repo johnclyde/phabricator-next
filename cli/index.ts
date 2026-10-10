@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { analyzeLocally } from '../shared/review';
 import { mountPath, normalizeBasePath } from '../shared/mount';
 import { isTaskClosed } from '../shared/tasks';
-import type { AppState, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
+import { normalizeProjectSlug } from '../shared/projects';
+import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -16,7 +17,8 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
-  npm run arc -- show P2|T1
+  npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
+  npm run arc -- show P2|T1|PROJ1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
 
@@ -28,8 +30,10 @@ Hosted review is always explicit.
 tasks lists your assigned open tasks by default. --owner all includes all visible
 owners; --unassigned selects unowned tasks. --subscribed selects tasks you follow.
 Use a principal ID or user:USERNAME to disambiguate reserved owner filter names.
---project selects a visible project ID or exact name; repeat it to require all tags.
+--project selects a visible project ID, exact name or alias; repeat it to require all tags.
 show T1 includes the current task, visible dependencies, and the first history page.
+projects lists active visible projects; --joined and --watching select your relationships.
+show PROJ1 includes the project profile, your preferences, and its first history page.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -45,6 +49,7 @@ async function main() {
       version: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
       status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' },
       project: { type: 'string', multiple: true }, owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
+      joined: { type: 'boolean' }, watching: { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -130,8 +135,13 @@ async function main() {
       const byId = state.projects.find(project => project.id === value);
       if (byId) return byId.id;
       const matches = state.projects.filter(project => project.name.toLocaleLowerCase() === value.toLocaleLowerCase());
-      if (matches.length !== 1) throw new Error('Project is unavailable or its name is ambiguous. Use a visible project ID or exact name.');
-      return matches[0]!.id;
+      if (matches.length === 1) return matches[0]!.id;
+      if (matches.length === 0) {
+        const slug = normalizeProjectSlug(value.replace(/^#/, ''));
+        const aliases = state.projects.filter(project => project.primarySlug === slug || project.aliases.includes(slug));
+        if (aliases.length === 1) return aliases[0]!.id;
+      }
+      throw new Error('Project is unavailable or its name is ambiguous. Use a visible project ID, exact name or alias.');
     });
     const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
     const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task.status) : !isTaskClosed(task.status)))
@@ -144,7 +154,28 @@ async function main() {
     else for (const task of tasks) console.log(`${task.id}\tv${task.version}\t${task.status}\t${task.priority}\t${task.title}`);
     return;
   }
-  if (command === 'show') return console.log(JSON.stringify(args[0] && /^T[1-9]\d*$/.test(args[0]) ? await request<TaskDetail>(`/api/tasks/${args[0]}`) : await getDetail(args[0]), null, 2));
+  if (command === 'projects') {
+    if (args.length) throw new Error('projects accepts options, not positional IDs. Use show PROJ1 for one project.');
+    const status = values.status || 'active';
+    if (!['active', 'archived', 'all'].includes(status)) throw new Error('--status must be active, archived or all.');
+    const limit = values.limit === undefined ? undefined : Number(values.limit);
+    if (limit !== undefined && (!/^[1-9]\d*$/.test(values.limit!) || !Number.isSafeInteger(limit))) throw new Error('--limit must be a positive integer.');
+    const state = await request<AppState>('/api/state');
+    const projects = state.projects.filter(project => status === 'all' || project.status === status)
+      .filter(project => !values.joined || state.joinedProjectIds.includes(project.id))
+      .filter(project => !values.watching || state.watchingProjectIds.includes(project.id))
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id, 'en', { numeric: true }))
+      .slice(0, limit);
+    if (values.json) console.log(JSON.stringify(projects, null, 2));
+    else for (const project of projects) console.log(`${project.id}\tv${project.version}\t${project.status}\t${project.name}`);
+    return;
+  }
+  if (command === 'show') {
+    const id = args[0];
+    const detail = id && /^T[1-9]\d*$/.test(id) ? await request<TaskDetail>(`/api/tasks/${id}`)
+      : id && /^PROJ[1-9]\d*$/.test(id) ? await request<ProjectDetail>(`/api/projects/${id}`) : await getDetail(id);
+    return console.log(JSON.stringify(detail, null, 2));
+  }
   if (command === 'review') {
     if (!['local', 'openai', 'ollama'].includes(values.provider!)) throw new Error('--provider must be local, openai or ollama.');
     const detail = await getDetail(args[0]);

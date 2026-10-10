@@ -13,10 +13,11 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | F005 | Paper and prose drafts with source/word comparisons | Implemented first slice; no PDF or DOCX engine |
 | F006 | Offline checks, drafts, snapshot reads and mutation outbox | Implemented first slice; conflicts require attention |
 | F007 | Hosted and local model review adapters | Implemented; credentials/runtime required; live provider evaluation pending |
-| F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent; direct D/P/L/W/T object navigation supported |
+| F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent; direct D/P/L/W/T/PROJ object navigation supported |
 | F009 | Wiki history and comparisons (WIKI-01 local slice) | Implemented immutable content versions, summaries, paging, arbitrary version comparison and restore-as-new; legacy migration preserves only known content; new authenticated writes retain principal/credential attribution; WIKI-02–04 remain gaps |
 | F010 | Accounts and request authority (AUTH-01/02 slice) | Password sessions, terminal provisioning/reset/disable, scoped revocable tokens, account attribution and principal-scoped retries implemented; invitations, MFA and remote hosting remain open |
-| F011 | Object and Space policies (POLICY-01 slice) | Explicit workspace/member view, edit and interact rules; restrictive Spaces; policy-aware reads/search input/history/exports/review calls; atomic replay and revocation checks; mobile access controls and draft quarantine (durable locally, tab-memory-only when authenticated). Project membership rules, inherited wiki restrictions and full-text search remain gaps |
+| F011 | Object and Space policies (POLICY-01 slice) | Explicit workspace/member view, edit and interact rules; restrictive Spaces; policy-aware reads/search input/history/exports/review calls; atomic replay and revocation checks; mobile access controls and draft quarantine (durable locally, tab-memory-only when authenticated). Project-specific membership/join rules implemented; project audiences on other objects, inherited wiki restrictions and full-text search remain gaps |
+| F012 | Project profiles and membership (PROJECT-01 slice) | Versioned profiles, names/aliases, icons/colors, archive/restore, member management and join/leave, independent watching, private silence preferences, Space-bounded member visibility, mobile profiles and CLI filters. Hierarchy, workboards, notification delivery and remaining capabilities are explicit gaps in [project contracts](projects.md) |
 
 ## Next: useful document iteration
 

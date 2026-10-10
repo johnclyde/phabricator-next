@@ -47,13 +47,13 @@ test('line-range threads preserve quotations through replies, resolution and new
   await thread.getByRole('button', { name: 'Reply', exact: true }).click();
   await thread.getByRole('textbox', { name: 'Reply to this thread', exact: true }).fill('The schedule supports fourteen days.');
   await thread.getByRole('button', { name: 'Add Reply', exact: true }).click();
-  await expect(thread.getByText('The schedule supports fourteen days.', { exact: true })).toBeVisible();
+  await expect(thread.locator('.comment').getByText('The schedule supports fourteen days.', { exact: true })).toBeVisible();
   await thread.getByRole('button', { name: 'Resolve Thread', exact: true }).click();
   await expect(thread.locator('.thread-heading .badge')).toHaveText('Resolved');
   await expect(thread.getByLabel('Thread state history')).toContainText('resolved while viewing version 1');
   await thread.getByRole('textbox', { name: 'Reply to this thread', exact: true }).fill('Adding a citation does not reopen this discussion.');
   await thread.getByRole('button', { name: 'Add Reply', exact: true }).click();
-  await expect(thread.getByText('Adding a citation does not reopen this discussion.', { exact: true })).toBeVisible();
+  await expect(thread.locator('.comment').getByText('Adding a citation does not reopen this discussion.', { exact: true })).toBeVisible();
   await expect(thread.locator('.thread-heading .badge')).toHaveText('Resolved');
   await newVersion(page, `Additional context.\n${source}`);
   await expect(thread.locator('.anchor-projection')).toContainText('Exact quotation located in version 2');
@@ -113,13 +113,13 @@ test('source selections retarget explicitly and a late reply save preserves a ne
   await expect(editor).toHaveValue('This first reply will be saved.');
   await editor.fill('This newer unsent reply must survive.');
   release();
-  await expect(thread.getByText('This first reply will be saved.', { exact: true })).toBeVisible();
+  await expect(thread.locator('.comment').getByText('This first reply will be saved.', { exact: true })).toBeVisible();
   await expect(editor).toHaveValue('This newer unsent reply must survive.');
   await page.unroute(routePattern);
   await page.reload();
   await thread.getByRole('button', { name: 'Reply', exact: true }).click();
   await expect(editor).toHaveValue('This newer unsent reply must survive.');
-  await expect(thread.getByText('This first reply will be saved.', { exact: true })).toHaveCount(1);
+  await expect(thread.locator('.comment').getByText('This first reply will be saved.', { exact: true })).toHaveCount(1);
 });
 
 test('offline replies retain their parent and viewed version and replay once while resolution stays online-only', async ({ page, context }, info) => {
@@ -141,7 +141,7 @@ test('offline replies retain their parent and viewed version and replay once whi
   await context.setOffline(false);
   await expect(page.getByText('Everything is synchronized.', { exact: false })).toBeVisible();
   await page.goto(`./#${id}`);
-  await expect(thread.getByText('An offline reply to this exact thread.', { exact: true })).toHaveCount(1);
+  await expect(thread.locator('.comment').getByText('An offline reply to this exact thread.', { exact: true })).toHaveCount(1);
   await page.reload();
-  await expect(thread.getByText('An offline reply to this exact thread.', { exact: true })).toHaveCount(1);
+  await expect(thread.locator('.comment').getByText('An offline reply to this exact thread.', { exact: true })).toHaveCount(1);
 });

@@ -1,6 +1,8 @@
 import type { AuthContext } from '../shared/auth.ts';
+import type { ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
+import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
-import type { Capability, ObjectAccess, Space } from '../shared/policy.ts';
+import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import type { MutationResponse, Store } from './store.ts';
@@ -14,7 +16,7 @@ export class AccessLayer {
   constructor(private store: Store, private auth: Auth, readonly policies: PolicyStore, readonly context: AuthContext) {}
   private get principal(): string { return this.context.principalId; }
   canView(id: string): boolean { return this.policies.access(id, this.principal).view; }
-  require(id: string, capability: Capability = 'view'): void { this.policies.require(id, this.principal, capability); }
+  require(id: string, capability: ProjectCapability = 'view'): void { this.policies.require(id, this.principal, capability); }
   describe(id: string): ObjectAccess { return this.policies.describe(id, this.principal); }
   space(space: Space): SpaceSummary { return { ...space, capabilities: this.policies.access(space.id, this.principal) }; }
   state(ai: AppState['ai']): AppState {
@@ -31,6 +33,8 @@ export class AccessLayer {
     state.canCreate = this.context.scopes.includes('write');
     state.currentPrincipalId = this.principal;
     state.followingTaskIds = state.tasks.filter(task => this.store.subscriptionStatus(task.id, this.principal).subscribed).map(task => task.id);
+    state.joinedProjectIds = state.projects.filter(project => this.store.projectPreferences(project.id, this.principal).membership.active).map(project => project.id);
+    state.watchingProjectIds = state.projects.filter(project => this.store.projectPreferences(project.id, this.principal).watching.active).map(project => project.id);
     // This is the member directory, not an administrative credential listing.
     state.principals = this.auth.listAccounts().filter(account => !account.disabled);
     if (this.context.kind === 'local') state.principals.unshift({ id: this.principal, username: 'local', displayName: 'You', disabled: false });
@@ -43,6 +47,20 @@ export class AccessLayer {
   document(id: string): WikiDetail {
     this.require(id);
     return { ...this.store.documentDetail(id), access: this.describe(id), accessEpoch: this.policies.epoch() };
+  }
+  project(id: string): ProjectDetail { this.require(id); return this.projectSnapshot(this.store.projectDetail(id, this.principal)); }
+  resolveProject(slug: string): ProjectDetail {
+    if (slug.length > 1_024 || !isValidProjectSlug(slug)) throw new HttpError(400, 'Provide a valid project name or alias of at most 128 normalized characters.');
+    const row = this.store.database.prepare('SELECT project_id FROM project_aliases WHERE slug = ?').get(normalizeProjectSlug(slug)) as { project_id: string } | undefined;
+    if (!row) throw new HttpError(404, 'Object was not found.', 'OBJECT_UNAVAILABLE');
+    return this.project(row.project_id);
+  }
+  projectHistory(id: string, before?: number, limit?: number): ProjectHistory { this.require(id); return { ...this.store.projectHistory(id, before, limit), accessEpoch: this.policies.epoch() }; }
+  projectMembers(id: string, after?: string, limit?: number): ProjectMembersPage { this.require(id); return { ...this.store.projectMembers(id, this.principal, after, limit), accessEpoch: this.policies.epoch() }; }
+  projectWatchers(id: string, after?: string, limit?: number): ProjectWatchersPage { this.require(id); return { ...this.store.projectWatchers(id, this.principal, after, limit), accessEpoch: this.policies.epoch() }; }
+  projectPreferences(id: string): ProjectPreferences { this.require(id); return { ...this.store.projectPreferences(id, this.principal), accessEpoch: this.policies.epoch() }; }
+  private projectSnapshot(detail: ProjectDetail): ProjectDetail {
+    return { ...detail, viewer: { ...detail.viewer, accessEpoch: this.policies.epoch() }, history: { ...detail.history, accessEpoch: this.policies.epoch() }, access: this.describe(detail.project.id), accessEpoch: this.policies.epoch() };
   }
   task(id: string): TaskDetail {
     this.require(id);
@@ -130,7 +148,11 @@ export class AccessLayer {
     if (!local && (!account || (active && account.disabled))) throw new HttpError(400, 'Selected member is unavailable.');
     return value as string;
   }
-  private target(method: string, path: string): { id: string; capability: Capability } | null {
+  private projectPrincipal(value: unknown, active: boolean, projectId?: string, relation: 'member' | 'watcher' = 'member'): string {
+    if (!active && typeof value === 'string' && projectId && value === `local:${this.context.workspaceId}` && this.store.database.prepare('SELECT 1 FROM project_relations WHERE project_id = ? AND principal_id = ? AND relation = ?').get(projectId, value, relation)) return value;
+    return this.principalReference(value, active);
+  }
+  private target(method: string, path: string): { id: string; capability: ProjectCapability } | null {
     const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
     if (policy) return { id: policy[1]!, capability: method === 'GET' ? 'view' : 'edit' };
     const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
@@ -138,7 +160,8 @@ export class AccessLayer {
     const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions)\/((?:PROJ|R|T|W|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
-    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
+    const selfProject = object[1]!.startsWith('PROJ') && ['membership', 'watchers', 'silence'].includes(object[2] ?? '');
+    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
@@ -146,6 +169,31 @@ export class AccessLayer {
     if (method === 'POST' && CREATES.has(path)) this.references(input);
     if (method === 'POST' && path === '/api/tasks' && record(input)?.projectIds !== undefined) this.projectReferences(record(input)!.projectIds);
     if (method === 'POST' && /^\/api\/tasks\/T\d+\/projects$/.test(path)) this.projectReferences(record(input)?.projectIds);
+    if (method === 'POST' && path === '/api/projects' && record(input)?.memberIds !== undefined) {
+      const ids = record(input)!.memberIds;
+      if (!Array.isArray(ids) || ids.length > 100) throw new HttpError(400, 'Choose at most 100 initial project members.');
+      for (const id of ids) this.projectPrincipal(id, true);
+    }
+    const projectAction = method === 'POST' ? /^\/api\/projects\/(PROJ\d+)\/(members|membership|watchers|silence)$/.exec(path) : null;
+    if (projectAction) {
+      const id = projectAction[1]!; const action = projectAction[2]; const data = record(input);
+      if (action === 'members') {
+        if (!Array.isArray(data?.principalIds) || data.principalIds.length > 100) throw new HttpError(400, 'Choose at most 100 project members.');
+        for (const member of data.principalIds) {
+          const retained = typeof member === 'string' && Boolean(this.store.database.prepare("SELECT 1 FROM project_relations WHERE project_id = ? AND principal_id = ? AND relation = 'member' AND active = 1").get(id, member));
+          this.projectPrincipal(member, data.action !== 'remove' && !retained, id);
+        }
+      } else if (action === 'membership') {
+        if (data?.action === 'join') this.require(id, 'join');
+        else if (data?.action === 'leave' && this.store.getProject(id).membershipLocked) this.require(id, 'edit');
+      } else if (action === 'watchers') {
+        const principalId = this.projectPrincipal(data?.principalId, data?.action !== 'unwatch', id, 'watcher');
+        if (principalId !== this.principal) {
+          if (data?.action !== 'unwatch') throw new HttpError(403, 'Only a member may choose to watch a project for themselves.', 'ACTION_FORBIDDEN');
+          this.require(id, 'edit');
+        }
+      } else if (!this.store.projectPreferences(id, this.principal).membership.active) throw new HttpError(403, 'Only current project members can change member-mail preferences.', 'ACTION_FORBIDDEN');
+    }
     if ((method === 'POST' && path === '/api/tasks') || (method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path))) {
       const ownerId = record(input)?.ownerId;
       const current = method === 'PATCH' ? this.store.database.prepare("SELECT json_extract(data, '$.ownerId') AS ownerId FROM entities WHERE id = ?").get(target!.id) as { ownerId: unknown } | undefined : undefined;
@@ -265,7 +313,7 @@ export class AccessLayer {
     return { ...snapshot, projectIds };
   }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
-  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false): MutationResponse {
+  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false): MutationResponse {
     let target = this.target(method, path);
     const body = record(response.body);
     if (method === 'POST' && (CREATES.has(path) || path === '/api/spaces')) {
@@ -279,9 +327,15 @@ export class AccessLayer {
     if (freshTaskOwnershipChange && method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && target) {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id, 'view');
+    } else if (freshProjectChange && target) {
+      if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
+      this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
     if (path.startsWith('/api/policies/') && target) return { status: response.status, body: this.describe(target.id) };
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
+    if (body && record(body.project)) return { status: response.status, body: this.projectSnapshot(body as unknown as ProjectDetail) };
+    if (path === '/api/projects' && body && typeof body.id === 'string' && /^PROJ[1-9]\d*$/.test(body.id) && body.version === undefined) return { status: response.status, body: { id: body.id, saved: true, refreshRequired: true, accessEpoch: this.policies.epoch() } };
+    if (/^\/api\/projects\/PROJ\d+\/silence$/.test(path) && body) return { status: response.status, body: { ...body, accessEpoch: this.policies.epoch() } };
     const normalized = body && record(body.task) ? { ...body, task: this.taskProjectSnapshot(record(body.task)!) }
       : body && typeof body.id === 'string' && /^T[1-9]\d*$/.test(body.id) && path.startsWith('/api/tasks') ? this.taskProjectSnapshot(body) : response.body;
     const taskDetail = record(normalized);

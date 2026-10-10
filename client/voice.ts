@@ -1,7 +1,13 @@
-import type { RevisionDetail, ReviewThread } from '../shared/types';
+import type { ProjectSnapshot, RevisionDetail, ReviewThread } from '../shared/types';
+import { normalizeProjectSlug } from '../shared/projects';
+
+export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'primarySlug' | 'aliases'>, query: string): boolean {
+  const exact = query.trim().toLowerCase(); const slug = normalizeProjectSlug(query.trim().replace(/^#/, ''));
+  return project.id.toLowerCase() === exact || project.name.toLowerCase() === exact || Boolean(slug && (project.primarySlug === slug || (project.aliases || []).includes(slug)));
+}
 
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';
-export type VoiceCommand = { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -17,6 +23,10 @@ export function parseCommand(input: string): VoiceCommand {
   }
   const project = original.match(/^(?:show|open) tasks (?:in|tagged with) project (.+)$/i);
   if (project) return { type: 'taskProjectFilter', project: project[1].trim() };
+  const projectFilter = text.match(/^(?:show|open) (joined|watching|active|all) projects$/);
+  if (projectFilter) return { type: 'projectFilter', value: projectFilter[1] as 'joined' | 'watching' | 'active' | 'all' };
+  const profile = original.match(/^(?:open|show|go to) project (.+)$/i) || original.match(/^(?:open|show|go to) (PROJ\s*[1-9]\d*)$/i);
+  if (profile) return { type: 'openProject', project: profile[1].replace(/^PROJ\s+(\d+)$/i, 'PROJ$1').trim() };
   const search = original.match(/^(?:search(?: for)?|find)\s+(.+)$/i);
   if (search) return { type: 'search', query: search[1] };
   const task = original.match(/^(?:create|add|draft) (?:a )?task(?: called| titled)?\s+(.+)$/i);

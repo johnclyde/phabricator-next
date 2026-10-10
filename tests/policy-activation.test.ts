@@ -94,7 +94,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
     store.database.exec('DROP TRIGGER fail_transfer_audit');
     const epoch = policies.epoch();
     const transferred = operator.transferLocalPolicies(alice.id);
-    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1, tasks: 0 });
+    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1, tasks: 0, projectMemberships: 0 });
     assert.equal(policies.epoch(), epoch + 1);
     const afterPolicy = policies.policy(wiki.id, alice.id);
     const afterSpace = policies.getSpace(space.id, alice.id);
@@ -115,7 +115,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
       assert.doesNotMatch(audit.detail, /Alice|Bob|Research/);
     }
     before = permissions();
-    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0 });
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0, projectMemberships: 0 });
     assert.deepEqual(permissions(), before, 'repeat handoff is a no-op, including versions, epoch and audit');
     assert.equal(latch(store), undefined);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
@@ -181,6 +181,11 @@ test('every explicit local Space and object grant blocks transition, without fal
       assert.equal(latch(store), undefined);
       store.database.prepare('UPDATE policy_spaces SET data = ? WHERE id = ?').run(JSON.stringify(sharedSpace), 'S1');
     }
+    const project = store.createProject({ name: 'Join-only local grant' });
+    const projectPolicy = policies.configureNew(project.id, { spaceId: 'S1', join: selected(identity) }, identity);
+    assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /policies reference the local-only principal/);
+    assert.equal(latch(store), undefined);
+    policies.setPolicy(project.id, { expectedVersion: projectPolicy.version, spaceId: 'S1', view: workspace, edit: workspace, interact: workspace, join: workspace }, identity);
     policies.updateSpace('S1', { expectedVersion: 1, description: `A historical note mentioning ${identity}.`, view: workspace, edit: workspace }, identity);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
     assert.ok(latch(store), 'descriptions are not policy grants');
@@ -222,7 +227,7 @@ test('local task ownership blocks password activation and terminal transfer pres
     const oldHistory = store.database.prepare('SELECT * FROM task_transactions ORDER BY rowid').all();
     const oldSubscriptions = store.database.prepare('SELECT * FROM task_subscriptions ORDER BY rowid').all();
     const result = operator.transferLocalPolicies(alice.id);
-    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 1 });
+    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 1, projectMemberships: 0 });
     const current = store.taskDetail(task.id).task;
     assert.equal(current.ownerId, alice.id); assert.equal(current.authorId, identity);
     assert.equal(current.version, task.version + 1);
@@ -235,10 +240,40 @@ test('local task ownership blocks password activation and terminal transfer pres
     assert.equal(policies.access(task.id, identity).view, false);
     assert.deepEqual(policies.getSpace(space.id, alice.id).view, selected(alice.id));
     const transferred = snapshot();
-    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0 });
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0, projectMemberships: 0 });
     assert.deepEqual(snapshot(), transferred);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
     assert.ok(latch(store));
     assert.equal((store.database.prepare("SELECT json_extract(data, '$.authorId') AS author FROM entities WHERE id = ?").get(task.id) as { author: string }).author, identity);
+  } finally { store.close(); }
+});
+
+test('local project join grants and active membership require an explicit atomic handoff while watcher and silence evidence stays historical', async () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const ordinary = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+    const local = ordinary.authenticate(request).principalId;
+    const alice = await ordinary.createAccount({ username: 'alice', displayName: 'Alice', password });
+    const actor = { principalId: local, displayName: 'You', credentialId: null, requestId: 'local-project' };
+    const policies = new PolicyStore(store.database, { principalExists: id => [local, alice.id].includes(id) });
+    const project = store.createProject({ name: 'Portable project', memberIds: [local] }, actor);
+    policies.configureNew(project.id, { spaceId: 'S1', view: { kind: 'project-members' }, edit: { kind: 'project-members' }, join: selected(local) }, local);
+    store.updateProjectWatcher(project.id, { principalId: local, action: 'watch', expectedVersion: 0 }, actor);
+    store.updateProjectSilence(project.id, { silenced: true, expectedVersion: 0 }, actor);
+    assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /project membership references the local-only principal/);
+    const tables = ['object_policies', 'policy_meta', 'project_profiles', 'project_relations', 'project_transactions', 'project_preference_events', 'activity'];
+    const snapshot = () => tables.map(table => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = snapshot();
+    assert.throws(() => ordinary.transferLocalPolicies(alice.id), /current accounts command/); assert.deepEqual(snapshot(), before);
+    const operator = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true, transferLocalProjectMemberships: (from, to, attribution) => store.transferLocalProjectMemberships(from, to, attribution) });
+    store.database.exec("CREATE TRIGGER reject_project_transfer BEFORE INSERT ON project_transactions WHEN json_extract(NEW.data, '$.attribution.principalId') LIKE 'operator:%' BEGIN SELECT RAISE(ABORT, 'Injected project transfer failure'); END;");
+    assert.throws(() => operator.transferLocalPolicies(alice.id), /Injected project transfer failure/); assert.deepEqual(snapshot(), before); store.database.exec('DROP TRIGGER reject_project_transfer');
+    const result = operator.transferLocalPolicies(alice.id); assert.equal(result.objects, 1); assert.equal(result.projectMemberships, 1); assert.equal(latch(store), undefined);
+    const policy = policies.policy(project.id, alice.id); assert.equal(policy.kind, 'project'); if (policy.kind !== 'project') throw new Error('Expected project policy');
+    assert.deepEqual(policy.rules.join, selected(alice.id)); assert.equal(policies.access(project.id, alice.id).edit, true); assert.equal(policies.access(project.id, local).view, false);
+    assert.equal(store.projectPreferences(project.id, local).membership.active, false); assert.equal(store.projectPreferences(project.id, alice.id).membership.active, true);
+    assert.equal(store.projectPreferences(project.id, local).watching.active, true); assert.equal(store.projectPreferences(project.id, local).silence.active, true); assert.equal(store.projectPreferences(project.id, alice.id).watching.active, false);
+    const transferred = snapshot(); assert.equal(operator.transferLocalPolicies(alice.id).projectMemberships, 0); assert.deepEqual(snapshot(), transferred);
+    createAuth({ database: store.database, mode: 'password', basePath: '/' }); assert.ok(latch(store));
   } finally { store.close(); }
 });

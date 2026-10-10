@@ -81,6 +81,37 @@ test('wiki offline history distinguishes cached and unopened versions', async ({
   await expect(page.locator('.wiki-content')).toHaveText('Retained source for version 2');
 });
 
+test('late workspace discovery and newer edits preserve an explicitly selected historical wiki version', async ({ page, request, baseURL }) => {
+  const document = await seedHistory(request, baseURL!, 3, 'Stable historical wiki selection');
+  const stateURL = new URL('api/state', baseURL!).href;
+  let release!: () => void; let captured!: () => void; let held = true;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { captured = resolve; });
+  await page.route(stateURL, async route => {
+    if (!held) { await route.continue(); return; }
+    const response = await route.fetch(); captured(); await hold; await route.fulfill({ response });
+  });
+  try {
+    await page.goto(`./#${document.id}`); await ready;
+    await expect(page.locator('.wiki-content')).toHaveText('Retained source for version 3');
+    const selection = page.getByLabel('Version to inspect', { exact: true });
+    await selection.fill('1');
+    await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
+    const stateResponse = page.waitForResponse(response => response.url() === stateURL);
+    held = false; release(); await (await stateResponse).finished();
+    await expect.poll(() => page.evaluate(id => Object.keys(localStorage).filter(key => key.endsWith(':state')).some(key => JSON.parse(localStorage.getItem(key)!).documents?.some((entry: { id: string; version: number }) => entry.id === id && entry.version === 3)), document.id)).toBe(true);
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(selection).toHaveValue('1'); await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
+    const update = await request.put(new URL(`api/documents/${document.id}`, baseURL!).href, { data: { title: document.title, slug: document.slug, content: 'A new current head', expectedVersion: 3 } });
+    expect(update.ok()).toBe(true);
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(page.getByText(`${document.slug} · Current version 4`, { exact: true })).toBeVisible();
+    await expect(selection).toHaveValue('1'); await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
+    await page.getByRole('button', { name: 'Current version', exact: true }).click();
+    await expect(selection).toHaveValue('4'); await expect(page.locator('.wiki-content')).toHaveText('A new current head');
+  } finally { held = false; release(); }
+});
+
 test('wiki history pages reach old content without duplicating versions', async ({ page, request, baseURL }) => {
   const document = await seedHistory(request, baseURL!, 23, 'Paginated wiki history');
   await page.goto(`./#${document.id}`);
