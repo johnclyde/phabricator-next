@@ -302,6 +302,7 @@ export class Store {
     return this.projects.create(input, attribution);
   }
   getProject(id: string): Project { return this.projects.get(id); }
+  getRepository(id: string): Repository { return this.get<Repository>('repository', id); }
   workboard(id: string, query: WorkboardQuery = {}, visibility?: WorkboardVisibility): WorkboardDetail { return this.workboards!.detail(id, query, visibility); }
   workboardCards(id: string, columnId: string, query: WorkboardCardsQuery, visibility?: WorkboardVisibility): WorkboardCardPage { return this.workboards!.cards(id, columnId, query, visibility); }
   workboardHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): WorkboardHistory { return this.workboards!.history(id, before, limit, visible); }

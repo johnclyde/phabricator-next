@@ -11,6 +11,8 @@ import { normalizeProjectSlug, projectDisplayName } from '../shared/projects';
 import { visibleProjectScope } from '../shared/project-hierarchy';
 import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 import type { WorkboardCardPage, WorkboardDetail } from '../shared/workboards';
+import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories';
+import type { GitBlob, GitHistory, GitRefs, GitTree, RepositoryDetail } from '../shared/repositories';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -21,7 +23,11 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
   npm run arc -- board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
-  npm run arc -- show P2|T1|PROJ1
+  npm run arc -- repositories [--limit N] [--json]
+  npm run arc -- refs R1 [--json]
+  npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
+  npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
+  npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
 
@@ -41,10 +47,21 @@ show PROJ1 includes the project profile, hierarchy, preferences, and first histo
 board reads the project's actual workboard in column order. It defaults to open
 tasks with all owners; --limit caps cards per column. Without a limit it follows
 all pages, rejecting concurrent board or access changes instead of mixing pages.
+Repository reads use operator-configured local Git copies. refs observes branches
+and tags; browse/history require a full commit ID and never follow a moving ref.
+browse lists a directory; --file reads one file. Text display escapes terminal
+control characters; --json preserves the source as a JSON string. history reads
+one commit-pinned page and reports the next --after value. Nothing is fetched,
+checked out, imported, or pushed by these commands.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
 `;
+
+function terminalText(value: string, multiline = false): string {
+  const controls = multiline ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g : /[\u0000-\u001f\u007f-\u009f]/g;
+  return value.replace(controls, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
 
 function visibleProjectId(value: string, state: AppState): string {
   const byId = state.projects.find(project => project.id === value);
@@ -82,6 +99,7 @@ async function main() {
       project: { type: 'string', multiple: true }, owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
       joined: { type: 'boolean' }, watching: { type: 'boolean' },
       'show-hidden': { type: 'boolean' },
+      commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -187,8 +205,75 @@ async function main() {
   if (command === 'show') {
     const id = args[0];
     const detail = id && /^T[1-9]\d*$/.test(id) ? await request<TaskDetail>(`/api/tasks/${id}`)
-      : id && /^PROJ[1-9]\d*$/.test(id) ? await request<ProjectDetail>(`/api/projects/${id}`) : await getDetail(id);
+      : id && /^PROJ[1-9]\d*$/.test(id) ? await request<ProjectDetail>(`/api/projects/${id}`)
+        : id && /^R[1-9]\d*$/.test(id) ? await request<RepositoryDetail>(`/api/repositories/${id}`) : await getDetail(id);
     return console.log(JSON.stringify(detail, null, 2));
+  }
+  if (command === 'repositories') {
+    if (args.length) throw new Error('repositories accepts options, not positional IDs. Use show R1 for one repository.');
+    const limit = values.limit === undefined ? undefined : Number(values.limit);
+    if (limit !== undefined && (!/^[1-9]\d*$/.test(values.limit!) || !Number.isSafeInteger(limit))) throw new Error('--limit must be a positive integer.');
+    const state = await request<AppState>('/api/state');
+    const repositories = [...state.repositories].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id, 'en', { numeric: true })).slice(0, limit);
+    if (values.json) console.log(JSON.stringify(repositories, null, 2));
+    else for (const repository of repositories) console.log(`${repository.id}\t${terminalText(repository.name)}\t${terminalText(repository.defaultBranch)}`);
+    return;
+  }
+  if (command === 'refs' || command === 'browse' || command === 'history') {
+    const id = args[0];
+    if (args.length !== 1 || !id || !/^R[1-9]\d*$/.test(id)) throw new Error('Provide one repository ID such as R1.');
+    const endpoint = `/api/repositories/${id}`;
+    if (command === 'refs') {
+      const result = await request<GitRefs>(`${endpoint}/refs`);
+      if (result.repositoryId !== id) throw new Error('The server returned a different repository.');
+      if (values.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`${id} · Refs observed ${terminalText(result.observedAt)} · HEAD ${result.headCommit || 'unborn or unavailable'}`);
+        for (const ref of result.refs) console.log(`${ref.kind}\t${terminalText(ref.name)}\t${ref.commitId || 'not a commit'}\t${ref.objectId}`);
+      }
+      return;
+    }
+    const commit = values.commit; const path = values.path ?? '';
+    if (!commit || !isGitObjectId(commit)) throw new Error('--commit requires a full lowercase Git object ID, not a branch name or revision expression.');
+    if (!isGitPath(path)) throw new Error('--path must be a canonical relative Git path without dot segments or NUL.');
+    if (command === 'browse' && values.file && !path) throw new Error('--file requires a nonempty --path.');
+    const query = new URLSearchParams({ commit, path });
+    const exact = (result: GitBlob | GitTree | GitHistory) => {
+      if (result.repositoryId !== id || result.commitId !== commit || result.path !== path || !isGitObjectId(commit, result.objectFormat)) throw new Error('The server returned a different Git snapshot or path.');
+    };
+    if (command === 'history') {
+      const after = values.after === undefined ? 0 : Number(values.after);
+      const limit = values.limit === undefined ? GIT_LIMITS.historyDefault : Number(values.limit);
+      if ((values.after !== undefined && !/^(?:0|[1-9]\d*)$/.test(values.after)) || !Number.isSafeInteger(after) || after < 0 || after > GIT_LIMITS.historyOffset) throw new Error(`--after must be an integer from 0 to ${GIT_LIMITS.historyOffset}.`);
+      if ((values.limit !== undefined && !/^[1-9]\d*$/.test(values.limit)) || !Number.isSafeInteger(limit) || limit < 1 || limit > GIT_LIMITS.historyPage) throw new Error(`--limit must be an integer from 1 to ${GIT_LIMITS.historyPage}.`);
+      query.set('after', String(after)); query.set('limit', String(limit));
+      const result = await request<GitHistory>(`${endpoint}/history?${query}`); exact(result);
+      if (values.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`${id} · History at ${commit}${path ? ` · ${terminalText(path)}` : ''}`);
+        for (const item of result.commits) console.log(`${item.id}\t${terminalText(item.author.timestamp)}\t${terminalText(item.message.split('\n')[0] || '(No message)')}${item.messageTruncated ? ' [message shortened]' : ''}`);
+        if (result.nextAfter !== null) console.log(`More history: repeat with --after ${result.nextAfter}.`);
+      }
+      return;
+    }
+    if (values.file) {
+      const result = await request<GitBlob>(`${endpoint}/blob?${query}`); exact(result);
+      if (values.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`${id} · ${commit} · ${terminalText(path)} · ${result.objectId}`);
+        if (result.state === 'text') console.log(terminalText(result.content, true));
+        else console.log(`Source unavailable as text: ${result.state.replaceAll('_', ' ')} (${result.size === null ? 'no file size' : `${result.size} bytes`}).`);
+      }
+    } else {
+      const result = await request<GitTree>(`${endpoint}/tree?${query}`); exact(result);
+      if (values.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`${id} · ${commit} · ${terminalText(path || '/')}`);
+        for (const entry of result.entries) console.log(`${entry.mode}\t${entry.type}\t${entry.size ?? '-'}\t${terminalText(entry.name)}\t${entry.objectId}`);
+        if (!result.entries.length) console.log('Empty directory.');
+      }
+    }
+    return;
   }
   if (command === 'board') {
     if (args.length !== 1) throw new Error('Provide one project ID, exact name or alias.');

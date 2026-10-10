@@ -1,24 +1,30 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createApp } from '../server/app';
 import { createStore } from '../server/store';
 import { createAuth } from '../server/auth';
 import { authAccounts } from '../tests/auth-fixture';
+import { createGitFixture } from '../tests/git-fixture';
 
 const directory = mkdtempSync(join(tmpdir(), 'phabricator-e2e-'));
-const app = createApp({ databasePath: join(directory, 'workspace.sqlite'), port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+const gitFixture = await createGitFixture();
+const fixturePath = resolve('.data/e2e-repository-fixture.json');
+mkdirSync(resolve('.data'), { recursive: true });
+writeFileSync(fixturePath, JSON.stringify({ barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit }));
+const app = createApp({ databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
 const passwordStore = createStore({ path: join(directory, 'password-workspace.sqlite') });
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });
 for (const account of authAccounts) await provisioner.createAccount(account);
-const passwordApp = createApp({ store: passwordStore, authMode: 'password', seed: false, port: 4312, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+passwordStore.createRepository({ name: 'Fixture repository', description: 'Disposable committed source for browser verification.', remoteUrl: 'https://example.invalid/fixture.git', defaultBranch: 'main' });
+const passwordApp = createApp({ store: passwordStore, gitRepositories: { R1: gitFixture.barePath }, authMode: 'password', seed: false, port: 4312, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
 app.server.listen(4311, '127.0.0.1');
 passwordApp.server.listen(4312, '127.0.0.1');
 let closing = false;
 const close = () => {
   if (closing) return;
   closing = true;
-  void Promise.all([app.close(), passwordApp.close()]).finally(() => { passwordStore.close(); rmSync(directory, { recursive: true, force: true }); process.exit(); });
+  void Promise.all([app.close(), passwordApp.close()]).finally(async () => { passwordStore.close(); rmSync(directory, { recursive: true, force: true }); rmSync(fixturePath, { force: true }); await gitFixture.close(); process.exit(); });
 };
 process.on('SIGTERM', close);
 process.on('SIGINT', close);

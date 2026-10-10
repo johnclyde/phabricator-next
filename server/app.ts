@@ -5,6 +5,7 @@ import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { analyzeLocally } from '../shared/review.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import type { ActorAttribution, AppState, ReviewAnalysis, RevisionKind, SourceFile } from '../shared/types.ts';
+import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
 import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
@@ -14,6 +15,7 @@ import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
 import { PolicyStore } from './policy.ts';
 import { AccessLayer } from './access.ts';
+import { createGitObserver, type GitObserver } from './git.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -24,6 +26,8 @@ export interface AppOptions {
   distPath?: string;
   basePath?: string;
   authMode?: AuthMode;
+  gitRepositories?: Readonly<Record<string, string>>;
+  gitObserver?: GitObserver;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
@@ -108,6 +112,8 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
 }
 
 export function createApp(options: AppOptions = {}): App {
+  if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
+  const git = options.gitObserver ?? createGitObserver(options.gitRepositories ?? {});
   const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath });
   let auth: Auth;
@@ -120,6 +126,68 @@ export function createApp(options: AppOptions = {}): App {
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
+  const gitReads = new Set<AbortController>();
+
+  async function repositoryRead(req: IncomingMessage, res: ServerResponse, context: AuthContext, id: string, section: string | undefined, commitPath: string | undefined, url: URL): Promise<void> {
+    const authorize = () => {
+      auth.revalidate(context, 'read');
+      const access = new AccessLayer(store, auth, policies, context);
+      access.require(id);
+      return { repository: store.getRepository(id), access: access.describe(id) };
+    };
+    // Never hold a SQLite snapshot while waiting for a Git process or its queue.
+    store.read(authorize);
+    const allowed = section === 'tree' || section === 'blob' ? ['commit', 'path'] : section === 'history' ? ['commit', 'path', 'after', 'limit'] : [];
+    for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid repository read parameters.', 'GIT_INVALID_QUERY');
+    const commit = commitPath ?? url.searchParams.get('commit');
+    if (section && section !== 'refs' && (!commit || !isGitObjectId(commit))) throw new HttpError(400, 'Select a full lowercase commit object ID.', 'GIT_INVALID_QUERY');
+    const path = url.searchParams.get('path') ?? '';
+    if (!isGitPath(path) || (section === 'blob' && !path)) throw new HttpError(400, 'Select a valid Git tree path.', 'GIT_INVALID_QUERY');
+    const bounded = (name: string, fallback: number, min: number, max: number): number => {
+      const raw = url.searchParams.get(name);
+      if (raw === null) return fallback;
+      const value = Number(raw);
+      if (!/^(?:0|[1-9]\d*)$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new HttpError(400, `Invalid history ${name}.`, 'GIT_INVALID_QUERY');
+      return value;
+    };
+    const after = bounded('after', 0, 0, GIT_LIMITS.historyOffset);
+    const limit = bounded('limit', GIT_LIMITS.historyDefault, 1, GIT_LIMITS.historyPage);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => { if (!res.writableEnded) abort(); };
+    gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+    if (req.aborted || res.destroyed) abort();
+    let removeAbort: (() => void) | undefined;
+    try {
+      const canceled = new Promise<never>((_resolve, reject) => {
+        const fail = () => reject(new HttpError(499, 'Repository read was canceled.', 'GIT_ABORTED'));
+        controller.signal.addEventListener('abort', fail, { once: true });
+        removeAbort = () => controller.signal.removeEventListener('abort', fail);
+        if (controller.signal.aborted) fail();
+      });
+      const signal = controller.signal;
+      const result = await Promise.race([canceled, !section ? git.info(id, signal)
+        : section === 'refs' ? git.refs(id, signal)
+          : section === 'commits' ? git.commit(id, commit!, signal)
+            : section === 'tree' ? git.tree(id, commit!, path, signal)
+              : section === 'blob' ? git.blob(id, commit!, path, signal)
+                : git.history(id, { commit: commit!, path, after, limit }, signal)]);
+      store.read(() => {
+        const current = authorize();
+        if (!res.destroyed) send(res, 200, !section ? { ...current, observer: result, accessEpoch: policies.epoch() } : { ...result, accessEpoch: policies.epoch() });
+      });
+    } catch (error) {
+      // A failure is also potentially sensitive: revoked readers must not learn
+      // whether the repository, object, process or operator binding is available.
+      store.read(() => {
+        authorize();
+        const safe = error instanceof HttpError ? error : new HttpError(503, 'Repository contents are unavailable.', 'GIT_UNAVAILABLE');
+        if (!res.destroyed) send(res, safe.status, { error: safe.message, ...(safe.code ? { code: safe.code } : {}) });
+      });
+    } finally {
+      removeAbort?.(); gitReads.delete(controller); req.off('aborted', abort); res.off('close', close);
+    }
+  }
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
@@ -300,6 +368,8 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, bootstrap.session); return;
       }
       if (req.method === 'GET') {
+        const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|history)|\/(commits)\/([^/]+))?$/.exec(path);
+        if (repository) { await repositoryRead(req, res, context, repository[1]!, repository[2] ?? repository[3], repository[4], url); return; }
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
@@ -448,6 +518,7 @@ export function createApp(options: AppOptions = {}): App {
       const result = await mutate(req.method!, path, await body(req), key, context);
       send(res, result.status, result.body);
     })().catch((error: unknown) => {
+      if (res.destroyed) return;
       if (res.headersSent) { res.destroy(); return; }
       if (error instanceof HttpError) send(res, error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
       else { console.error('Request failed:', error instanceof Error ? error.message : 'unknown error'); send(res, 500, { error: 'An internal error occurred.' }); }
@@ -455,8 +526,10 @@ export function createApp(options: AppOptions = {}): App {
   });
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
-  return { server, store, auth, policies, close: async () => {
+  let closing: Promise<void> | undefined;
+  return { server, store, auth, policies, close: () => closing ??= (async () => {
+    for (const controller of gitReads) controller.abort();
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
     if (!options.store) store.close();
-  } };
+  })() };
 }

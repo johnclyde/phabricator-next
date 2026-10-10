@@ -11,6 +11,8 @@ import { createApp } from '../server/app.ts';
 import { createAuth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
 import type { WorkboardDetail, WorkboardReceipt } from '../shared/workboards.ts';
+import { createGitFixture } from './git-fixture.ts';
+import type { GitBlob, GitHistory, GitRefs, GitTree, RepositoryDetail } from '../shared/repositories.ts';
 
 const cli = fileURLToPath(new URL('../cli/index.ts', import.meta.url));
 const loader = import.meta.resolve('tsx');
@@ -24,6 +26,54 @@ function runCommand(cwd: string, args: string[], token?: string) {
   });
 }
 const run = (cwd: string, paths: string[]) => runCommand(cwd, ['check', '--kind', 'document', '--json', '--server', 'https://network-access-is-not-needed.invalid', ...paths]);
+
+test('CLI observes real Git snapshots through mounted read-only access without following moved refs', async () => {
+  const fixture = await createGitFixture();
+  const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/workspace/', provisioning: true });
+  const reader = await provision.createAccount({ username: 'git-reader', displayName: 'Git reader', password: 'test-only-repository-cli-password' });
+  const owner = await provision.createAccount({ username: 'git-owner', displayName: 'Git owner', password: 'test-only-repository-cli-owner-password' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/workspace/', gitRepositories: { R1: fixture.barePath } });
+  const repository = store.createRepository({ name: 'Observed source', remoteUrl: 'https://example.invalid/never-fetched.git', defaultBranch: 'main' });
+  const hidden = store.createRepository({ name: 'Hidden source', remoteUrl: 'https://example.invalid/hidden.git', defaultBranch: 'main' });
+  const hiddenPolicy = app.policies.policy(hidden.id, owner.id);
+  const ownerOnly = { kind: 'principals' as const, principalIds: [owner.id] };
+  app.policies.setPolicy(hidden.id, { expectedVersion: hiddenPolicy.version, spaceId: hiddenPolicy.spaceId, ...hiddenPolicy.rules, view: ownerOnly }, owner.id);
+  const token = app.auth.createToken(reader.id, { name: 'Read repositories', scopes: ['read'] });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
+  const command = (args: string[]) => runCommand(fixture.root, [...args, '--server', server], token.token);
+  const json = async <T>(args: string[]): Promise<T> => { const result = await command([...args, '--json']); assert.equal(result.code, 0, result.stderr); return JSON.parse(result.stdout) as T; };
+  try {
+    assert.deepEqual((await json<{ id: string }[]>(['repositories'])).map(item => item.id), [repository.id]);
+    assert.equal((await json<RepositoryDetail>(['show', repository.id])).observer.state, 'ready');
+    const refs = await json<GitRefs>(['refs', repository.id]);
+    assert.equal(refs.refs.find(ref => ref.name === 'refs/heads/main')?.commitId, fixture.head);
+    assert.equal(refs.refs.find(ref => ref.name === 'refs/tags/v2')?.commitId, fixture.head);
+    assert.equal(refs.refs.find(ref => ref.name === 'refs/tags/source-blob')?.commitId, null);
+    const tree = await json<GitTree>(['browse', repository.id, '--commit', fixture.head]);
+    assert.equal(tree.commitId, fixture.head); assert.equal(tree.entries.find(entry => entry.name === 'module')?.type, 'submodule');
+    const source = await json<GitBlob>(['browse', repository.id, '--commit', fixture.head, '--path', 'README.md', '--file']);
+    assert.equal(source.state, 'text'); if (source.state === 'text') assert.match(source.content, /After the change/);
+    const unicode = await json<GitBlob>(['browse', repository.id, '--commit', fixture.head, '--path', 'unicodé/研究.md', '--file']);
+    assert.equal(unicode.path, 'unicodé/研究.md'); assert.equal(unicode.state, 'text');
+    const binary = await json<GitBlob>(['browse', repository.id, '--commit', fixture.head, '--path', 'binary.dat', '--file']);
+    assert.equal(binary.state, 'binary'); assert.ok(!('content' in binary));
+    const first = await json<GitHistory>(['history', repository.id, '--commit', fixture.head, '--limit', '1']);
+    assert.equal(first.commits[0]?.id, fixture.head); assert.equal(first.nextAfter, 1);
+    const next = await json<GitHistory>(['history', repository.id, '--commit', fixture.head, '--limit', '1', '--after', '1']);
+    assert.notEqual(next.commits[0]?.id, fixture.head); assert.equal(next.commitId, fixture.head);
+    const advanced = await fixture.advanceMain('Later source with a terminal control: \u001b[31mred\u001b[0m\n');
+    assert.equal((await json<GitRefs>(['refs', repository.id])).refs.find(ref => ref.name === 'refs/heads/main')?.commitId, advanced);
+    assert.deepEqual(await json<GitBlob>(['browse', repository.id, '--commit', fixture.head, '--path', 'README.md', '--file']), source);
+    const displayed = await command(['browse', repository.id, '--commit', advanced, '--path', 'README.md', '--file']);
+    assert.equal(displayed.code, 0, displayed.stderr); assert.ok(!displayed.stdout.includes('\u001b')); assert.match(displayed.stdout, /\\u001b\[31m/);
+    for (const args of [['browse', repository.id, '--commit', 'main'], ['browse', repository.id, '--commit', fixture.head, '--path', '../outside'], ['history', repository.id, '--commit', fixture.head, '--after', '-1'], ['history', repository.id, '--commit', fixture.head, '--limit', '101']]) assert.equal((await command(args)).code, 1);
+    assert.equal((await command(['show', hidden.id])).code, 1);
+    app.auth.revokeToken(reader.id, token.record.id);
+    assert.equal((await command(['refs', repository.id])).code, 1);
+  } finally { await app.close(); store.close(); await fixture.close(); }
+});
 
 test('CLI checks regular Unicode source names offline and validates path limits', async () => {
   const root = await mkdtemp(join(tmpdir(), 'phab-cli-'));
