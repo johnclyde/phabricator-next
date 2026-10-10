@@ -88,7 +88,7 @@ export default function SessionGate({ children }: { children: ReactNode }) {
     const hide = () => { if (currentSession()?.state.mode === 'password') lockSession('Verify your session to reopen this workspace.'); };
     const unload = (event: BeforeUnloadEvent) => {
       const current = currentSession();
-      if (current?.state.mode === 'password' && createWorkspaceClient(current).draftRecords().length) { event.preventDefault(); event.returnValue = ''; }
+      if (current && (current.state.mode === 'password' ? createWorkspaceClient(current).draftRecords().length > 0 : createWorkspaceClient(current).submittedBulkMoves().length > 0)) { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('storage', storage); window.addEventListener('focus', resume);
     document.addEventListener('visibilitychange', resume); window.addEventListener('online', resume);

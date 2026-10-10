@@ -12,7 +12,7 @@ import type { ProjectChildPreview, ProjectKind, ProjectDetail, ProjectHistory, P
 import { createPassageAnchor } from '../shared/anchors.ts';
 import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
 import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from './workboards.ts';
-import type { TaskColumnMove, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
+import type { TaskColumnMove, WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardBulkMoveReceipt, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -207,7 +207,7 @@ export class Store {
       try { this.transaction(() => { initializeWorkboards(this.database); this.database.exec('PRAGMA user_version = 13'); }); }
       catch (error) { this.database.close(); throw error; }
     }
-    this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now) => this.writeTaskColumnMove(task, ids, move, attribution, now) });
+    this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
     this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id), changed: (project, created, attribution) => this.workboards!.projectChanged(project, created, attribution) });
   }
 
@@ -308,6 +308,8 @@ export class Store {
   workboardColumn(id: string, columnId: string): WorkboardColumn { return this.workboards!.column(id, columnId); }
   workboardImportPreview(targetId: string, sourceId: string): WorkboardImportPreview { return this.workboards!.importPreview(targetId, sourceId); }
   importWorkboardColumns(targetId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.importColumns(targetId, input, attribution); }
+  workboardBulkMovePreview(sourceId: string, query: WorkboardBulkMoveQuery, visibility?: WorkboardVisibility): WorkboardBulkMovePreview { return this.workboards!.bulkMovePreview(sourceId, query, visibility); }
+  bulkMoveWorkboardCards(sourceId: string, input: unknown, attribution?: ActorAttribution): WorkboardBulkMoveReceipt { return this.taskMutation(() => this.workboards!.bulkMoveCards(sourceId, input, attribution)); }
   configureWorkboard(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.configure(id, input, attribution); }
   createWorkboardColumn(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.createColumn(id, input, attribution); }
   updateWorkboardColumn(id: string, columnId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.updateColumn(id, columnId, input, attribution); }
@@ -444,7 +446,7 @@ export class Store {
       return this.taskDetail(id);
     });
   }
-  private writeTaskColumnMove(current: Task, projectIds: string[], column: TaskColumnMove, attribution: ActorAttribution | undefined, now: string): Task {
+  private writeTaskWorkboardChange(current: Task, projectIds: string[], column: TaskColumnMove | undefined, attribution: ActorAttribution | undefined, now: string, operationId: string): Task {
     const task = { ...this.advanceTask(current, now), projectIds };
     const wanted = new Set(projectIds); const old = new Set(current.projectIds);
     const removed = current.projectIds.filter(id => !wanted.has(id)); const added = projectIds.filter(id => !old.has(id));
@@ -452,10 +454,10 @@ export class Store {
     for (const id of removed) this.database.prepare('DELETE FROM task_projects WHERE task_id=? AND project_id=?').run(task.id,id);
     for (const id of added) this.database.prepare('INSERT INTO task_projects(task_id,project_id) VALUES(?,?)').run(task.id,id);
     this.save('task', task);
-    for (const id of removed) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'removed',operationId:column.operationId}},attribution,now);
-    for (const id of added) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'added',operationId:column.operationId}},attribution,now);
-    this.appendTaskTransaction(task,{kind:'column',column},attribution,now);
-    this.event(task.id,'column_changed','Moved task on a workboard.',attribution);
+    for (const id of removed) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'removed',operationId}},attribution,now);
+    for (const id of added) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'added',operationId}},attribution,now);
+    if (column) this.appendTaskTransaction(task,{kind:'column',column},attribution,now);
+    this.event(task.id,column?'column_changed':'projects_changed',column?'Moved task on a workboard.':'Updated project tags.',attribution);
     return task;
   }
   taskHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): TaskHistory {
@@ -463,7 +465,7 @@ export class Store {
     const cursor = before === undefined ? null : integer(before, 'before');
     const size = integer(limit, 'limit');
     if (size > 100) throw new HttpError(400, 'limit must be at most 100.');
-    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)) && (!item.project || visible(item.project.projectId)) && (!item.column || [item.column.projectId,...item.column.fromColumns.flatMap(column=>column.proxyProjectId?[column.proxyProjectId]:[]),...(item.column.toColumn.proxyProjectId?[item.column.toColumn.proxyProjectId]:[])].every(visible)));
+    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)) && (!item.project || visible(item.project.projectId)) && (!item.column || [item.column.projectId,...item.column.fromColumns.flatMap(column=>column.proxyProjectId?[column.proxyProjectId]:[]),...(item.column.toColumn.proxyProjectId?[item.column.toColumn.proxyProjectId]:[]),...(item.column.bulkSource?[item.column.bulkSource.projectId,...(item.column.bulkSource.column.proxyProjectId?[item.column.bulkSource.column.proxyProjectId]:[])]:[])].every(visible)));
     const pageStatement = this.database.prepare(cursor === null
       ? 'SELECT data FROM task_transactions WHERE task_id = ? ORDER BY sequence DESC'
       : 'SELECT data FROM task_transactions WHERE task_id = ? AND sequence < ? ORDER BY sequence DESC');

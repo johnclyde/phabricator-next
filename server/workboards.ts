@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { ActorAttribution, Project, Task } from '../shared/types.ts';
 import type { ProjectReference } from '../shared/projects.ts';
-import type { TaskColumnMove, Workboard, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardColumnPosition, WorkboardColumnSnapshot, WorkboardDetail, WorkboardFilter, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt, WorkboardTransaction } from '../shared/workboards.ts';
+import { WORKBOARD_BULK_MOVE_LIMIT, type TaskColumnMove, type Workboard, type WorkboardBulkMovePreview, type WorkboardBulkMoveQuery, type WorkboardBulkMoveReceipt, type WorkboardCardPage, type WorkboardCardsQuery, type WorkboardColumn, type WorkboardColumnPosition, type WorkboardColumnSnapshot, type WorkboardDetail, type WorkboardFilter, type WorkboardHistory, type WorkboardImportPreview, type WorkboardQuery, type WorkboardReceipt, type WorkboardTransaction } from '../shared/workboards.ts';
 import { ancestorIds, children, descendantIds, hierarchy } from './project-graph.ts';
 import { choice, HttpError, integer, object, string } from './validation.ts';
 
@@ -13,7 +13,7 @@ export interface WorkboardVisibility {
 interface Options {
   project: (id: string) => Project; task: (id: string) => Task; nextColumnId: () => string;
   normalizeTags: (ids: string[]) => string[];
-  moveTask: (task: Task, projectIds: string[], move: TaskColumnMove, attribution: ActorAttribution | undefined, now: string) => Task;
+  moveTask: (task: Task, projectIds: string[], move: TaskColumnMove | undefined, attribution: ActorAttribution | undefined, now: string, operationId: string) => Task;
 }
 type ColumnRow = { id: string; project_id: string; kind: 'normal' | 'proxy'; proxy_project_id: string | null; is_default: number; name: string; hidden: number; point_limit: number | null; sequence: number };
 type LayoutCard = { task: Task; sequence: number | null };
@@ -245,12 +245,112 @@ export class WorkboardStore {
   reorderColumn(id:string,columnId:string,input:unknown,attribution?:ActorAttribution):WorkboardReceipt {
     return this.mutation(()=>{const data=object(input,['expectedBoardVersion','position']);this.check(id,data.expectedBoardVersion);const column=this.column(id,columnId);if(column.kind!=='normal')throw new HttpError(400,'Proxy columns have a fixed order.');const position=this.position(data.position,'column');const anchor=position.before??position.after;if(anchor&&this.column(id,anchor).kind!=='normal')throw new HttpError(400,'Choose a normal column as the relative position.');const columns=this.rows(id).filter(row=>row.kind==='normal').map(row=>row.id);const wanted=this.insertAt(columns,columnId,position);if(wanted.every((value,index)=>value===columns[index]))return this.receipt(id,{columnId});wanted.forEach((value,index)=>this.database.prepare('UPDATE workboard_columns SET sequence=? WHERE id=?').run(index,value));this.touch(id);this.append(id,{kind:'column_reorder',operationId:randomUUID(),column:snapshot(column),position:data.position as WorkboardColumnPosition,relatedProjectIds:[id],relatedTaskIds:[]},attribution);return this.receipt(id,{columnId});});
   }
+  private bulkColumns(sourceId: string, sourceColumnId: string, destinationId: string, destinationColumnId: string): { source: WorkboardColumn; destination: WorkboardColumn } {
+    const source = this.column(sourceId, sourceColumnId);
+    const destination = this.column(destinationId, destinationColumnId);
+    // The explicit source may be hidden or on a disabled board. Ordinary
+    // subproject proxies remain outside the supported parent-board layout.
+    if (source.proxyProjectId && hierarchy(this.database, source.proxyProjectId)?.kind !== 'milestone') throw new HttpError(400, 'Subproject tasks live on their own workboards.');
+    if (!this.board(destinationId).enabled) throw new HttpError(409, 'Enable the destination workboard before moving tasks.');
+    if (destination.kind !== 'normal') throw new HttpError(400, 'Choose a normal destination column.');
+    if (destination.hidden) throw new HttpError(409, 'Show the destination column before moving tasks.');
+    if (source.id === destination.id) throw new HttpError(400, 'Choose a different destination column.');
+    return { source, destination };
+  }
+  bulkMovePreview(sourceId: string, query: WorkboardBulkMoveQuery, visibility: WorkboardVisibility = unrestricted): WorkboardBulkMovePreview {
+    const data = object(query, ['sourceColumnId', 'destinationProjectId', 'destinationColumnId', 'status', 'ownerId', 'showHidden']);
+    const sourceColumnId = string(data.sourceColumnId, 'sourceColumnId', 50);
+    const destinationId = string(data.destinationProjectId, 'destinationProjectId', 50);
+    const destinationColumnId = string(data.destinationColumnId, 'destinationColumnId', 50);
+    const { source, destination } = this.bulkColumns(sourceId, sourceColumnId, destinationId, destinationColumnId);
+    const { filter } = this.query({ status: data.status, ownerId: data.ownerId, showHidden: data.showHidden } as WorkboardQuery);
+    const sourceLayout = this.layout(sourceId);
+    const destinationLayout = sourceId === destinationId ? sourceLayout : this.layout(destinationId);
+    const alreadyThere = new Set((destinationLayout.get(destinationColumnId) ?? []).map(card => card.task.id));
+    const selected = this.visibleCards(sourceLayout.get(sourceColumnId) ?? [], filter, visibility).filter(({ task }) => visibility.canEditTask(task.id));
+    if (selected.length > WORKBOARD_BULK_MOVE_LIMIT) throw new HttpError(409, `This selection exceeds ${WORKBOARD_BULK_MOVE_LIMIT} movable tasks. Narrow the task filter before previewing a bulk move.`);
+    return {
+      projectId: sourceId, sourceProject: reference(this.options.project(sourceId)), sourceColumn: source,
+      destinationProject: reference(this.options.project(destinationId)), destinationColumn: destination,
+      expectedBoardVersion: this.board(sourceId).version, expectedDestinationBoardVersion: this.board(destinationId).version,
+      filter, tasks: selected.map(({ task }) => ({ id: task.id, title: task.title, version: task.version, alreadyInDestination: alreadyThere.has(task.id) })),
+    };
+  }
+  bulkMoveCards(sourceId: string, input: unknown, attribution?: ActorAttribution): WorkboardBulkMoveReceipt {
+    return this.mutation(() => {
+      const data = object(input, ['sourceColumnId', 'destinationProjectId', 'destinationColumnId', 'expectedBoardVersion', 'expectedDestinationBoardVersion', 'tasks']);
+      const sourceColumnId = string(data.sourceColumnId, 'sourceColumnId', 50);
+      const destinationId = string(data.destinationProjectId, 'destinationProjectId', 50);
+      const destinationColumnId = string(data.destinationColumnId, 'destinationColumnId', 50);
+      this.check(sourceId, data.expectedBoardVersion, false);
+      this.check(destinationId, data.expectedDestinationBoardVersion);
+      const { source, destination } = this.bulkColumns(sourceId, sourceColumnId, destinationId, destinationColumnId);
+      if (!Array.isArray(data.tasks) || !data.tasks.length || data.tasks.length > WORKBOARD_BULK_MOVE_LIMIT) throw new HttpError(400, `Provide between 1 and ${WORKBOARD_BULK_MOVE_LIMIT} reviewed tasks.`);
+      const seen = new Set<string>();
+      const pins = data.tasks.map(value => {
+        const pin = object(value, ['taskId', 'expectedTaskVersion']);
+        const taskId = string(pin.taskId, 'taskId', 50);
+        if (!/^T[1-9]\d*$/.test(taskId)) throw new HttpError(400, 'Choose a valid task.');
+        if (seen.has(taskId)) throw new HttpError(400, 'Choose each task only once.');
+        seen.add(taskId);
+        return { taskId, version: integer(pin.expectedTaskVersion, 'expectedTaskVersion') };
+      });
+      const sourceLayout = this.layout(sourceId);
+      const destinationLayout = sourceId === destinationId ? sourceLayout : this.layout(destinationId);
+      const sourceTasks = new Set((sourceLayout.get(sourceColumnId) ?? []).map(card => card.task.id));
+      const destinationCards = destinationLayout.get(destinationColumnId) ?? [];
+      const destinationTasks = new Set(destinationCards.map(card => card.task.id));
+      const destinationColumns = this.columns(destinationId);
+      // Read and validate the complete selection before any task or position
+      // changes. Never silently skip, add, or refresh a submitted task pin.
+      const plans = pins.map(pin => {
+        const current = this.options.task(pin.taskId);
+        if (pin.version !== current.version) throw new HttpError(409, 'A selected task changed. Reload before moving these tasks.');
+        if (!sourceTasks.has(current.id)) throw new HttpError(409, 'A selected task is no longer in the source column. Load a new preview.');
+        const remaining = current.projectIds.filter(id => id !== destinationId && (sourceId === destinationId || id !== sourceId));
+        const tags = this.options.normalizeTags([...remaining, destinationId]);
+        const placementChanged = !destinationTasks.has(current.id);
+        const tagsChanged = tags.length !== current.projectIds.length || tags.some((id, index) => id !== current.projectIds[index]);
+        const from = destinationColumns.filter(column => (destinationLayout.get(column.id) ?? []).some(card => card.task.id === current.id));
+        return { current, tags, placementChanged, tagsChanged, from };
+      });
+      const operationId = randomUUID(); const now = new Date().toISOString();
+      let order = destinationCards.map(card => card.task.id);
+      let changedPositions = false;
+      for (const plan of plans) {
+        if (!plan.placementChanged && !plan.tagsChanged) continue;
+        const move: TaskColumnMove | undefined = plan.placementChanged ? {
+          projectId: destinationId, fromColumns: plan.from.map(snapshot), toColumn: snapshot(destination), operationId,
+          bulkSource: { projectId: sourceId, column: snapshot(source) },
+        } : undefined;
+        const task = this.options.moveTask(plan.current, plan.tags, move, attribution, now, operationId);
+        if (plan.placementChanged) {
+          // Upstream bulk moves prepend each newly moved card in the reviewed
+          // source order. Cards already at the destination retain their order.
+          order = [task.id, ...order.filter(id => id !== task.id)];
+          this.database.prepare('DELETE FROM workboard_positions WHERE project_id=? AND task_id=?').run(destinationId, task.id);
+          changedPositions = true;
+        }
+        this.touch(sourceId); this.touch(destinationId);
+        const relatedProjectIds = [...new Set([sourceId, destinationId, ...(source.proxyProjectId ? [source.proxyProjectId] : []), ...plan.from.flatMap(column => column.proxyProjectId ? [column.proxyProjectId] : [])])];
+        const event: Omit<WorkboardTransaction, 'id' | 'projectId' | 'sequence' | 'boardVersion' | 'actor' | 'createdAt' | 'attribution'> = {
+          kind: 'bulk_move', operationId, taskId: task.id, taskVersion: task.version,
+          bulkMove: { sourceProjectId: sourceId, sourceColumn: snapshot(source), destinationProjectId: destinationId, destinationColumn: snapshot(destination), placementChanged: plan.placementChanged },
+          ...(move ? { move } : {}), relatedProjectIds, relatedTaskIds: [task.id],
+        };
+        this.append(sourceId, event, attribution);
+        if (sourceId !== destinationId) this.append(destinationId, event, attribution);
+      }
+      if (changedPositions) order.forEach((taskId, index) => this.database.prepare('INSERT INTO workboard_positions(project_id,column_id,task_id,sequence) VALUES(?,?,?,?) ON CONFLICT(project_id,column_id,task_id) DO UPDATE SET sequence=excluded.sequence').run(destinationId, destinationColumnId, taskId, index));
+      return { ...this.receipt(sourceId), destinationProjectId: destinationId, destinationBoardVersion: this.board(destinationId).version };
+    });
+  }
   moveCard(id:string,input:unknown,attribution?:ActorAttribution):WorkboardReceipt {
     return this.mutation(()=>{const data=object(input,['taskId','columnId','expectedBoardVersion','expectedTaskVersion','position']);this.check(id,data.expectedBoardVersion);const taskId=string(data.taskId,'taskId',50);const columnId=string(data.columnId,'columnId',50);const current=this.options.task(taskId);if(integer(data.expectedTaskVersion,'expectedTaskVersion')!==current.version)throw new HttpError(409,'This task changed. Reload before moving it.');const column=this.column(id,columnId);if(column.hidden)throw new HttpError(409,'Show this column before moving a card into it.');if(column.proxyProjectId&&hierarchy(this.database,column.proxyProjectId)?.kind!=='milestone')throw new HttpError(400,'Subproject tasks live on their own workboards.');const position=this.position(data.position,'task');const layout=this.layout(id);const from=this.columns(id).filter(candidate=>(layout.get(candidate.id)??[]).some(card=>card.task.id===taskId));const cards=layout.get(columnId)??[];const wanted=this.insertAt(cards.map(card=>card.task.id),taskId,position);
       const tag=column.proxyProjectId??id;const inherited=column.proxyProjectId&&current.projectIds.some(projectId=>projectId===tag||ancestorIds(this.database,projectId).includes(tag));const tags=inherited?current.projectIds:this.options.normalizeTags([...current.projectIds.filter(projectId=>projectId!==tag),tag]);
       const proxies=new Map(this.columns(id).filter(candidate=>candidate.proxyProjectId).map(candidate=>[candidate.proxyProjectId!,candidate.id]));let effectiveProxy:string|undefined;for(const projectId of tags){for(const candidate of [projectId,...ancestorIds(this.database,projectId)]){effectiveProxy=proxies.get(candidate);if(effectiveProxy)break;}if(effectiveProxy)break;}if(effectiveProxy&&effectiveProxy!==columnId)throw new HttpError(409,'This combination of project tags cannot occupy the selected milestone column. Review the task’s project tags first.');
       const unchangedTags=tags.length===current.projectIds.length&&tags.every((tag,index)=>tag===current.projectIds[index]);const sameOrder=wanted.length===cards.length&&wanted.every((value,index)=>value===cards[index]?.task.id);if(from.length===1&&from[0]!.id===columnId&&sameOrder&&unchangedTags)return this.receipt(id,{columnId,taskId,taskVersion:current.version});
-      const operationId=randomUUID();const move:TaskColumnMove={projectId:id,fromColumns:from.map(snapshot),toColumn:snapshot(column),operationId};const task=this.options.moveTask(current,tags,move,attribution,new Date().toISOString());
+      const operationId=randomUUID();const move:TaskColumnMove={projectId:id,fromColumns:from.map(snapshot),toColumn:snapshot(column),operationId};const task=this.options.moveTask(current,tags,move,attribution,new Date().toISOString(),operationId);
       this.database.prepare('DELETE FROM workboard_positions WHERE project_id=? AND task_id=?').run(id,taskId);
       // Persist the complete raw order, including invisible neighbors, atomically.
       wanted.forEach((value,index)=>this.database.prepare('INSERT INTO workboard_positions(project_id,column_id,task_id,sequence) VALUES(?,?,?,?) ON CONFLICT(project_id,column_id,task_id) DO UPDATE SET sequence=excluded.sequence').run(id,columnId,value,index));

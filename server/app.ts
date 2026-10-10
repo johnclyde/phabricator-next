@@ -194,11 +194,12 @@ export function createApp(options: AppOptions = {}): App {
           return { status: 200, body: updated };
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
-        const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(columns|moves|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
+        const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(columns|moves|bulk-moves|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
         if (workboard) {
           const id = workboard[1]!; const section = workboard[2]; const columnId = workboard[3];
           if (method === 'PUT' && !section) return { status: 200, body: store.configureWorkboard(id, input, attribution) };
           if (method === 'POST' && section === 'moves' && !columnId) return { status: 200, body: store.moveWorkboardCard(id, input, attribution) };
+          if (method === 'POST' && section === 'bulk-moves' && !columnId) return { status: 200, body: store.bulkMoveWorkboardCards(id, input, attribution) };
           if (method === 'POST' && section === 'import' && !columnId) return { status: 200, body: store.importWorkboardColumns(id, input, attribution) };
           if (section === 'columns') {
             if (method === 'POST' && !columnId) return { status: 201, body: store.createWorkboardColumn(id, input, attribution) };
@@ -303,6 +304,20 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const bulkPreview = /^\/api\/projects\/(PROJ\d+)\/workboard\/bulk-move-preview$/.exec(path);
+          if (bulkPreview) {
+            const id = bulkPreview[1]!; access.require(id);
+            const required = ['sourceColumnId', 'destinationProjectId', 'destinationColumnId'];
+            const allowed = [...required, 'status', 'ownerId', 'showHidden'];
+            if (required.some(name => url.searchParams.getAll(name).length !== 1) || [...url.searchParams.keys()].some(name => !allowed.includes(name) || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Bulk preview requires one source column, destination project and destination column, with only supported board filters.');
+            const status = url.searchParams.get('status'); const ownerId = url.searchParams.get('ownerId'); const showHidden = url.searchParams.get('showHidden');
+            if (showHidden !== null && showHidden !== 'true' && showHidden !== 'false') throw new HttpError(400, 'showHidden must be true or false.');
+            send(res, 200, access.workboardBulkMovePreview(id, {
+              sourceColumnId: url.searchParams.get('sourceColumnId')!, destinationProjectId: url.searchParams.get('destinationProjectId')!, destinationColumnId: url.searchParams.get('destinationColumnId')!,
+              ...(status === null ? {} : { status: choice(status, 'status', ['open', 'all'] as const) }),
+              ...(ownerId === null ? {} : { ownerId: ownerId === 'null' ? null : ownerId }), ...(showHidden === null ? {} : { showHidden: showHidden === 'true' }),
+            })); return;
+          }
           const importPreview = /^\/api\/projects\/(PROJ\d+)\/workboard\/import-preview$/.exec(path);
           if (importPreview) {
             access.require(importPreview[1]!, 'edit');

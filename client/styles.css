@@ -446,3 +446,13 @@
 .workboard-import-columns li { padding: 10px 4px; border-bottom: 1px solid #d8e2ea; overflow-wrap: anywhere; }
 .workboard-import-columns li span { display: block; color: #647787; font-size: 12px; margin-top: 5px; }
 @media (max-width: 700px) { .workboard-import .panel-heading { flex-wrap: wrap; }.workboard-import .button { min-height: 44px; } }
+.workboard-bulk { margin: 16px 0; scroll-margin-top: 112px; }
+.workboard-bulk-preview { margin: 16px 0; padding: 16px; background: #f0f6fa; border: 1px solid #c5d8e6; }
+.workboard-bulk-preview ol { padding-left: 24px; }
+.workboard-bulk-preview li { padding: 10px 4px; border-bottom: 1px solid #d8e2ea; overflow-wrap: anywhere; }
+.workboard-bulk-preview li span { display: block; margin-top: 5px; font-size: 12px; color: #647787; }
+.workboard-bulk-preview h3, .workboard-bulk-preview p { overflow-wrap: anywhere; }
+@media (max-width: 700px) { .workboard-bulk .panel-heading { flex-wrap: wrap; }.workboard-bulk-preview { padding: 12px; }.workboard-bulk-preview li a { display: flex; align-items: center; min-height: 44px; } }
+.workboard-bulk-recovery { margin: 16px 0; }
+.workboard-bulk-recovery article { padding: 10px 0; border-top: 1px solid #dce3e9; }
+@media (max-width: 700px) { .workboard-bulk-recovery .project-actions { display: flex; flex-wrap: wrap; gap: 8px; }.workboard-bulk-recovery .button { min-height: 44px; flex: 1 1 140px; white-space: normal; justify-content: center; } }

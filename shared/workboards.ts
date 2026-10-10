@@ -43,19 +43,44 @@ export interface WorkboardImportPreview {
 export interface ImportWorkboardColumnsInput {
   sourceProjectId: string; expectedBoardVersion: number; expectedSourceBoardVersion: number;
 }
+export const WORKBOARD_BULK_MOVE_LIMIT = 100;
+export interface WorkboardBulkMoveQuery extends Omit<WorkboardQuery, 'limit'> {
+  sourceColumnId: string; destinationProjectId: string; destinationColumnId: string;
+}
+export type WorkboardBulkMoveTask = Pick<Task, 'id' | 'title' | 'version'> & { alreadyInDestination: boolean };
+export interface WorkboardBulkMovePreview {
+  projectId: string; sourceProject: ProjectReference; sourceColumn: WorkboardColumn;
+  destinationProject: ProjectReference; destinationColumn: WorkboardColumn;
+  expectedBoardVersion: number; expectedDestinationBoardVersion: number;
+  filter: WorkboardFilter; tasks: WorkboardBulkMoveTask[]; accessEpoch?: number;
+}
+export interface BulkMoveWorkboardCardsInput {
+  sourceColumnId: string; destinationProjectId: string; destinationColumnId: string;
+  expectedBoardVersion: number; expectedDestinationBoardVersion: number;
+  /** Exact reviewed order; later reads never expand this selection. */
+  tasks: { taskId: string; expectedTaskVersion: number }[];
+}
+export interface WorkboardBulkMoveReceipt extends WorkboardReceipt {
+  destinationProjectId: string; destinationBoardVersion: number;
+}
 export interface TaskColumnMove {
   projectId: string; fromColumns: WorkboardColumnSnapshot[]; toColumn: WorkboardColumnSnapshot; operationId: string;
+  bulkSource?: { projectId: string; column: WorkboardColumnSnapshot };
 }
 export interface WorkboardFieldChange {
   field: 'enabled' | 'name' | 'hidden' | 'pointLimit'; oldValue: string | boolean | number | null; newValue: string | boolean | number | null;
 }
 export interface WorkboardTransaction {
   id: string; projectId: string; sequence: number; boardVersion: number;
-  kind: 'enable' | 'disable' | 'column_create' | 'column_edit' | 'column_reorder' | 'card_move' | 'proxy_create' | 'column_import';
+  kind: 'enable' | 'disable' | 'column_create' | 'column_edit' | 'column_reorder' | 'card_move' | 'proxy_create' | 'column_import' | 'bulk_move';
   actor: string | null; createdAt: string; attribution?: ActorAttribution; operationId: string;
   column?: WorkboardColumnSnapshot; changes?: WorkboardFieldChange[];
   columnConfiguration?: Pick<WorkboardColumn, 'isDefault' | 'pointLimit'>;
   importedFrom?: { projectId: string; boardVersion: number; columnCount: number; columnId?: string };
+  bulkMove?: {
+    sourceProjectId: string; sourceColumn: WorkboardColumnSnapshot;
+    destinationProjectId: string; destinationColumn: WorkboardColumnSnapshot; placementChanged: boolean;
+  };
   position?: WorkboardColumnPosition | WorkboardCardPosition;
   taskId?: string; taskVersion?: number; move?: TaskColumnMove;
   /** All related policy objects must remain visible before an event is shown. */

@@ -11,7 +11,7 @@ import { onSessionLocked } from './session';
 import { discussionSummary, parseCommand, projectMatches, type WorkspaceView } from './voice';
 import { applicationPath } from './mount';
 import Wiki from './Wiki';
-import WorkboardPage from './Workboard';
+import WorkboardPage, { SubmittedBulkMoves } from './Workboard';
 import TaskPage from './Tasks';
 import { visibleProjectTreeIds } from './project-tree';
 import ProjectPage, { ProjectTag, ProjectAppearance } from './Projects';
@@ -184,6 +184,7 @@ export default function App() {
       {route.view === 'outbox' && <Panel title="Pending changes" icon={UploadCloud} extra={<button className="button" disabled={replaying || !outbox.length} onClick={() => void replay()}><RefreshCw size={14}/>{replaying ? 'Synchronizing…' : 'Retry sync'}</button>}><div className="info-strip">{durable ? 'Changes replay in order using stable request IDs. Conflicts stop the queue so later edits cannot overwrite them. Reviews and acceptance are never queued.' : 'Protected workspaces do not queue offline submissions. Unsaved drafts stay in this tab only; reconnect to save or export a copy.'}</div>{outbox.map(item => <div className="outbox-item" key={item.id}><div><h3>{item.label}</h3><p>{item.path} · {time(item.createdAt)}</p>{item.error && <p className="error-text">Needs attention: {item.error}</p>}<details><summary>View saved change</summary><pre>{JSON.stringify(item.body, null, 2)}</pre></details></div><button className="button" onClick={() => { const blob = new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }); download(blob, `offline-change-${item.id}.json`); }}>Export</button><button className="button danger" onClick={() => { if (window.confirm('Discard this saved change? Export it first if you want to preserve the draft.')) void saveOutbox(current => current.filter(entry => entry.id !== item.id)).catch(err => setError(err instanceof Error ? err.message : 'Could not discard change')); }}>Discard</button></div>)}{!outbox.length && <Empty icon={CheckCircle2}>Everything is synchronized.<small>{durable ? 'Offline drafts will appear here when you save them.' : 'No content is persisted in this browser for this protected session.'}</small></Empty>}</Panel>}
       </>}
       <QuarantinedDrafts/>
+      <SubmittedBulkMoves state={state}/>
       <footer className="page-footer"><span>Phabricator Next</span><span>Code. Research. Together.</span><span>{durable ? 'Local single-user workspace' : 'Authenticated shared workspace'}</span></footer>
     </main>
     <nav className="mobile-tabs" aria-label="Quick navigation">{APPS.filter(item => ['home', 'papers', 'drafts', 'tasks'].includes(item.id)).map(({ id, label, icon: Icon }) => <a href={`#${id}`} key={id} className={route.view === id ? 'selected' : ''}><Icon size={20}/><span>{id === 'reviews' ? 'Reviews' : id === 'tasks' ? 'Tasks' : label}</span></a>)}<button onClick={() => setNavOpen(true)}><Menu size={20}/><span>More</span></button></nav>

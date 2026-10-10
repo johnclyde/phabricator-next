@@ -1,9 +1,11 @@
+import type { BulkMoveWorkboardCardsInput } from '../shared/workboards';
 import type { ObjectAccess } from '../shared/policy';
 import { applicationPath, storageKey } from './mount';
 import { assertSession, currentSession, lockSession, RequestError, sessionIsActive, type WorkspaceSession, type QuarantinedDraft } from './session';
 export { RequestError } from './session';
 
 export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
+export interface SubmittedBulkMove { projectId: string; sourceProxyId: string | null; requestId: string; input: BulkMoveWorkboardCardsInput }
 export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
 export function canQueue(path: string, method: MutationMethod, body?: unknown): boolean {
   if (path === '/api/projects' && method === 'POST') {
@@ -319,7 +321,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     else commit();
   };
   let initialTaskAccessVerification: Promise<unknown> | null = null;
-  const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }): Promise<T> => {
+  const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }, authorityIds: readonly string[] = []): Promise<T> => {
     assertSession(session);
     syncDurableQuarantine();
     if (options?.queued) { holdLegacyTaskUpdates(); if (!canQueue(path, options.method, options.body)) throw new RequestError('This operation requires an explicit online save and cannot submit from the outbox.', 403, 'ACTION_FORBIDDEN'); }
@@ -346,9 +348,16 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const boardMutation = Boolean(options && /^\/api\/projects\/PROJ\d+\/workboard(?:\/|$)/.test(path));
     const boardMove = boardMutation && path.endsWith('/moves') && options?.body && typeof options.body === 'object' ? options.body as { taskId?: unknown; position?: { beforeTaskId?: unknown; afterTaskId?: unknown } } : null;
     const importSource = /^\/api\/projects\/PROJ\d+\/workboard\/import-preview\?/.test(path) && !options ? new URLSearchParams(path.split('?')[1]).get('sourceProjectId') : boardMutation && path.endsWith('/import') && options?.body && typeof options.body === 'object' && 'sourceProjectId' in options.body && typeof options.body.sourceProjectId === 'string' ? options.body.sourceProjectId : null;
-    const relatedIds = importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [];
+    const bulkMove = boardMutation && path.endsWith('/bulk-moves') && options?.body && typeof options.body === 'object' ? options.body as { destinationProjectId?: unknown; tasks?: { taskId?: unknown }[] } : null;
+    const bulkDestination = /^\/api\/projects\/PROJ\d+\/workboard\/bulk-move-preview\?/.test(path) && !options ? new URLSearchParams(path.split('?')[1]).get('destinationProjectId') : bulkMove && typeof bulkMove.destinationProjectId === 'string' ? bulkMove.destinationProjectId : null;
+    const bulkTaskIds = bulkMove && Array.isArray(bulkMove.tasks) ? bulkMove.tasks.flatMap(task => task && typeof task.taskId === 'string' ? [task.taskId] : []) : [];
+    const relatedIds = [...new Set([...authorityIds, ...(bulkDestination ? [bulkDestination, ...bulkTaskIds] : importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [])])];
     const relatedGenerations = relatedIds.map(id => ({ id, generation: session.objectGenerations.get(id) || 0 }));
-    const referenceUnavailable = () => new RequestError(importSource ? 'The source project is no longer available. Its import preview has been removed.' : 'A selected card is no longer available. Review the move before saving.', 404, importSource ? 'PROJECT_REFERENCE_UNAVAILABLE' : 'TASK_REFERENCE_UNAVAILABLE');
+    const referenceUnavailable = () => {
+      const changed = (id: string) => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)) || relatedGenerations.some(item => item.id === id && item.generation !== (session.objectGenerations.get(id) || 0));
+      const code = authorityIds.some(changed) ? 'COLUMN_UNAVAILABLE' : bulkTaskIds.some(changed) ? 'TASK_REFERENCE_UNAVAILABLE' : (bulkDestination || importSource) ? 'PROJECT_REFERENCE_UNAVAILABLE' : 'TASK_REFERENCE_UNAVAILABLE';
+      return new RequestError(bulkDestination ? 'A selected column, project or task is no longer available. Review a new bulk move preview.' : importSource ? 'The source project is no longer available. Its import preview has been removed.' : 'A selected card is no longer available. Review the move before saving.', 404, code);
+    };
     if (relatedIds.some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) throw referenceUnavailable();
     const ownershipMutation = options?.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && options.body && typeof options.body === 'object' && 'ownerId' in options.body;
     const projectMutation = Boolean(childParent) || Boolean(options && /^\/api\/projects\/PROJ\d+(?:\/(membership|members|watchers|silence))?$/.test(path));
@@ -358,7 +367,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const subscription = /^\/api\/tasks\/T\d+\/subscriptions$/.test(path) && options?.method === 'POST' ? options.body as { principalId?: unknown; action?: unknown } | null : null;
     const selfId = session.state.account?.id || `local:${session.state.workspaceId}`;
     const projectSelfOperation = projectMutation && (/\/(membership|silence)$/.test(path) || (path.endsWith('/watchers') && options?.body && typeof options.body === 'object' && 'principalId' in options.body && options.body.principalId === selfId));
-    const mutationAllowed = capabilities && (boardMove ? typeof boardMove.taskId === 'string' && session.objectCapabilities.get(boardMove.taskId)?.edit === true : projectSelfOperation ? true : subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
+    const mutationAllowed = capabilities && (bulkMove ? bulkTaskIds.length > 0 && bulkTaskIds.length === bulkMove.tasks?.length && bulkTaskIds.every(id => session.objectCapabilities.get(id)?.edit === true) : boardMove ? typeof boardMove.taskId === 'string' && session.objectCapabilities.get(boardMove.taskId)?.edit === true : projectSelfOperation ? true : subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
     if (options && capabilities && !mutationAllowed) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
@@ -383,13 +392,14 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       assertSession(session);
       if (response.status === 401) { lockSession('Your session ended or changed in another tab. Sign in again.'); throw new RequestError('Your session ended. Sign in again.', 401); }
       const data: unknown = await response.json();
+      if (response.ok && bulkMove && !(data && typeof data === 'object' && 'projectId' in data && data.projectId === objectId && 'saved' in data && data.saved === true && 'refreshRequired' in data && data.refreshRequired === true && 'boardVersion' in data && Number.isSafeInteger(data.boardVersion) && Number(data.boardVersion) > 0 && 'destinationProjectId' in data && data.destinationProjectId === bulkDestination && 'destinationBoardVersion' in data && Number.isSafeInteger(data.destinationBoardVersion) && Number(data.destinationBoardVersion) > 0)) throw new RequestError('The server returned an unrecognized move receipt. Keep the submitted request and retry it exactly to confirm the outcome.', 502, 'INVALID_RECEIPT');
       if (response.ok && boardMutation && data && typeof data === 'object' && 'projectId' in data && data.projectId === objectId && 'saved' in data && data.saved === true && 'refreshRequired' in data && data.refreshRequired === true && 'boardVersion' in data && Number.isSafeInteger(data.boardVersion) && Number(data.boardVersion) >= 0) {
         assertSession(session);
         if ('accessEpoch' in data && Number.isSafeInteger(data.accessEpoch) && Number(data.accessEpoch) >= 0) session.accessEpoch = Math.max(session.accessEpoch, Number(data.accessEpoch));
         // A card move may change tags and task versions without a policy change.
         // Never leave an older task, project or board snapshot available offline.
         invalidateTaskSnapshots();
-        return { projectId: objectId, saved: true, refreshRequired: true, boardVersion: data.boardVersion, accessEpoch: session.accessEpoch } as T;
+        return { projectId: objectId, saved: true, refreshRequired: true, boardVersion: data.boardVersion, ...(bulkMove && 'destinationProjectId' in data && data.destinationProjectId === bulkDestination && 'destinationBoardVersion' in data && Number.isSafeInteger(data.destinationBoardVersion) && Number(data.destinationBoardVersion) >= 0 ? { destinationProjectId: data.destinationProjectId, destinationBoardVersion: data.destinationBoardVersion } : {}), accessEpoch: session.accessEpoch } as T;
       }
       // A committed reassignment may remove the caller's view. This content-free receipt
       // remains a success even when a concurrent refresh already observed that loss.
@@ -407,7 +417,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (!response.ok) {
         const code = typeof data === 'object' && data !== null && 'code' in data ? String(data.code) : undefined;
         if (objectId && code === 'OBJECT_UNAVAILABLE') invalidateObjects([objectId]);
-        if (importSource && code === 'PROJECT_REFERENCE_UNAVAILABLE') invalidateObjects([importSource]);
+        if ((importSource || bulkDestination) && code === 'PROJECT_REFERENCE_UNAVAILABLE') invalidateObjects([importSource || bulkDestination!]);
         throw new RequestError(typeof data === 'object' && data !== null && 'error' in data ? String(data.error) : `Request failed (${response.status})`, response.status, code);
       }
       if (typeof data === 'object' && data !== null && 'accessEpoch' in data && typeof data.accessEpoch === 'number') {
@@ -432,16 +442,37 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (typeof navigator !== 'undefined' && navigator.locks) return navigator.locks.request(contentKey('outbox-write'), commit);
     return commit();
   };
+  const submittedBulkMoves = (): SubmittedBulkMove[] => {
+    if (!sessionIsActive(session)) return [];
+    return [...session.memory].filter(([key]) => key.startsWith('submitted-bulk:')).map(([, value]) => JSON.parse(value) as SubmittedBulkMove);
+  };
+  const retainSubmittedBulkMove = (value: SubmittedBulkMove): SubmittedBulkMove => {
+    assertSession(session);
+    // Deliberately whitelist only request identifiers and immutable pins. This map
+    // stays in session memory even in local mode; no draft/cache writer is used.
+    const retained: SubmittedBulkMove = { projectId: value.projectId, sourceProxyId: value.sourceProxyId, requestId: value.requestId, input: { sourceColumnId: value.input.sourceColumnId, destinationProjectId: value.input.destinationProjectId, destinationColumnId: value.input.destinationColumnId, expectedBoardVersion: value.input.expectedBoardVersion, expectedDestinationBoardVersion: value.input.expectedDestinationBoardVersion, tasks: value.input.tasks.map(task => ({ taskId: task.taskId, expectedTaskVersion: task.expectedTaskVersion })) } };
+    const key = `submitted-bulk:${value.requestId}`; const json = JSON.stringify(retained); const previous = session.memory.get(key);
+    if (previous && previous !== json) throw new Error('A submitted request cannot change its task list or versions. Retain it for retry and prepare a new request explicitly.');
+    session.memory.set(key, json); for (const listener of session.accessListeners) listener([]); return retained;
+  };
+  const clearSubmittedBulkMove = (expected: SubmittedBulkMove): boolean => {
+    if (!sessionIsActive(session)) return false;
+    const key = `submitted-bulk:${expected.requestId}`;
+    if (session.memory.get(key) !== JSON.stringify(expected)) return false;
+    session.memory.delete(key); for (const listener of session.accessListeners) listener([]); return true;
+  };
   const draftRecords = (): { key: string; value: unknown }[] => {
-    if (!sessionIsActive(session) || durable) return [];
+    if (!sessionIsActive(session)) return [];
+    const submitted = submittedBulkMoves().map(value => ({ key: `submitted-bulk:${value.requestId}`, value }));
+    if (durable) return submitted;
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
       return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
-    return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value }))];
+    return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };
   const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
-  return { session, durable, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  return { session, durable, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.

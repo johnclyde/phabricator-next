@@ -2,6 +2,8 @@ import type { EffectiveAccess, NewObjectAccessInput, ObjectAccess, Space } from 
 import type { PublicAccount } from './auth';
 import type { Project } from './projects';
 import type { TaskColumnMove } from './workboards';
+export { WORKBOARD_BULK_MOVE_LIMIT } from './workboards';
+export type { WorkboardBulkMoveQuery, WorkboardBulkMoveTask, WorkboardBulkMovePreview, BulkMoveWorkboardCardsInput, WorkboardBulkMoveReceipt } from './workboards';
 export type { Workboard, WorkboardColumn, WorkboardColumnSnapshot, WorkboardCard, WorkboardCardPage, WorkboardColumnView, WorkboardFilter, WorkboardQuery, WorkboardCardsQuery, WorkboardDetail, WorkboardReceipt, ConfigureWorkboardInput, CreateWorkboardColumnInput, UpdateWorkboardColumnInput, WorkboardColumnPosition, ReorderWorkboardColumnInput, WorkboardCardPosition, MoveWorkboardCardInput, WorkboardImportColumn, WorkboardImportPreview, ImportWorkboardColumnsInput, TaskColumnMove, WorkboardFieldChange, WorkboardTransaction, WorkboardHistory } from './workboards';
 export type { Project, ProjectKind, ProjectMembershipMode, ProjectMembershipStatus, ProjectReference, ProjectHierarchy, ProjectChildPreview, ProjectSnapshot, ProjectField, ProjectFieldChange, ProjectStatus, ProjectIcon, ProjectColorKey, ProjectRelation, ProjectRelationStatus, ProjectPreferences, ProjectTransaction, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectDetail, ProjectAccessLostAcknowledgement, ProjectLegacyAcknowledgement, ProjectUpdateResult, ProjectInput, UpdateProjectInput, ProjectMembersInput, ProjectMembershipInput, ProjectWatcherInput, ProjectSilenceInput } from './projects';
 

@@ -910,3 +910,70 @@ test('an import source denial invalidates the source preview authority and prese
     assert.equal(client.unavailableObject('PROJ2'), true); assert.equal(client.unavailableObject('PROJ1'), false);
   } finally { lockSession(); globalThis.fetch = fetch; }
 });
+
+const bulkMoveInput = () => ({ sourceColumnId: 'COL1', destinationProjectId: 'PROJ2', destinationColumnId: 'COL2', expectedBoardVersion: 3, expectedDestinationBoardVersion: 8, tasks: [{ taskId: 'T1', expectedTaskVersion: 2 }, { taskId: 'T2', expectedTaskVersion: 4 }] });
+test('bulk moves require both project views and every task edit but no project edit, and never queue', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); const rules = { PROJ1: access('PROJ1', false), PROJ2: access('PROJ2', false), T1: access('T1'), T2: access('T2') }; client.reconcileAccess(rules, 1);
+    let calls = 0; globalThis.fetch = async () => { calls++; return Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 4, destinationProjectId: 'PROJ2', destinationBoardVersion: 9, accessEpoch: 1 }); };
+    const result = await client.request<{ destinationBoardVersion: number }>('/api/projects/PROJ1/workboard/bulk-moves', { method: 'POST', body: bulkMoveInput() }); assert.equal(result.destinationBoardVersion, 9);
+    assert.equal(canQueue('/api/projects/PROJ1/workboard/bulk-moves', 'POST', bulkMoveInput()), false);
+    client.reconcileAccess({ ...rules, T2: access('T2', false) }, 2); await assert.rejects(client.request('/api/projects/PROJ1/workboard/bulk-moves', { method: 'POST', body: bulkMoveInput() }), withCode('ACTION_FORBIDDEN'));
+    client.reconcileAccess({ PROJ1: rules.PROJ1, T1: rules.T1, T2: rules.T2 }, 3); await assert.rejects(client.request('/api/projects/PROJ1/workboard/bulk-moves', { method: 'POST', body: bulkMoveInput() }), withCode('PROJECT_REFERENCE_UNAVAILABLE')); assert.equal(calls, 1); assert.equal(client.unavailableObject('PROJ1'), false);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('bulk preview captures destination and milestone authority, and ignores content after task access changes', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); const rules = { PROJ1: access('PROJ1', false), PROJ2: access('PROJ2', false), PROJ3: access('PROJ3', false), T1: access('T1'), T2: access('T2') }; client.reconcileAccess(rules, 1);
+    let release!: (response: Response) => void; globalThis.fetch = async () => await new Promise<Response>(resolve => { release = resolve; });
+    const path = '/api/projects/PROJ1/workboard/bulk-move-preview?sourceColumnId=COL1&destinationProjectId=PROJ2&destinationColumnId=COL2';
+    const preview = client.request(path, undefined, ['PROJ3']); client.reconcileAccess({ PROJ1: rules.PROJ1, PROJ2: rules.PROJ2, T1: rules.T1, T2: rules.T2 }, 2); client.reconcileAccess(rules, 3);
+    release(Response.json({ projectId: 'PROJ1', tasks: [{ title: 'Revoked milestone contents' }], accessEpoch: 1 })); await assert.rejects(preview, withCode('COLUMN_UNAVAILABLE'));
+    const lateTask = client.request(path, undefined, ['PROJ3']); client.reconcileAccess({ ...rules, T2: access('T2', false) }, 4); release(Response.json({ projectId: 'PROJ1', tasks: [{ id: 'T2', title: 'No longer editable' }], accessEpoch: 3 })); await assert.rejects(lateTask, withCode('ACCESS_CHANGED'));
+    client.reconcileAccess(rules, 5); const saved = client.request('/api/projects/PROJ1/workboard/bulk-moves', { method: 'POST', body: bulkMoveInput(), id: 'exact-bulk-request' }, ['PROJ3']); client.reconcileAccess({ PROJ1: rules.PROJ1, PROJ2: rules.PROJ2, T1: rules.T1 }, 6);
+    release(Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 4, destinationProjectId: 'PROJ2', destinationBoardVersion: 9, accessEpoch: 6 })); assert.equal((await saved as { saved: boolean }).saved, true);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('bulk destination denial clears only destination authority while unavailable columns leave the parent readable', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 1);
+    const path = '/api/projects/PROJ1/workboard/bulk-move-preview?sourceColumnId=COL1&destinationProjectId=PROJ2&destinationColumnId=COL2';
+    globalThis.fetch = async () => Response.json({ code: 'COLUMN_UNAVAILABLE', error: 'Column unavailable' }, { status: 404 }); await assert.rejects(client.request(path), withCode('COLUMN_UNAVAILABLE')); assert.equal(client.unavailableObject('PROJ1'), false); assert.equal(client.unavailableObject('PROJ2'), false);
+    globalThis.fetch = async () => Response.json({ code: 'PROJECT_REFERENCE_UNAVAILABLE', error: 'Destination unavailable' }, { status: 404 }); await assert.rejects(client.request(path), withCode('PROJECT_REFERENCE_UNAVAILABLE')); assert.equal(client.unavailableObject('PROJ1'), false); assert.equal(client.unavailableObject('PROJ2'), true);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('malformed bulk receipts cannot clear the exact retry request as a success', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1', false), PROJ2: access('PROJ2', false), T1: access('T1'), T2: access('T2') }, 1);
+    for (const destination of [{}, { destinationProjectId: 'PROJ3', destinationBoardVersion: 9 }, { destinationProjectId: 'PROJ2', destinationBoardVersion: -1 }]) {
+      globalThis.fetch = async () => Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 4, ...destination });
+      await assert.rejects(client.request('/api/projects/PROJ1/workboard/bulk-moves', { method: 'POST', body: bulkMoveInput(), id: 'unchanged-request' }), withCode('INVALID_RECEIPT'));
+    }
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+for (const mode of ['local', 'password'] as const) test(`submitted bulk recovery stays minimal in ${mode} session memory and clears only exact records`, () => {
+  const storage = mode === 'local' ? localStorageFixture() : null;
+  try {
+    const client = storage ? storage.reopen() : createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1', false), PROJ2: access('PROJ2', false), PROJ3: access('PROJ3'), T1: access('T1'), T2: access('T2') }, 1);
+    const value = { projectId: 'PROJ1', sourceProxyId: 'PROJ3', requestId: 'retained-bulk', input: bulkMoveInput(), title: 'Must not retain titles', preview: { content: 'Must not retain previews' } };
+    const retained = client.retainSubmittedBulkMove(value); assert.equal(JSON.stringify(retained).includes('Must not'), false); assert.equal(retained.sourceProxyId, 'PROJ3');
+    client.reconcileAccess({ PROJ2: access('PROJ2', false) }, 2);
+    assert.deepEqual(client.submittedBulkMoves(), [retained], 'source/proxy/task revocation cannot delete only recovery record'); assert.deepEqual(client.draftRecords(), [{ key: 'submitted-bulk:retained-bulk', value: retained }]);
+    assert.deepEqual(createWorkspaceClient(client.session).submittedBulkMoves(), [retained], 'page/client remount in same session retains request');
+    if (storage) assert.equal([...storage.stored.keys()].some(key => key.includes('submitted-bulk:')), false, 'local mode never writes request recovery to durable browser storage');
+    assert.equal(client.clearSubmittedBulkMove({ ...retained, input: { ...retained.input, expectedBoardVersion: 99 } }), false);
+    assert.throws(() => client.retainSubmittedBulkMove({ ...retained, input: { ...retained.input, expectedBoardVersion: 99 } }), /cannot change/);
+    const newer = client.retainSubmittedBulkMove({ ...retained, requestId: 'newer-bulk', input: { ...retained.input, expectedBoardVersion: 4 } });
+    assert.equal(client.clearSubmittedBulkMove(retained), true); assert.deepEqual(client.submittedBulkMoves(), [newer]);
+    const nextSession = activateSession(identity('bob')); const next = createWorkspaceClient(nextSession); next.retainSubmittedBulkMove({ ...newer, requestId: 'bob-request' }); assert.equal(client.clearSubmittedBulkMove(newer), false); assert.deepEqual(client.submittedBulkMoves(), []); assert.equal(next.submittedBulkMoves().length, 1);
+    lockSession(); assert.deepEqual(next.submittedBulkMoves(), []); assert.equal(nextSession.memory.size, 0);
+  } finally { if (storage) storage.close(); else lockSession(); }
+});

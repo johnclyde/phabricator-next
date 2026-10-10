@@ -3,11 +3,12 @@ import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, P
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
 import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
-import type { WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
+import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
+import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import type { MutationResponse, Store } from './store.ts';
-import { HttpError } from './validation.ts';
+import { HttpError, integer, object } from './validation.ts';
 
 const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions']);
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -103,6 +104,15 @@ export class AccessLayer {
     this.require(id, 'edit'); const source = this.workboardProjectReference(sourceId);
     return { ...this.store.workboardImportPreview(id, source), accessEpoch: this.policies.epoch() };
   }
+  workboardBulkMovePreview(id: string, query: WorkboardBulkMoveQuery): WorkboardBulkMovePreview {
+    this.require(id); this.workboardColumnReference(id, query.sourceColumnId);
+    const destinationId = this.workboardProjectReference(query.destinationProjectId);
+    this.workboardColumnReference(destinationId, query.destinationColumnId); this.workboardQuery(query);
+    // Preview is a read. The selected principal's task permissions determine
+    // its contents even when a read-only token cannot submit that selection.
+    const visibility = { ...this.workboardVisibility(), canEditTask: (taskId: string) => this.policies.access(taskId, this.principal).edit };
+    return { ...this.store.workboardBulkMovePreview(id, query, visibility), accessEpoch: this.policies.epoch() };
+  }
   /** Child failures must not be mistaken for revocation of a visible board. */
   private workboardProjectReference(value: unknown): string {
     if (typeof value !== 'string' || !/^PROJ[1-9]\d*$/.test(value) || !this.canView(value)) throw new HttpError(404, 'Project reference was not found.', 'PROJECT_REFERENCE_UNAVAILABLE');
@@ -153,7 +163,8 @@ export class AccessLayer {
     const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId ?? transaction.merge?.taskId ?? transaction.project?.projectId;
     if (related && !this.canView(related)) return false;
     const column = transaction.column;
-    return !column || (this.canView(column.projectId) && [...column.fromColumns, column.toColumn].every(item => !item.proxyProjectId || this.canView(item.proxyProjectId)));
+    return !column || (this.canView(column.projectId) && [...column.fromColumns, column.toColumn].every(item => !item.proxyProjectId || this.canView(item.proxyProjectId))
+      && (!column.bulkSource || (this.canView(column.bulkSource.projectId) && (!column.bulkSource.column.proxyProjectId || this.canView(column.bulkSource.column.proxyProjectId)))));
   }
   /** Filter only this response's evidence; retries must never borrow live history. */
   private taskSnapshot(detail: TaskDetail): TaskDetail {
@@ -232,16 +243,31 @@ export class AccessLayer {
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
     const selfProject = object[1]!.startsWith('PROJ') && ['membership', 'watchers', 'silence'].includes(object[2] ?? '');
-    const boardMove = method === 'POST' && object[1]!.startsWith('PROJ') && object[2] === 'workboard/moves';
+    const boardMove = method === 'POST' && object[1]!.startsWith('PROJ') && ['workboard/moves', 'workboard/bulk-moves'].includes(object[2] ?? '');
     return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject || boardMove ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
-    const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|columns|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
+    const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|bulk-moves|columns|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
     if (workboard && method !== 'GET') {
       const id = workboard[1]!; const data = record(input);
-      if (workboard[2] === 'import') {
+      if (workboard[2] === 'bulk-moves') {
+        const bulk = object(input, ['sourceColumnId', 'destinationProjectId', 'destinationColumnId', 'expectedBoardVersion', 'expectedDestinationBoardVersion', 'tasks']);
+        integer(bulk.expectedBoardVersion, 'expectedBoardVersion'); integer(bulk.expectedDestinationBoardVersion, 'expectedDestinationBoardVersion');
+        if (!Array.isArray(bulk.tasks) || bulk.tasks.length < 1 || bulk.tasks.length > WORKBOARD_BULK_MOVE_LIMIT) throw new HttpError(400, `Choose between 1 and ${WORKBOARD_BULK_MOVE_LIMIT} tasks from the reviewed preview.`);
+        const taskIds = new Set<string>();
+        // Bound and validate the entire list before any per-task policy work.
+        for (const value of bulk.tasks) {
+          const task = object(value, ['taskId', 'expectedTaskVersion']);
+          if (typeof task.taskId !== 'string' || task.taskId.length > 50 || !/^T[1-9]\d*$/.test(task.taskId) || taskIds.has(task.taskId)) throw new HttpError(400, 'Choose unique valid task IDs from the reviewed preview.');
+          integer(task.expectedTaskVersion, 'expectedTaskVersion'); taskIds.add(task.taskId);
+        }
+        this.workboardColumnReference(id, bulk.sourceColumnId);
+        const destinationId = this.workboardProjectReference(bulk.destinationProjectId);
+        this.workboardColumnReference(destinationId, bulk.destinationColumnId);
+        for (const taskId of taskIds) this.workboardTaskReference(taskId, true);
+      } else if (workboard[2] === 'import') {
         this.workboardProjectReference(data?.sourceProjectId);
       } else if (workboard[2] === 'moves') {
         this.workboardTaskReference(data?.taskId, true);
@@ -457,6 +483,12 @@ export class AccessLayer {
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
     if (/^\/api\/projects\/PROJ\d+\/workboard(?:\/|$)/.test(path)) {
       if (!body || body.projectId !== target?.id || body.saved !== true || body.refreshRequired !== true || !Number.isSafeInteger(body.boardVersion) || Number(body.boardVersion) < 0) throw new HttpError(409, 'This saved workboard response cannot be safely replayed. Reload the board.');
+      if (path.endsWith('/bulk-moves')) {
+        if (typeof body.destinationProjectId !== 'string' || !/^PROJ[1-9]\d*$/.test(body.destinationProjectId) || !Number.isSafeInteger(body.destinationBoardVersion) || Number(body.destinationBoardVersion) < 1) throw new HttpError(409, 'This saved workboard response cannot be safely replayed. Reload the board.');
+        this.workboardProjectReference(body.destinationProjectId);
+        return { status: response.status, body: { projectId: body.projectId, saved: true, refreshRequired: true, boardVersion: body.boardVersion,
+          destinationProjectId: body.destinationProjectId, destinationBoardVersion: body.destinationBoardVersion, accessEpoch: this.policies.epoch() } };
+      }
       // A receipt never becomes a fresh layout or a new CAS baseline. Preserve
       // its historical pins while stamping only the current permission epoch.
       return { status: response.status, body: { projectId: body.projectId, saved: true, refreshRequired: true, boardVersion: body.boardVersion,
