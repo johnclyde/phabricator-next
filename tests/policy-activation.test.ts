@@ -277,3 +277,42 @@ test('local project join grants and active membership require an explicit atomic
     createAuth({ database: store.database, mode: 'password', basePath: '/' }); assert.ok(latch(store));
   } finally { store.close(); }
 });
+
+test('local hierarchy handoff transfers leaf memberships atomically and preserves derived ancestor and milestone authority', async () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const operator = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true, transferLocalProjectMemberships: (from, to, attribution) => store.transferLocalProjectMemberships(from, to, attribution) });
+    const local = operator.authenticate(request).principalId;
+    const alice = await operator.createAccount({ username: 'alice', displayName: 'Alice', password });
+    const actor = { principalId: local, displayName: 'You', credentialId: null, requestId: 'local-hierarchy' };
+    const policies = new PolicyStore(store.database, { principalExists: id => [local, alice.id].includes(id) });
+    const members = { kind: 'project-members' } as const;
+    const parent = store.createProject({ name: 'Local hierarchy parent', memberIds: [local] }, actor);
+    policies.configureNew(parent.id, { spaceId: 'S1', view: members, edit: members, join: selected(local) }, local);
+    const child = (parentId: string, name: string, kind: 'project' | 'milestone') => {
+      const preview = store.projectChildPreview(parentId, kind);
+      const created = store.createProject({ parentId, name, kind, expectedParentVersion: preview.expectedParentVersion, expectedHierarchyVersion: preview.expectedHierarchyVersion, expectedParentMembersVersion: preview.expectedParentMembersVersion, confirmMembershipConversion: preview.conversionRequired }, actor);
+      policies.configureNew(created.id, undefined, local); return created;
+    };
+    const milestone = child(parent.id, 'Local milestone', 'milestone');
+    const middle = child(parent.id, 'Local middle', 'project');
+    const leaf = child(middle.id, 'Local leaf', 'project');
+    assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /project membership references the local-only principal/);
+    const tables = ['object_policies', 'policy_meta', 'project_profiles', 'project_hierarchy', 'project_relations', 'project_transactions', 'project_preference_events', 'activity'];
+    const snapshot = () => tables.map(table => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = snapshot();
+    store.database.exec("CREATE TRIGGER reject_hierarchy_transfer BEFORE INSERT ON project_transactions WHEN json_extract(NEW.data, '$.attribution.principalId') LIKE 'operator:%' BEGIN SELECT RAISE(ABORT, 'Injected hierarchy transfer failure'); END;");
+    assert.throws(() => operator.transferLocalPolicies(alice.id), /Injected hierarchy transfer failure/); assert.deepEqual(snapshot(), before); store.database.exec('DROP TRIGGER reject_hierarchy_transfer');
+    const epoch = policies.epoch(); const transferred = operator.transferLocalPolicies(alice.id);
+    assert.equal(transferred.projectMemberships, 1, 'only the leaf has a direct grant to transfer'); assert.ok(policies.epoch() > epoch);
+    for (const project of [parent, milestone, middle, leaf]) {
+      assert.equal(store.projectPreferences(project.id, alice.id).membership.active, true);
+      assert.equal(store.projectPreferences(project.id, local).membership.active, false);
+      assert.equal(policies.access(project.id, alice.id).edit, true);
+      assert.equal(policies.access(project.id, local).view, false);
+    }
+    assert.equal(store.projectPreferences(parent.id, alice.id).membership.version, null);
+    assert.deepEqual(store.projectPreferences(milestone.id, alice.id).membership.sourceProjectIds, [leaf.id]);
+    createAuth({ database: store.database, mode: 'password', basePath: '/' }); assert.ok(latch(store));
+  } finally { store.close(); }
+});

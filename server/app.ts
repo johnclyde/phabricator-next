@@ -130,7 +130,7 @@ export function createApp(options: AppOptions = {}): App {
     }
     const authorize = () => { auth.revalidate(context, scope); access.authorize(method, path, input); };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
-    const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path);
+    const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
     const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed);
     store.read(authorize);
     const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
@@ -194,13 +194,19 @@ export function createApp(options: AppOptions = {}): App {
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
         const project = /^\/api\/projects\/(PROJ\d+)(?:\/(members|membership|watchers|silence))?$/.exec(path);
-        if (project && method === 'PATCH' && !project[2]) return { status: 200, body: store.updateProject(project[1]!, input, attribution) };
-        if (project && method === 'POST') {
+        if (project && ((method === 'PATCH' && !project[2]) || method === 'POST')) {
           const id = project[1]!;
-          if (project[2] === 'members') return { status: 200, body: store.updateProjectMembers(id, input, attribution) };
-          if (project[2] === 'membership') return { status: 200, body: store.updateProjectMembership(id, input, attribution) };
-          if (project[2] === 'watchers') return { status: 200, body: store.updateProjectWatcher(id, input, attribution) };
           if (project[2] === 'silence') return { status: 200, body: store.updateProjectSilence(id, input, attribution) };
+          const detail = method === 'PATCH' ? store.updateProject(id, input, attribution)
+            : project[2] === 'members' ? store.updateProjectMembers(id, input, attribution)
+              : project[2] === 'membership' ? store.updateProjectMembership(id, input, attribution)
+                : project[2] === 'watchers' ? store.updateProjectWatcher(id, input, attribution) : undefined;
+          if (detail) {
+            // Filter before paging on the initial write, then preserve these
+            // historical rows unchanged when a saved request is retried.
+            detail.history = store.projectHistory(id, undefined, undefined, related => access.canView(related));
+            return { status: 200, body: detail };
+          }
         }
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
         const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies|subscriptions|merge|merge-in|projects)$/.exec(path);
@@ -287,6 +293,12 @@ export function createApp(options: AppOptions = {}): App {
           if (path === '/api/projects/resolve') {
             if (url.searchParams.getAll('slug').length !== 1 || [...url.searchParams.keys()].some(name => name !== 'slug')) throw new HttpError(400, 'Project resolution requires exactly one slug parameter.');
             send(res, 200, access.resolveProject(url.searchParams.get('slug')!)); return;
+          }
+          const childPreview = /^\/api\/projects\/(PROJ\d+)\/children\/preview$/.exec(path);
+          if (childPreview) {
+            access.require(childPreview[1]!, 'edit');
+            if (url.searchParams.getAll('kind').length !== 1 || [...url.searchParams.keys()].some(name => name !== 'kind')) throw new HttpError(400, 'Child preview requires exactly one kind parameter.');
+            send(res, 200, access.projectChildPreview(childPreview[1]!, choice(url.searchParams.get('kind'), 'project kind', ['project', 'milestone']))); return;
           }
           const project = /^\/api\/projects\/(PROJ\d+)(?:\/(history|members|watchers|preferences))?$/.exec(path);
           if (project) {

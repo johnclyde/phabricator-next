@@ -219,3 +219,16 @@ test('offline project writes are limited to exact metadata and creations without
   for (const field of ['memberIds', 'access', 'watching', 'silenced']) assert.equal(canQueue('/api/projects/PROJ1', 'PATCH', { expectedVersion: 2, [field]: [] }), false);
   for (const section of ['membership', 'members', 'watchers', 'silence']) assert.equal(canQueue(`/api/projects/PROJ1/${section}`, 'POST', { expectedVersion: 2 }), false);
 });
+
+test('hierarchy creation cannot queue and milestone display names remain available to read-only commands', () => {
+  for (const input of [
+    { name: 'Child', parentId: 'PROJ1', kind: 'project' },
+    { name: 'Milestone', parentId: 'PROJ1', kind: 'milestone' },
+    { name: 'Invalid root milestone', kind: 'milestone' },
+    { name: 'Stale child preview', expectedHierarchyVersion: 1 },
+    { name: 'Conversion', confirmMembershipConversion: true },
+  ]) assert.equal(canQueue('/api/projects', 'POST', input), false);
+  assert.equal(canQueue('/api/projects', 'POST', { name: 'Root', kind: 'project', parentId: null, memberIds: [] }), true);
+  assert.equal(projectMatches({ id: 'PROJ4', name: 'Draft', displayName: 'Research (Milestone 1: Draft)', primarySlug: null, aliases: [] }, 'Research (Milestone 1: Draft)'), true);
+  for (const command of ['create milestone Draft', 'convert Research to parent', 'join subproject Research']) assert.equal(parseCommand(command).type, 'unknown');
+});

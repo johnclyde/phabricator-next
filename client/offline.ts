@@ -8,7 +8,8 @@ export interface PendingMutation { id: string; path: string; method: MutationMet
 export function canQueue(path: string, method: MutationMethod, body?: unknown): boolean {
   if (path === '/api/projects' && method === 'POST') {
     if (!body || typeof body !== 'object') return false;
-    const input = body as { memberIds?: unknown; access?: unknown };
+    const input = body as { memberIds?: unknown; access?: unknown; parentId?: unknown; kind?: unknown };
+    if (input.parentId != null || (input.kind !== undefined && input.kind !== 'project') || ['expectedParentVersion', 'expectedHierarchyVersion', 'expectedParentMembersVersion', 'confirmMembershipConversion'].some(key => key in input)) return false;
     return (input.memberIds === undefined || (Array.isArray(input.memberIds) && input.memberIds.length === 0)) && (input.access === undefined || Boolean(input.access && typeof input.access === 'object' && Object.keys(input.access).every(key => key === 'spaceId')));
   }
   if (/^\/api\/projects\/PROJ\d+$/.test(path) && method === 'PATCH') return Boolean(body && typeof body === 'object' && 'expectedVersion' in body && Number.isSafeInteger(body.expectedVersion) && Number(body.expectedVersion) > 0 && Object.keys(body).every(key => ['expectedVersion', 'name', 'description', 'status', 'color', 'colorKey', 'icon', 'aliases'].includes(key)));
@@ -20,13 +21,31 @@ function objectFromPath(path: string): string | null { return /^\/api\/(?:revisi
 function queuedObject(item: PendingMutation): string | null {
   const id = objectFromPath(item.path); if (id) return id;
   if (item.method !== 'POST' || !['/api/tasks', '/api/documents', '/api/projects'].includes(item.path)) return null;
-  const body = item.body as { access?: { spaceId?: unknown } } | null;
+  const body = item.body as { parentId?: unknown; access?: { spaceId?: unknown } } | null;
+  if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:revision|wiki|task|project|project-draft|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || key.startsWith('project-draft:'); }
-function isRetainedDraftKey(key: string): boolean { return key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || key.startsWith('project-draft:'); }
+function objectFromKey(key: string): string | null { return /^(?:revision|wiki|task|project|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')); }
+function isRetainedDraftKey(key: string): boolean { return key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
+function hasProjectHierarchy(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const project = value as Record<string, unknown>;
+  return (project.kind === 'project' || project.kind === 'milestone') && (project.parentId === null || typeof project.parentId === 'string') && typeof project.displayName === 'string' && Number.isSafeInteger(project.hierarchyVersion) && ['direct', 'descendants', 'inherited'].includes(String(project.membershipMode));
+}
+function currentProjectCache(key: string, value: unknown): boolean {
+  if (!value || typeof value !== 'object') return true;
+  const data = value as Record<string, unknown>;
+  if (key === 'state' && Array.isArray(data.projects)) return data.projects.every(hasProjectHierarchy);
+  if (!key.startsWith('project:')) return true;
+  if (data.project && (!hasProjectHierarchy(data.project) || !data.hierarchy)) return false;
+  if (data.viewer && typeof data.viewer === 'object') {
+    const viewer = data.viewer as Record<string, unknown>;
+    return Array.isArray(viewer.watchingInheritedFrom) && typeof viewer.effectiveWatching === 'boolean' && Boolean(viewer.membership && typeof viewer.membership === 'object' && 'source' in viewer.membership);
+  }
+  return true;
+}
 function unavailable(): RequestError { return new RequestError('This object is unavailable or you no longer have access. Unsaved drafts have been set aside for export.', 404, 'OBJECT_UNAVAILABLE'); }
 
 
@@ -141,7 +160,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || holdingLegacy) return;
     holdingLegacy = true;
     try {
-      for (const item of rawOutbox()) if (/^\/api\/projects\/PROJ\d+$/.test(item.path) && !canQueue(item.path, item.method, item.body) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older project change has no valid source version or includes an operation that requires an online review. Export and review it explicitly; automatic submission stopped.' });
+      for (const item of rawOutbox()) if ((item.path === '/api/projects' || /^\/api\/projects\/PROJ\d+$/.test(item.path)) && !canQueue(item.path, item.method, item.body) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older project change has no valid source version or includes an operation that requires an online review. Export and review it explicitly; automatic submission stopped.' });
       for (const [key, json] of savedEntries()) if (key.startsWith('project-draft:') && !session.quarantinedDrafts.has(key)) { try { const draft = JSON.parse(json) as { expectedVersion?: unknown }; if (!Number.isSafeInteger(draft.expectedVersion) || Number(draft.expectedVersion) < 1) quarantine({ key, objectId: objectFromKey(key)!, value: draft, reason: 'This older project draft has no recorded source version. Export the entire draft and review it against the current project before saving.' }); } catch { /* Preserve unreadable original bytes. */ } }
       for (const item of rawOutbox()) if (((item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path)) || (item.method === 'POST' && item.path === '/api/tasks')) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
         const body = item.body as { expectedVersion?: unknown; ownerId?: unknown; projectId?: unknown; projectIds?: unknown } | null;
@@ -178,9 +197,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const draftIsHeld = (key: string): boolean => { syncDurableQuarantine(); return sessionIsActive(session) && hasDraftHold(key); };
   const readStored = <T,>(key: string, fallback: T): T => {
     syncDurableQuarantine();
-    if (key === 'outbox' || key.startsWith('task-draft:') || key.startsWith('project-draft:')) holdLegacyTaskUpdates();
+    if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if ((key.startsWith('task:') || key.startsWith('project:')) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((key.startsWith('task:') || key.startsWith('project:')) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
@@ -239,7 +258,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     assertSession(session);
     if (!Number.isSafeInteger(epoch) || epoch < session.accessEpoch) throw new RequestError('Access changed while loading. Reload the workspace.', 409, 'ACCESS_CHANGED');
     const visible = new Set([...Object.keys(access), ...spaceIds]);
-    const cachedState = readStored<{ access?: Record<string, ObjectAccess>; spaces?: { id: string }[] } | null>('state', null);
+    // Old presentation caches are not renderable, but their IDs still matter for revocation.
+    const cachedState = (() => { try { return JSON.parse(rawRead('state') || 'null') as { access?: Record<string, ObjectAccess>; spaces?: { id: string }[] } | null; } catch { return null; } })();
     const cachedObjects = savedEntries().map(([key]) => objectFromKey(key)).filter((id): id is string => id !== null);
     const known = new Set([...(session.visibleObjects || []), ...session.objectGenerations.keys(), ...cachedObjects, ...rawOutbox().map(queuedObject).filter((id): id is string => id !== null), ...Object.keys(cachedState?.access || {}), ...(cachedState?.spaces || []).map(space => space.id)]);
     invalidateObjects([...known].filter(id => !visible.has(id)));
@@ -284,7 +304,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (options?.queued) { holdLegacyTaskUpdates(); if (!canQueue(path, options.method, options.body)) throw new RequestError('This operation requires an explicit online save and cannot submit from the outbox.', 403, 'ACTION_FORBIDDEN'); }
     if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
-    const taskRequest = /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
+    const childParent = path === '/api/projects' && options?.method === 'POST' && options.body && typeof options.body === 'object' && 'parentId' in options.body && typeof options.body.parentId === 'string' ? options.body.parentId : null;
+    const taskRequest = Boolean(childParent) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
     if (options && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
@@ -297,12 +318,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (options.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
       if (options.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     }
-    const objectId = objectFromPath(path);
+    const objectId = childParent || objectFromPath(path);
     const accessGeneration = session.accessGeneration;
     if (objectId && !objectId.startsWith('S') && !session.objectGenerations.has(objectId)) session.objectGenerations.set(objectId, 0);
     const objectGeneration = objectId ? session.objectGenerations.get(objectId) || 0 : 0;
     const ownershipMutation = options?.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && options.body && typeof options.body === 'object' && 'ownerId' in options.body;
-    const projectMutation = Boolean(options && /^\/api\/projects\/PROJ\d+(?:\/(membership|members|watchers|silence))?$/.test(path));
+    const projectMutation = Boolean(childParent) || Boolean(options && /^\/api\/projects\/PROJ\d+(?:\/(membership|members|watchers|silence))?$/.test(path));
     let taskGeneration = session.taskSnapshotGeneration;
     if (objectId && session.unavailableObjects.has(objectId)) throw unavailable();
     const capabilities = objectId ? session.objectCapabilities.get(objectId) : null;
@@ -335,9 +356,14 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const data: unknown = await response.json();
       // A committed reassignment may remove the caller's view. This content-free receipt
       // remains a success even when a concurrent refresh already observed that loss.
-      if (response.ok && (ownershipMutation || projectMutation) && data && typeof data === 'object' && 'id' in data && data.id === objectId && 'saved' in data && data.saved === true && 'accessLost' in data && data.accessLost === true && 'accessEpoch' in data && Number.isSafeInteger(data.accessEpoch)) {
-        assertSession(session); session.accessEpoch = Math.max(session.accessEpoch, Number(data.accessEpoch)); invalidateObjects([objectId!]);
-        return { id: objectId, saved: true, accessLost: true, accessEpoch: data.accessEpoch } as T;
+      if (response.ok && (ownershipMutation || projectMutation) && data && typeof data === 'object' && 'id' in data && (data.id === objectId || (childParent && typeof data.id === 'string' && /^PROJ\d+$/.test(data.id))) && 'saved' in data && data.saved === true && 'accessLost' in data && data.accessLost === true && 'accessEpoch' in data && Number.isSafeInteger(data.accessEpoch)) {
+        assertSession(session); session.accessEpoch = Math.max(session.accessEpoch, Number(data.accessEpoch)); invalidateObjects([String(data.id)]);
+        return { id: data.id, saved: true, accessLost: true, accessEpoch: data.accessEpoch } as T;
+      }
+      if (response.ok && childParent && data && typeof data === 'object' && 'id' in data && typeof data.id === 'string' && /^PROJ\d+$/.test(data.id) && (session.unavailableObjects.has(childParent) || (session.objectGenerations.get(childParent) || 0) !== objectGeneration || taskGeneration !== session.taskSnapshotGeneration)) {
+        // Creation committed, but its returned profile may predate a permission change.
+        // Preserve only a receipt; the caller refreshes authorized state before rendering.
+        return { id: data.id, saved: true, refreshRequired: true, accessEpoch: session.accessEpoch } as T;
       }
       assertObject();
       if (path === '/api/state' && accessGeneration !== session.accessGeneration) throw new RequestError('Access changed while loading. Reload the workspace.', 409, 'ACCESS_CHANGED');
@@ -372,7 +398,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || durable) return [];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || key.startsWith('project-draft:');
+      return key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'));
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value }))];
   };

@@ -5,6 +5,7 @@ import type { AppState, WikiDetail, WikiDocument, WikiHistory, WikiVersion } fro
 import { isNetworkError, type MutationMethod } from './offline';
 import { useWorkspace } from './SessionGate';
 import { AccessSummary } from './Access';
+import { mergeWikiHistory } from './wiki-history';
 
 type WikiMutation = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
 type WikiTab = 'document' | 'compare' | 'history';
@@ -31,6 +32,7 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   const loaded = useRef<Record<number, WikiVersion>>({});
   const inFlight = useRef(new Map<number, Promise<WikiVersion | null>>());
   const loadGeneration = useRef(0);
+  const pageGeneration = useRef(0);
   const [versionErrors, setVersionErrors] = useState<Record<number, string>>({});
   const [error, setError] = useState('');
   const [storageWarning, setStorageWarning] = useState('');
@@ -38,6 +40,7 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   const [loading, setLoading] = useState(true);
   const [paging, setPaging] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  useEffect(() => () => { pageGeneration.current += 1; }, []);
 
   const saveVersion = useCallback((version: WikiVersion) => {
     if (unavailableObject(id)) return;
@@ -52,8 +55,12 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
     try {
       const next = await request<WikiDetail>(`/api/documents/${id}`);
       if (generation !== loadGeneration.current) return null;
-      setDetail(next); setSnapshot(false); setError('');
-      if (!writeStored(`wiki:${id}`, next)) setStorageWarning('Browser storage is unavailable. This history was not saved for offline reading.');
+      setDetail(current => {
+        const merged = { ...next, history: mergeWikiHistory(next.document.version, next.history, current?.document.id === id ? current.history : undefined) };
+        if (!writeStored(`wiki:${id}`, merged)) setStorageWarning('Browser storage is unavailable. This history was not saved for offline reading.');
+        return merged;
+      });
+      setSnapshot(false); setError('');
       const current = next.history.versions.find(version => version.number === next.document.version);
       if (current) saveVersion({ ...current, content: next.document.content });
       return next;
@@ -118,20 +125,22 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
 
   const older = async () => {
     if (!detail || detail.history.nextBefore === null) return;
-    const generation = loadGeneration.current;
+    // Head refreshes must not cancel immutable history the reader requested.
+    // This counter changes on another page request or unmount, while request()
+    // independently rejects a revoked object or replaced session.
+    const generation = ++pageGeneration.current;
     setPaging(true); setError('');
     try {
       const page = await request<WikiHistory>(`/api/documents/${id}/history?before=${detail.history.nextBefore}&limit=20`);
-      if (generation !== loadGeneration.current) return;
+      if (generation !== pageGeneration.current) return;
       setDetail(current => {
         if (!current) return current;
-        const rows = new Map([...current.history.versions, ...page.versions].map(item => [item.number, item]));
-        const next = { ...current, history: { ...page, versions: [...rows.values()].sort((a, b) => b.number - a.number) } };
+        const next = { ...current, history: mergeWikiHistory(current.document.version, page, current.history) };
         if (!writeStored(`wiki:${id}`, next)) setStorageWarning('Browser storage is unavailable. Older history was not saved for offline reading.');
         return next;
       });
-    } catch (failure) { if (generation === loadGeneration.current) setError(isNetworkError(failure) ? 'Older history has not been saved on this device. Reconnect to load it.' : failure instanceof Error ? failure.message : 'Could not load older history.'); }
-    finally { setPaging(false); }
+    } catch (failure) { if (generation === pageGeneration.current) setError(isNetworkError(failure) ? 'Older history has not been saved on this device. Reconnect to load it.' : failure instanceof Error ? failure.message : 'Could not load older history.'); }
+    finally { if (generation === pageGeneration.current) setPaging(false); }
   };
 
   const access = detail && state.accessEpoch >= (detail.accessEpoch ?? -1) ? state.access[id] : detail?.access;

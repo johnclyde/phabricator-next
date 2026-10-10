@@ -37,6 +37,15 @@ test('project capabilities distinguish automatic member view, own-member rules, 
   assert.deepEqual(effectiveAccess({ ...policy, rules: { view: members, edit: members, interact: members, join: members } }, space, 'bob', false, true), { view: true, edit: true, interact: true, managePolicy: true, join: true });
 });
 
+test('ancestor edit grants never widen child view, interact or Space access', () => {
+  const space: Space = { id: 'S1', name: 'Shared', description: '', version: 1, archived: false, isDefault: true, view: shared, edit: selected('alice') };
+  const policy: ProjectPolicy = { kind: 'project', objectId: 'PROJ2', spaceId: space.id, version: 1, rules: { view: shared, edit: selected('alice'), interact: selected('alice'), join: selected() } };
+  assert.deepEqual(effectiveAccess(policy, space, 'bob', false, false, { view: true, edit: true }), { view: true, edit: true, interact: false, managePolicy: true, join: true });
+  assert.equal(effectiveAccess({ ...policy, rules: { ...policy.rules, view: selected('alice') } }, space, 'bob', false, false, { view: true, edit: true }).view, false);
+  assert.equal(effectiveAccess(policy, space, 'bob', false, true, { view: false, edit: true }).view, false, 'even automatic membership cannot skip ancestor view');
+  assert.equal(effectiveAccess(policy, { ...space, view: selected('alice') }, 'bob', false, true, { view: true, edit: true }).view, false);
+});
+
 test('migration assigns every existing object to an explicit shared Space without inventing ownership', () => {
   const { db, policies } = database();
   try {

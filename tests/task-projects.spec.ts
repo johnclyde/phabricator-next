@@ -162,6 +162,12 @@ test('legacy mixed project field drafts are recovered whole while a title-only d
   const task = await api<Task>(page, '/tasks', 'POST', { title: `Old tag draft ${info.project.name} ${Date.now()}`, projectIds: [a.id, b.id] });
   const other = await api<Task>(page, '/tasks', 'POST', { title: `Title-only legacy draft ${info.project.name} ${Date.now()}`, projectIds: [a.id, b.id] });
   await openFresh(page, task.id);
+  // The heading identifies the route before the separate detail read has been
+  // persisted. This fixture needs the actual task cache namespace.
+  await expect.poll(() => page.evaluate(id => {
+    const key = Object.keys(localStorage).find(key => key.endsWith(`:task:${id}`));
+    return key ? (JSON.parse(localStorage.getItem(key) || 'null') as TaskDetail | null)?.task.id : null;
+  }, task.id)).toBe(task.id);
   await page.evaluate(({ task, other, projectId }) => {
     const key = Object.keys(localStorage).find(key => key.endsWith(`:task:${task.id}`)); if (!key) throw new Error('Expected cached task'); const prefix = key.slice(0, -`task:${task.id}`.length);
     localStorage.setItem(`${prefix}task-draft:${task.id}`, JSON.stringify({ ...task, projectIds: undefined, projectId, title: 'Keep all these old mixed changes', expectedVersion: task.version, changed: ['title', 'projectId'] }));

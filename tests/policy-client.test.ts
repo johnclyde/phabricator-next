@@ -713,3 +713,58 @@ test('a committed project leave receipt survives known view loss without exposin
     assert.equal(client.readStored('project:PROJ1', null), null); assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [draft]); assert.deepEqual(client.readStored('task-comment:T1', null), { body: 'Unrelated task comment' });
   } finally { lockSession(); globalThis.fetch = fetch; }
 });
+
+test('child creation keeps parent-bound drafts and unsafe queued conversions held without affecting ordinary project work', async () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 1, ['S1']);
+    const draft = { name: 'Exact saved child', preview: { expectedParentVersion: 1, expectedHierarchyVersion: 1, expectedParentMembersVersion: 3, transferMemberCount: 2 } };
+    client.writeStored('project-child:PROJ1:project', draft);
+    client.writeStored('project-draft:PROJ2', { expectedVersion: 1, values: { name: 'Unrelated edit' }, changed: ['name'] });
+    const queued: PendingMutation = { id: 'unsafe-child', path: '/api/projects', method: 'POST', body: { name: 'Child', parentId: 'PROJ1', kind: 'project', expectedHierarchyVersion: 1 }, label: 'Child project', createdAt: '2026-10-10' };
+    client.writeStored('outbox', [queued]); assert.deepEqual(client.readStored('outbox', []), []);
+    client.reconcileAccess({ PROJ2: access('PROJ2') }, 2, ['S1']);
+    assert.deepEqual(new Set(client.quarantinedDrafts().map(item => item.key)), new Set(['outbox:unsafe-child', 'project-child:PROJ1:project']));
+    const reopened = storage.reopen(); reopened.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2') }, 3, ['S1']);
+    assert.equal(reopened.readStored('project-child:PROJ1:project', null), null);
+    assert.deepEqual(reopened.quarantinedDrafts().find(item => item.key === 'project-child:PROJ1:project')?.value, draft);
+    assert.notEqual(reopened.readStored('project-draft:PROJ2', null), null);
+    await assert.rejects(reopened.request('/api/projects', { method: 'POST', body: queued.body, id: queued.id, queued: true }), withCode('ACTION_FORBIDDEN'));
+  } finally { storage.close(); }
+});
+
+test('late committed child creation returns a content-free receipt after parent access changes and does not cross sessions', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1') }, 1, ['S1']);
+    const draft = { name: 'Keep a newer child draft', preview: { expectedHierarchyVersion: 1 } }; client.writeStored('project-child:PROJ1:project', draft);
+    assert.deepEqual(client.draftRecords(), [{ key: 'project-child:PROJ1:project', value: draft }]);
+    let release!: (response: Response) => void; let signal: AbortSignal | null | undefined;
+    globalThis.fetch = async (_path, options) => { signal = options?.signal; return new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/projects', { method: 'POST', body: { parentId: 'PROJ1', kind: 'project', name: 'Committed child' } });
+    client.reconcileAccess({}, 2, ['S1']); assert.equal(signal?.aborted, false, 'object revocation must not abort a committed creation receipt');
+    release(Response.json({ id: 'PROJ3', name: 'Do not expose this stale child', displayName: 'Hidden child' }, { status: 201 }));
+    assert.deepEqual(await pending, { id: 'PROJ3', saved: true, refreshRequired: true, accessEpoch: 2 });
+    assert.equal(client.readStored('project-child:PROJ1:project', null), null);
+    assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [draft]);
+    const next = createWorkspaceClient(activateSession(identity('bob'))); next.reconcileAccess({ PROJ1: access('PROJ1') }, 1, ['S1']);
+    const pendingOther = next.request('/api/projects', { method: 'POST', body: { parentId: 'PROJ1', kind: 'milestone', name: 'Milestone' } });
+    lockSession(); assert.equal(signal?.aborted, true, 'session invalidation still aborts creation');
+    release(Response.json({ id: 'PROJ4', saved: true, accessLost: true, accessEpoch: 3 }, { status: 201 }));
+    await assert.rejects(pendingOther);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('old project presentation caches never imply direct membership or missing parents while drafts remain readable', () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen();
+    client.writeStored('state', { projects: [{ id: 'PROJ1', name: 'Old root assumption' }], access: { PROJ1: access('PROJ1') } });
+    client.writeStored('project:PROJ1', { project: { id: 'PROJ1', name: 'Before conversion' }, viewer: { membership: { active: true, version: 1 } } });
+    client.writeStored('project:PROJ1:members', { members: [{ principalId: 'alice' }], viewer: { membership: { active: true, version: 1 } } });
+    client.writeStored('project-draft:PROJ1', { expectedVersion: 1, values: { description: 'Keep my description' }, changed: ['description'] });
+    assert.equal(client.readStored('state', null), null); assert.equal(client.readStored('project:PROJ1', null), null); assert.equal(client.readStored('project:PROJ1:members', null), null);
+    assert.notEqual(client.readStored('project-draft:PROJ1', null), null);
+    client.reconcileAccess({}, 1, ['S1']); assert.equal(client.quarantinedDrafts()[0]?.key, 'project-draft:PROJ1', 'old cached access still participates in revocation');
+  } finally { storage.close(); }
+});

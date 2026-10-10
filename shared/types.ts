@@ -1,7 +1,7 @@
 import type { EffectiveAccess, NewObjectAccessInput, ObjectAccess, Space } from './policy';
 import type { PublicAccount } from './auth';
 import type { Project } from './projects';
-export type { Project, ProjectSnapshot, ProjectField, ProjectFieldChange, ProjectStatus, ProjectIcon, ProjectColorKey, ProjectRelation, ProjectRelationStatus, ProjectPreferences, ProjectTransaction, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectDetail, ProjectAccessLostAcknowledgement, ProjectLegacyAcknowledgement, ProjectUpdateResult, ProjectInput, UpdateProjectInput, ProjectMembersInput, ProjectMembershipInput, ProjectWatcherInput, ProjectSilenceInput } from './projects';
+export type { Project, ProjectKind, ProjectMembershipMode, ProjectMembershipStatus, ProjectReference, ProjectHierarchy, ProjectChildPreview, ProjectSnapshot, ProjectField, ProjectFieldChange, ProjectStatus, ProjectIcon, ProjectColorKey, ProjectRelation, ProjectRelationStatus, ProjectPreferences, ProjectTransaction, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectDetail, ProjectAccessLostAcknowledgement, ProjectLegacyAcknowledgement, ProjectUpdateResult, ProjectInput, UpdateProjectInput, ProjectMembersInput, ProjectMembershipInput, ProjectWatcherInput, ProjectSilenceInput } from './projects';
 
 export type RevisionKind = 'code' | 'paper' | 'document';
 export type RevisionStatus = 'draft' | 'needs_review' | 'changes_requested' | 'accepted' | 'closed';

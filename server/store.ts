@@ -6,7 +6,9 @@ import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repo
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 import { initializePolicies, registerDefaultPolicy, upgradeProjectPolicies } from './policy.ts';
 import { initializeProjects, ProjectStore } from './projects.ts';
-import type { ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectPreferences, ProjectWatchersPage } from '../shared/projects.ts';
+import { initializeProjectHierarchy } from './project-graph.ts';
+import { normalizeProjectTags } from '../shared/project-hierarchy.ts';
+import type { ProjectChildPreview, ProjectKind, ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectPreferences, ProjectWatchersPage } from '../shared/projects.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
 import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
 
@@ -33,7 +35,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 11) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 12) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -194,6 +196,10 @@ export class Store {
       try { this.transaction(() => { initializeProjects(this.database); upgradeProjectPolicies(this.database); this.database.exec('PRAGMA user_version = 11'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 12) {
+      try { this.transaction(() => { initializeProjectHierarchy(this.database); this.database.exec('PRAGMA user_version = 12'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id) });
   }
 
@@ -288,7 +294,8 @@ export class Store {
   }
   getProject(id: string): Project { return this.projects.get(id); }
   projectDetail(id: string, viewerId: string): ProjectDetail { return this.projects.detail(id, viewerId); }
-  projectHistory(id: string, before?: number, limit?: number): ProjectHistory { return this.projects.history(id, before, limit); }
+  projectChildPreview(id: string, kind: ProjectKind): ProjectChildPreview { return this.projects.childPreview(id, kind); }
+  projectHistory(id: string, before?: number, limit?: number, visible?: (id: string) => boolean): ProjectHistory { return this.projects.history(id, before, limit, visible); }
   projectMembers(id: string, viewerId: string, after?: string, limit?: number): ProjectMembersPage { return this.projects.members(id, viewerId, after, limit); }
   projectWatchers(id: string, viewerId: string, after?: string, limit?: number): ProjectWatchersPage { return this.projects.watchers(id, viewerId, after, limit); }
   projectPreferences(id: string, viewerId: string): ProjectPreferences { return this.projects.preferences(id, viewerId); }
@@ -353,7 +360,7 @@ export class Store {
       ownerId: data.ownerId === undefined && current ? current.ownerId : data.ownerId === undefined || data.ownerId === null ? null : this.taskPrincipal(data.ownerId),
     };
     if (!current && 'projectIds' in data && 'projectId' in data) throw new HttpError(400, 'Use projectIds or the legacy projectId field, not both.');
-    const projectIds = current?.projectIds ?? this.taskProjectIds('projectIds' in data ? data.projectIds : data.projectId === undefined || data.projectId === null ? [] : [data.projectId]);
+    const projectIds = current?.projectIds ?? this.normalizeTaskProjectIds(this.taskProjectIds('projectIds' in data ? data.projectIds : data.projectId === undefined || data.projectId === null ? [] : [data.projectId]));
     const changes: TaskFieldChange[] = current ? fields.filter(field => values[field] !== current[field]).map(field => ({ field, oldValue: current[field], newValue: values[field] })) : [];
     if (current && changes.length === 0) return current;
     const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, projectIds, authorId: attribution ? this.taskPrincipal(attribution.principalId) : null, version: 1, createdAt: now, updatedAt: now };
@@ -386,7 +393,11 @@ export class Store {
     });
     if (new Set(ids).size !== ids.length) throw new HttpError(400, 'Choose each project only once.');
     for (const id of ids) this.reference(id, 'project');
-    return ids.sort();
+    return ids;
+  }
+  private normalizeTaskProjectIds(ids: string[]): string[] {
+    const graph = this.database.prepare('SELECT project_id AS id, parent_id AS parentId, kind FROM project_hierarchy').all() as { id: string; parentId: string | null; kind: ProjectKind }[];
+    try { return normalizeProjectTags(ids, graph).sort(); } catch { throw new HttpError(409, 'The project hierarchy is incomplete or invalid.'); }
   }
   updateTaskProjects(id: string, input: unknown, attribution?: ActorAttribution): TaskDetail {
     return this.taskMutation(() => {
@@ -396,8 +407,10 @@ export class Store {
       if (integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before changing project tags.');
       const selected = this.taskProjectIds(data.projectIds);
       const selectedSet = new Set(selected); const existing = new Set(current.projectIds);
-      const removed = action === 'add' ? [] : current.projectIds.filter(projectId => action === 'set' ? !selectedSet.has(projectId) : selectedSet.has(projectId));
-      const added = action === 'remove' ? [] : selected.filter(projectId => !existing.has(projectId));
+      const wanted = action === 'remove' ? current.projectIds.filter(projectId => !selectedSet.has(projectId)) : this.normalizeTaskProjectIds(action === 'set' ? selected : [...current.projectIds, ...selected]);
+      const wantedSet = new Set(wanted);
+      const removed = current.projectIds.filter(projectId => !wantedSet.has(projectId));
+      const added = wanted.filter(projectId => !existing.has(projectId));
       if (!removed.length && !added.length) return this.taskDetail(id);
       const now = new Date().toISOString(); const operationId = randomUUID();
       const task = this.advanceTask(current, now);

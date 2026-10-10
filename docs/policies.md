@@ -11,12 +11,12 @@ Ordinary object and Space rules permit either workspace members or an explicit l
 | View | Read the object and its history, source, comments, evidence, exports and activity |
 | Edit | Change content/status, add versions, restore wiki content and edit the object's access rules; also requires view |
 | Interact | Add comments or record deterministic/local-model/hosted-model reviews; also requires view |
-| Join Project | Join the project when its join rule allows; project editors may join automatically; requires view |
+| Join Project | Join an ordinary leaf project when its join rule allows; editors may join automatically; requires view |
 | Manage Space | Change Space settings and its view/manage rules; does not grant edit access to its contents |
 
 Task owners automatically have view, edit and interact access, including policy editing, subject to their Space's view rule. This is upstream Maniphest behavior. Assignment can therefore grant or remove access even when explicit object rules are unchanged; it advances the workspace access epoch. Authorship and task subscription preferences grant no access.
 
-Project members automatically have view access to their own project inside a visible Space. This grants no automatic edit/interact access and no access to tagged tasks. Membership changes advance the access epoch; self leave or an authorized removal can voluntarily remove access. Watching grants no access. See [project contracts](projects.md).
+Effective project members automatically have view access to their own project inside a visible Space and visible ancestor chain. This grants no automatic edit/interact access and no access to tagged tasks. Membership changes advance the access epoch; self leave or an authorized removal can voluntarily remove access. Watching grants no access. Ordinary parents derive membership from their ordinary leaf descendants; milestones inherit their parent's membership, Space and rules. A visible ordinary child can be edited by its parent's editors, but parent edit permission does not grant child visibility. Milestone policy writes are rejected and direct callers to the parent. Derived membership has no writable row version. Hierarchy and membership-source references are filtered after authorization uses the full graph. See [project contracts](projects.md).
 
 New Spaces default to creator-only view and management. This is an explicit member rule, not a permanent creator bypass. Changing a rule requires retaining one's own view and edit access. Another authorized editor can later remove that access. Token scopes independently restrict operations even where an object permits them. Missing policies deny access.
 

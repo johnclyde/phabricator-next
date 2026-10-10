@@ -1,9 +1,9 @@
 import type { ProjectSnapshot, RevisionDetail, ReviewThread } from '../shared/types';
-import { normalizeProjectSlug } from '../shared/projects';
+import { normalizeProjectSlug, projectDisplayName } from '../shared/projects';
 
-export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'primarySlug' | 'aliases'>, query: string): boolean {
+export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'primarySlug' | 'aliases' | 'displayName'>, query: string): boolean {
   const exact = query.trim().toLowerCase(); const slug = normalizeProjectSlug(query.trim().replace(/^#/, ''));
-  return project.id.toLowerCase() === exact || project.name.toLowerCase() === exact || Boolean(slug && (project.primarySlug === slug || (project.aliases || []).includes(slug)));
+  return project.id.toLowerCase() === exact || project.name.toLowerCase() === exact || projectDisplayName(project).toLowerCase() === exact || Boolean(slug && (project.primarySlug === slug || (project.aliases || []).includes(slug)));
 }
 
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';

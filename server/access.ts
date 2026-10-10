@@ -1,5 +1,5 @@
 import type { AuthContext } from '../shared/auth.ts';
-import type { ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
+import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
 import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
@@ -48,19 +48,36 @@ export class AccessLayer {
     this.require(id);
     return { ...this.store.documentDetail(id), access: this.describe(id), accessEpoch: this.policies.epoch() };
   }
-  project(id: string): ProjectDetail { this.require(id); return this.projectSnapshot(this.store.projectDetail(id, this.principal)); }
+  project(id: string): ProjectDetail {
+    this.require(id); const detail = this.store.projectDetail(id, this.principal);
+    detail.history = this.projectHistory(id); return this.projectSnapshot(detail);
+  }
+  projectChildPreview(id: string, kind: ProjectKind): ProjectChildPreview {
+    this.require(id, 'edit'); return { ...this.store.projectChildPreview(id, kind), accessEpoch: this.policies.epoch() };
+  }
   resolveProject(slug: string): ProjectDetail {
     if (slug.length > 1_024 || !isValidProjectSlug(slug)) throw new HttpError(400, 'Provide a valid project name or alias of at most 128 normalized characters.');
     const row = this.store.database.prepare('SELECT project_id FROM project_aliases WHERE slug = ?').get(normalizeProjectSlug(slug)) as { project_id: string } | undefined;
     if (!row) throw new HttpError(404, 'Object was not found.', 'OBJECT_UNAVAILABLE');
     return this.project(row.project_id);
   }
-  projectHistory(id: string, before?: number, limit?: number): ProjectHistory { this.require(id); return { ...this.store.projectHistory(id, before, limit), accessEpoch: this.policies.epoch() }; }
-  projectMembers(id: string, after?: string, limit?: number): ProjectMembersPage { this.require(id); return { ...this.store.projectMembers(id, this.principal, after, limit), accessEpoch: this.policies.epoch() }; }
-  projectWatchers(id: string, after?: string, limit?: number): ProjectWatchersPage { this.require(id); return { ...this.store.projectWatchers(id, this.principal, after, limit), accessEpoch: this.policies.epoch() }; }
-  projectPreferences(id: string): ProjectPreferences { this.require(id); return { ...this.store.projectPreferences(id, this.principal), accessEpoch: this.policies.epoch() }; }
+  projectHistory(id: string, before?: number, limit?: number): ProjectHistory { this.require(id); return { ...this.store.projectHistory(id, before, limit, related => this.canView(related)), accessEpoch: this.policies.epoch() }; }
+  projectMembers(id: string, after?: string, limit?: number): ProjectMembersPage {
+    this.require(id); const page = this.store.projectMembers(id, this.principal, after, limit);
+    return { ...page, members: page.members.map(member => ({ ...member, sourceProjectIds: member.sourceProjectIds.filter(source => this.canView(source)) })), viewer: this.projectPreferenceSnapshot(page.viewer), accessEpoch: this.policies.epoch() };
+  }
+  projectWatchers(id: string, after?: string, limit?: number): ProjectWatchersPage { this.require(id); const page = this.store.projectWatchers(id, this.principal, after, limit); return { ...page, viewer: this.projectPreferenceSnapshot(page.viewer), accessEpoch: this.policies.epoch() }; }
+  projectPreferences(id: string): ProjectPreferences { this.require(id); return this.projectPreferenceSnapshot(this.store.projectPreferences(id, this.principal)); }
+  private projectPreferenceSnapshot(preferences: ProjectPreferences): ProjectPreferences {
+    return { ...preferences, membership: { ...preferences.membership, sourceProjectIds: preferences.membership.sourceProjectIds.filter(id => this.canView(id)) }, watchingInheritedFrom: preferences.watchingInheritedFrom.filter(id => this.canView(id)), accessEpoch: this.policies.epoch() };
+  }
   private projectSnapshot(detail: ProjectDetail): ProjectDetail {
-    return { ...detail, viewer: { ...detail.viewer, accessEpoch: this.policies.epoch() }, history: { ...detail.history, accessEpoch: this.policies.epoch() }, access: this.describe(detail.project.id), accessEpoch: this.policies.epoch() };
+    const transactions = detail.history.transactions.filter(item => !item.hierarchy || this.canView(item.hierarchy.childId));
+    return { ...detail,
+      hierarchy: { ancestors: detail.hierarchy.ancestors.filter(item => this.canView(item.id)), subprojects: detail.hierarchy.subprojects.filter(item => this.canView(item.id)), milestones: detail.hierarchy.milestones.filter(item => this.canView(item.id)), descendantProjectIds: detail.hierarchy.descendantProjectIds.filter(id => this.canView(id)) },
+      viewer: this.projectPreferenceSnapshot(detail.viewer),
+      history: { ...detail.history, transactions, nextBefore: detail.history.nextBefore === null ? null : transactions.at(-1)?.sequence ?? null, firstAvailableSequence: detail.history.firstAvailableSequence !== null && detail.history.transactions.some(item => item.sequence === detail.history.firstAvailableSequence) && !transactions.some(item => item.sequence === detail.history.firstAvailableSequence) ? null : detail.history.firstAvailableSequence, accessEpoch: this.policies.epoch() },
+      access: this.describe(detail.project.id), accessEpoch: this.policies.epoch() };
   }
   task(id: string): TaskDetail {
     this.require(id);
@@ -166,6 +183,14 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && path === '/api/projects') {
+      const data = record(input);
+      if (data?.parentId !== undefined && data.parentId !== null) {
+        if (typeof data.parentId !== 'string' || !/^PROJ[1-9]\d*$/.test(data.parentId) || !this.canView(data.parentId)) throw new HttpError(400, 'Reference unavailable.');
+        this.require(data.parentId, 'edit');
+      }
+      if (data?.kind === 'milestone' && ['access', 'memberIds', 'icon', 'color', 'colorKey'].some(key => Object.hasOwn(data, key))) throw new HttpError(400, 'Milestones inherit access, membership, icon and color from their parent.');
+    }
     if (method === 'POST' && CREATES.has(path)) this.references(input);
     if (method === 'POST' && path === '/api/tasks' && record(input)?.projectIds !== undefined) this.projectReferences(record(input)!.projectIds);
     if (method === 'POST' && /^\/api\/tasks\/T\d+\/projects$/.test(path)) this.projectReferences(record(input)?.projectIds);
@@ -177,6 +202,7 @@ export class AccessLayer {
     const projectAction = method === 'POST' ? /^\/api\/projects\/(PROJ\d+)\/(members|membership|watchers|silence)$/.exec(path) : null;
     if (projectAction) {
       const id = projectAction[1]!; const action = projectAction[2]; const data = record(input);
+      if ((action === 'members' || action === 'membership') && this.store.getProject(id).membershipMode !== 'direct') throw new HttpError(403, 'Membership is inherited. Change membership in an ordinary leaf project.', 'ACTION_FORBIDDEN');
       if (action === 'members') {
         if (!Array.isArray(data?.principalIds) || data.principalIds.length > 100) throw new HttpError(400, 'Choose at most 100 project members.');
         for (const member of data.principalIds) {
@@ -188,6 +214,8 @@ export class AccessLayer {
         else if (data?.action === 'leave' && this.store.getProject(id).membershipLocked) this.require(id, 'edit');
       } else if (action === 'watchers') {
         const principalId = this.projectPrincipal(data?.principalId, data?.action !== 'unwatch', id, 'watcher');
+        const preferences = this.store.projectPreferences(id, this.principal);
+        if (principalId === this.principal && !preferences.watching.active && preferences.watchingInheritedFrom.length) throw new HttpError(409, 'Watching is inherited from an ancestor. Change that ancestor\'s watch preference.');
         if (principalId !== this.principal) {
           if (data?.action !== 'unwatch') throw new HttpError(403, 'Only a member may choose to watch a project for themselves.', 'ACTION_FORBIDDEN');
           this.require(id, 'edit');
@@ -225,8 +253,9 @@ export class AccessLayer {
       }
     }
     if (method === 'POST' && CREATES.has(path)) {
-      const access = record(record(input)?.access);
-      const id = access?.spaceId ?? 'S1';
+      const data = record(input); const access = record(data?.access);
+      const parentId = path === '/api/projects' && typeof data?.parentId === 'string' ? data.parentId : null;
+      const id = access?.spaceId ?? (parentId ? this.policies.policy(parentId, this.principal).spaceId : 'S1');
       if (typeof id !== 'string') throw new HttpError(400, 'Choose an available Space.');
       this.require(id);
       if (this.policies.getSpace(id, this.principal).archived) throw new HttpError(409, 'This Space is archived. Choose another destination.');
@@ -312,6 +341,24 @@ export class AccessLayer {
     const { projectId: _legacy, ...snapshot } = task;
     return { ...snapshot, projectIds };
   }
+  private projectNeedsRefresh(project: Record<string, unknown>, body: Record<string, unknown>): boolean {
+    if (typeof project.id !== 'string') return true;
+    const current = this.store.getProject(project.id);
+    for (const field of ['kind', 'parentId', 'milestoneNumber', 'depth', 'hierarchyVersion', 'membershipMode'] as const) if (project[field] !== current[field]) return true;
+    if (project.kind === 'milestone') {
+      const parent = current.parentId ? this.store.getProject(current.parentId) : null;
+      if (!parent || project.displayName !== `${parent.name} (${String(project.name)})` || project.icon !== current.icon || project.color !== current.color || project.colorKey !== current.colorKey) return true;
+    }
+    if (record(body.project)) {
+      const detail = this.store.projectDetail(project.id, this.principal);
+      if (JSON.stringify(body.hierarchy) !== JSON.stringify(detail.hierarchy) || body.membersVersion !== detail.membersVersion) return true;
+      const saved = record(body.viewer);
+      if (!saved) return true;
+      const { accessEpoch: _epoch, ...preferences } = saved;
+      if (JSON.stringify(preferences) !== JSON.stringify(detail.viewer)) return true;
+    }
+    return false;
+  }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
   present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false): MutationResponse {
     let target = this.target(method, path);
@@ -333,9 +380,16 @@ export class AccessLayer {
     } else if (target) this.require(target.id, target.capability);
     if (path.startsWith('/api/policies/') && target) return { status: response.status, body: this.describe(target.id) };
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
-    if (body && record(body.project)) return { status: response.status, body: this.projectSnapshot(body as unknown as ProjectDetail) };
-    if (path === '/api/projects' && body && typeof body.id === 'string' && /^PROJ[1-9]\d*$/.test(body.id) && body.version === undefined) return { status: response.status, body: { id: body.id, saved: true, refreshRequired: true, accessEpoch: this.policies.epoch() } };
-    if (/^\/api\/projects\/PROJ\d+\/silence$/.test(path) && body) return { status: response.status, body: { ...body, accessEpoch: this.policies.epoch() } };
+    if (path.startsWith('/api/projects') && body) {
+      const project = record(body.project) ?? (path === '/api/projects' ? body : null);
+      if (project && typeof project.id === 'string' && /^PROJ[1-9]\d*$/.test(project.id) && (project.version === undefined || project.kind === undefined || project.hierarchyVersion === undefined || (body.project !== undefined && !record(body.hierarchy)) || this.projectNeedsRefresh(project, body))) return { status: response.status, body: { id: project.id, saved: true, refreshRequired: true, accessEpoch: this.policies.epoch() } };
+      if (record(body.project)) return { status: response.status, body: this.projectSnapshot(body as unknown as ProjectDetail) };
+      if (/^\/api\/projects\/PROJ\d+\/silence$/.test(path)) {
+        const { accessEpoch: _epoch, ...preferences } = body;
+        if (JSON.stringify(preferences) !== JSON.stringify(this.store.projectPreferences(target!.id, this.principal))) return { status: response.status, body: { id: target!.id, saved: true, refreshRequired: true, accessEpoch: this.policies.epoch() } };
+        return { status: response.status, body: this.projectPreferenceSnapshot(body as unknown as ProjectPreferences) };
+      }
+    }
     const normalized = body && record(body.task) ? { ...body, task: this.taskProjectSnapshot(record(body.task)!) }
       : body && typeof body.id === 'string' && /^T[1-9]\d*$/.test(body.id) && path.startsWith('/api/tasks') ? this.taskProjectSnapshot(body) : response.body;
     const taskDetail = record(normalized);

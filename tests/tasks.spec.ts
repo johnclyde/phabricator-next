@@ -73,8 +73,16 @@ test('a cached task status waits for initial access verification and preserves i
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await expect(status).toHaveValue('resolved');
     expect(await page.evaluate(id => Object.keys(localStorage).filter(key => key.endsWith(':state')).flatMap(key => (JSON.parse(localStorage.getItem(key)!) as AppState).tasks).find(item => item.id === id)?.status, task.id)).toBe('resolved');
+    // The controlled race is complete. Drain its handlers before navigating;
+    // the persistence reload should use the real network without interception.
+    await page.unrouteAll({ behavior: 'wait' });
     await page.reload(); await expect(status).toHaveValue('resolved');
-  } finally { holding = false; releaseState(); releaseOldest(); }
+  } finally {
+    holding = false; releaseState(); releaseOldest();
+    // The final cached render can precede its background state reads. Finish
+    // this test's intercepted requests before Playwright closes its context.
+    await page.unrouteAll({ behavior: 'wait' });
+  }
 });
 
 test('task pages preserve exact field history, comments and manual dependencies with voice navigation', async ({ page }, info) => {

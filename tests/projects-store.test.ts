@@ -71,7 +71,7 @@ test('initial and explicit membership changes use one collection revision and pe
     const unchanged = snapshot(store); members(store, project.id, 'add', ['bob']); members(store, project.id, 'remove', ['carol']); members(store, project.id, 'set', ['bob', 'alice']); assert.deepEqual(snapshot(store), unchanged);
     const set = members(store, project.id, 'set', ['bob', 'carol'], bob);
     assert.equal(set.membersVersion, 2); assert.equal(set.project.version, 1); assert.equal(epoch(store), initialEpoch + 2);
-    assert.deepEqual(store.projectPreferences(project.id, 'alice').membership, { projectId: project.id, principalId: 'alice', relation: 'member', active: false, version: 2, updatedAt: set.history.transactions[0]!.createdAt });
+    assert.deepEqual(store.projectPreferences(project.id, 'alice').membership, { projectId: project.id, principalId: 'alice', relation: 'member', active: false, version: 2, updatedAt: set.history.transactions[0]!.createdAt, source: 'direct', sourceProjectIds: [] });
     const latest = set.history.transactions.slice(0, 2); assert.equal(new Set(latest.map(row => row.relation!.operationId)).size, 1); assert.ok(latest.every(row => row.attribution?.principalId === bob.principalId));
     assert.deepEqual(store.projectMembers(project.id, 'alice', undefined, 1).members.map(row => row.principalId), ['bob']); assert.equal(store.projectMembers(project.id, 'alice', undefined, 1).nextAfter, 'bob'); assert.equal(store.projectMembers(project.id, 'alice', 'bob', 1).nextAfter, null);
     const before = snapshot(store); assert.throws(() => store.updateProjectMembers(project.id, { action: 'set', principalIds: [], expectedCollectionVersion: 1 }, alice), status(409)); assert.deepEqual(snapshot(store), before);
@@ -283,7 +283,7 @@ function schemaTen(path: string): { projects: ProjectSnapshot[]; preserved: Map<
 test('schema 11 migration preserves old bytes, invents no authorship/membership, and deterministically resolves colliding legacy names', () => {
   const directory = mkdtempSync(join(tmpdir(), 'phab-project-migrate-')); const path = join(directory, 'workspace.sqlite'); const legacy = schemaTen(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 12);
     for (const [table, rows] of legacy.preserved) assert.deepEqual(raw(store, table), rows, `${table} retains its exact historical data`);
     const projects = legacy.projects.map(project => store.getProject(project.id)); assert.deepEqual(projects.map(project => project.primarySlug), ['legacy-proj1-2', 'legacy-proj2', 'legacy-proj1', 'legacy-proj4', '日本語研究', 'unrelated', 'legacy-proj7']);
     assert.deepEqual(projects.map(project => project.primarySlugSource), ['generated', 'generated', 'name', 'generated', 'name', 'name', 'generated']);

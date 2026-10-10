@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { analyzeLocally } from '../shared/review';
 import { mountPath, normalizeBasePath } from '../shared/mount';
 import { isTaskClosed } from '../shared/tasks';
-import { normalizeProjectSlug } from '../shared/projects';
+import { normalizeProjectSlug, projectDisplayName } from '../shared/projects';
+import { visibleProjectScope } from '../shared/project-hierarchy';
 import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 
 const help = `Phabricator Next — arc (initial CLI)
@@ -30,10 +31,11 @@ Hosted review is always explicit.
 tasks lists your assigned open tasks by default. --owner all includes all visible
 owners; --unassigned selects unowned tasks. --subscribed selects tasks you follow.
 Use a principal ID or user:USERNAME to disambiguate reserved owner filter names.
---project selects a visible project ID, exact name or alias; repeat it to require all tags.
+--project selects a visible project ID, exact name or alias, including visible descendants.
+Repeat it to require a matching tag in each selected project's subtree.
 show T1 includes the current task, visible dependencies, and the first history page.
 projects lists active visible projects; --joined and --watching select your relationships.
-show PROJ1 includes the project profile, your preferences, and its first history page.
+show PROJ1 includes the project profile, hierarchy, preferences, and first history page.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -134,7 +136,7 @@ async function main() {
     const projectIds = (values.project || []).map(value => {
       const byId = state.projects.find(project => project.id === value);
       if (byId) return byId.id;
-      const matches = state.projects.filter(project => project.name.toLocaleLowerCase() === value.toLocaleLowerCase());
+      const matches = state.projects.filter(project => project.name.toLocaleLowerCase() === value.toLocaleLowerCase() || projectDisplayName(project).toLocaleLowerCase() === value.toLocaleLowerCase());
       if (matches.length === 1) return matches[0]!.id;
       if (matches.length === 0) {
         const slug = normalizeProjectSlug(value.replace(/^#/, ''));
@@ -143,11 +145,12 @@ async function main() {
       }
       throw new Error('Project is unavailable or its name is ambiguous. Use a visible project ID, exact name or alias.');
     });
+    const projectScopes = projectIds.map(id => new Set(visibleProjectScope(id, state.projects)));
     const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
     const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task.status) : !isTaskClosed(task.status)))
       .filter(task => owner === 'all' || task.ownerId === ownerId)
       .filter(task => !values.subscribed || state.followingTaskIds.includes(task.id))
-      .filter(task => projectIds.every(id => task.projectIds.includes(id)))
+      .filter(task => projectScopes.every(scope => task.projectIds.some(id => scope.has(id))))
       .sort((left, right) => (order === 'priority' ? ranks[right.priority] - ranks[left.priority] : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))
       .slice(0, limit);
     if (values.json) console.log(JSON.stringify(tasks, null, 2));
@@ -164,10 +167,10 @@ async function main() {
     const projects = state.projects.filter(project => status === 'all' || project.status === status)
       .filter(project => !values.joined || state.joinedProjectIds.includes(project.id))
       .filter(project => !values.watching || state.watchingProjectIds.includes(project.id))
-      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id, 'en', { numeric: true }))
+      .sort((left, right) => projectDisplayName(left).localeCompare(projectDisplayName(right)) || left.id.localeCompare(right.id, 'en', { numeric: true }))
       .slice(0, limit);
     if (values.json) console.log(JSON.stringify(projects, null, 2));
-    else for (const project of projects) console.log(`${project.id}\tv${project.version}\t${project.status}\t${project.name}`);
+    else for (const project of projects) console.log(`${project.id}\tv${project.version}\t${project.status}\t${projectDisplayName(project)}`);
     return;
   }
   if (command === 'show') {

@@ -288,6 +288,65 @@ test('CLI project reads preserve mounts, membership filters and private profiles
   } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('CLI project filters include visible descendants and distinguish milestone display names', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'phab-cli-hierarchy-'));
+  const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+  const alice = await provision.createAccount({ username: 'alice', displayName: 'Alice', password: 'test-only-hierarchy-cli-password' });
+  const bob = await provision.createAccount({ username: 'bob', displayName: 'Bob', password: 'test-only-hierarchy-cli-password' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/workspace/' });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
+  const token = app.auth.createToken(bob.id, { name: 'Hierarchy CLI read', scopes: ['read'] });
+  const read = (args: string[]) => runCommand(root, [...args, '--server', server], token.token);
+  const actor = { principalId: bob.id, displayName: bob.displayName, credentialId: null, requestId: 'cli-hierarchy' };
+  const child = (parentId: string, name: string, kind: 'project' | 'milestone' = 'project') => {
+    const preview = store.projectChildPreview(parentId, kind);
+    return store.createProject({ name, kind, parentId, expectedParentVersion: preview.expectedParentVersion,
+      expectedHierarchyVersion: preview.expectedHierarchyVersion, expectedParentMembersVersion: preview.expectedParentMembersVersion,
+      ...(preview.conversionRequired ? { confirmMembershipConversion: true } : {}) }, actor);
+  };
+  try {
+    const parent = store.createProject({ name: 'Research', memberIds: [bob.id] }, actor);
+    const methods = child(parent.id, 'Methods'); const calibration = child(methods.id, 'Calibration');
+    const milestone = child(parent.id, 'Round one', 'milestone'); const methodsMilestone = child(methods.id, 'Round one', 'milestone');
+    const secret = child(parent.id, 'Hidden child marker'); const hiddenLeaf = child(secret.id, 'Hidden descendant marker');
+    app.policies.configureNew(secret.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
+    const nestedTask = store.createTask({ title: 'Calibration notes', projectIds: [calibration.id] }, actor);
+    const milestoneTask = store.createTask({ title: 'First review', projectIds: [milestone.id] }, actor);
+    store.createTask({ title: 'Visible task with a hidden project', projectIds: [hiddenLeaf.id] }, actor);
+    store.updateProjectWatcher(parent.id, { principalId: bob.id, action: 'watch', expectedVersion: 0 }, actor);
+    for (const [filters, expected] of [
+      [['--project', parent.id], [nestedTask.id, milestoneTask.id]],
+      [['--project', methods.id], [nestedTask.id]],
+      [['--project', 'Research (Round one)'], [milestoneTask.id]],
+      [['--project', parent.id, '--project', methods.id], [nestedTask.id]],
+    ] as [string[], string[]][]) {
+      const result = await read(['tasks', '--owner', 'all', ...filters, '--json']);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout).map((task: { id: string }) => task.id), expected);
+      assert.ok(!result.stdout.includes(secret.id)); assert.ok(!result.stdout.includes(hiddenLeaf.id));
+    }
+    const ambiguous = await read(['tasks', '--owner', 'all', '--project', 'Round one']);
+    assert.equal(ambiguous.code, 1); assert.match(ambiguous.stderr, /ambiguous/);
+    const projects = await read(['projects']);
+    assert.equal(projects.code, 0, projects.stderr); assert.match(projects.stdout, /Research \(Round one\)/); assert.match(projects.stdout, /Methods \(Round one\)/);
+    assert.ok(!projects.stdout.includes(secret.name)); assert.ok(!projects.stdout.includes(hiddenLeaf.name));
+    const watching = await read(['projects', '--watching', '--json']);
+    assert.equal(watching.code, 0, watching.stderr); assert.deepEqual(JSON.parse(watching.stdout).map((project: { id: string }) => project.id), [parent.id]);
+    const joined = await read(['projects', '--joined', '--json']);
+    assert.equal(joined.code, 0, joined.stderr);
+    assert.deepEqual(new Set(JSON.parse(joined.stdout).map((project: { id: string }) => project.id)), new Set([parent.id, methods.id, calibration.id, milestone.id, methodsMilestone.id]));
+    const shown = await read(['show', methodsMilestone.id]);
+    assert.equal(shown.code, 0, shown.stderr);
+    const detail = JSON.parse(shown.stdout);
+    assert.equal(detail.project.primarySlug, null); assert.equal(detail.viewer.membership.version, null);
+    assert.equal(detail.viewer.effectiveWatching, true); assert.deepEqual(detail.viewer.watchingInheritedFrom, [parent.id]);
+    assert.deepEqual(detail.hierarchy.ancestors.map((project: { id: string }) => project.id), [parent.id, methods.id]);
+    assert.ok(!shown.stdout.includes(secret.id)); assert.ok(!shown.stdout.includes(hiddenLeaf.id));
+  } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('CLI authenticates with scoped environment tokens without following redirects or exposing credentials', async () => {
   const root = await mkdtemp(join(tmpdir(), 'phab-cli-auth-'));
   const store = createStore({ path: ':memory:' });

@@ -9,7 +9,7 @@ export interface ProjectPolicy { kind: 'project'; objectId: string; spaceId: str
 export type ObjectPolicy = OrdinaryObjectPolicy | ProjectPolicy;
 export interface Space { id: string; name: string; description: string; version: number; isDefault: boolean; archived: boolean; view: Audience; edit: Audience }
 export interface EffectiveAccess { view: boolean; edit: boolean; interact: boolean; managePolicy: boolean; join?: boolean }
-export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; joinLabel?: string; automatic?: { kind: 'task-owner'; principalId: string } | { kind: 'project-member' } }
+export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; joinLabel?: string; inheritedFrom?: { projectId: string; policyVersion: number }; automatic?: { kind: 'task-owner'; principalId: string } | { kind: 'project-member'; parentEditProjectId?: string } }
 export interface NewObjectAccessInput { spaceId: string; view?: Audience; edit?: Audience; interact?: Audience }
 export interface NewProjectAccessInput { spaceId: string; view?: ProjectAudience; edit?: ProjectAudience; interact?: ProjectAudience; join?: ProjectAudience }
 export interface CreateSpaceInput { name: string; description?: string; view?: Audience; edit?: Audience }
@@ -22,12 +22,12 @@ export function audienceAllows(audience: ProjectAudience, principalId: string, p
   return Boolean(principalId) && (audience.kind === 'workspace' || (audience.kind === 'project-members' ? projectMember : audience.principalIds.includes(principalId)));
 }
 
-export function effectiveAccess(policy: ObjectPolicy, space: Space, principalId: string, automatic = false, projectMember = false): EffectiveAccess {
+export function effectiveAccess(policy: ObjectPolicy, space: Space, principalId: string, automatic = false, projectMember = false, parent?: Pick<EffectiveAccess, 'view' | 'edit'>): EffectiveAccess {
   const project = policy.kind === 'project';
   const owner = !project && automatic;
   const member = project && projectMember;
-  const view = policy.spaceId === space.id && audienceAllows(space.view, principalId) && (owner || member || audienceAllows(policy.rules.view, principalId, member));
-  const edit = view && (owner || audienceAllows(policy.rules.edit, principalId, member));
+  const view = (!project || !parent || parent.view) && policy.spaceId === space.id && audienceAllows(space.view, principalId) && (owner || member || audienceAllows(policy.rules.view, principalId, member));
+  const edit = view && (owner || (project && parent?.edit === true) || audienceAllows(policy.rules.edit, principalId, member));
   return { view, edit, interact: view && (owner || audienceAllows(policy.rules.interact, principalId, member)), managePolicy: edit, ...(project ? { join: view && (edit || audienceAllows(policy.rules.join, principalId, member)) } : {}) };
 }
 
