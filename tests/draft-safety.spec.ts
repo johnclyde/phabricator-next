@@ -41,6 +41,9 @@ test('inline comment draft keeps the original version and location after reload'
   await page.getByRole('button', { name: 'Comment on line 7', exact: true }).click();
   await page.getByRole('textbox', { name: 'Review comment', exact: true }).fill('This passage needs a precise duration.');
   await page.reload();
+  await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+  await expect(page.getByRole('textbox', { name: 'Review comment', exact: true })).toHaveValue('This passage needs a precise duration.');
+  await page.getByLabel('Version to inspect', { exact: true }).selectOption('2');
   await expect(page.getByRole('textbox', { name: 'Review comment', exact: true })).toHaveValue('');
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');
   await expect(page.getByRole('textbox', { name: 'Review comment', exact: true })).toHaveValue('This passage needs a precise duration.');

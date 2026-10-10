@@ -10,3 +10,11 @@ test('voice can navigate directly to an immutable-review object or wiki document
     assert.equal(parseCommand(command).type, 'unknown');
   }
 });
+
+test('comparison commands are explicit navigation and reading actions', () => {
+  for (const command of ['read changes', 'Read the changes.']) assert.deepEqual(parseCommand(command), { type: 'changes' });
+  for (const command of ['read change', 'read current change', 'Read the current change!', 'read this change']) assert.deepEqual(parseCommand(command), { type: 'currentChange' });
+  for (const command of ['next change', 'read next change', 'go to the next change']) assert.deepEqual(parseCommand(command), { type: 'nextChange' });
+  for (const command of ['previous change', 'read the previous change', 'show prior change']) assert.deepEqual(parseCommand(command), { type: 'previousChange' });
+  for (const command of ['next change and accept it', 'delete current change', 'read all files', 'apply next change']) assert.equal(parseCommand(command).type, 'unknown');
+});

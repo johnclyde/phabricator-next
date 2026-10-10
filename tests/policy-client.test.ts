@@ -977,3 +977,35 @@ for (const mode of ['local', 'password'] as const) test(`submitted bulk recovery
     lockSession(); assert.deepEqual(next.submittedBulkMoves(), []); assert.equal(nextSession.memory.size, 0);
   } finally { if (storage) storage.close(); else lockSession(); }
 });
+
+const comparisonSelection = (revisionId = 'L1') => ({ revisionId, base: { id: 'immutable-one', contentHash: 'hash-one' }, target: { id: 'immutable-two', contentHash: 'hash-two' }, filePath: 'motion.md', mode: 'words', view: 'changes' });
+test('comparison metadata is source-free, stable across local reopen, and purged on object access loss without losing unrelated drafts', () => {
+  const storage = localStorageFixture();
+  try {
+    let client = storage.reopen(); client.reconcileAccess({ L1: access('L1'), L2: access('L2') }, 1);
+    assert.equal(client.writeStored('revision-comparison:L1', { ...comparisonSelection(), source: 'must not persist', result: { segments: ['must not persist'] } }), true);
+    client.writeStored('revision-comparison:L2', comparisonSelection('L2'));
+    client.writeStored('comment-source:L2:immutable-two', { body: 'Keep unrelated draft' });
+    assert.deepEqual(client.readStored('revision-comparison:L1', null), comparisonSelection());
+    assert.equal(client.draftRecords().some(row => row.key.startsWith('revision-comparison:')), false, 'presentation metadata is not unsaved work');
+    client = storage.reopen(); assert.deepEqual(client.readStored('revision-comparison:L1', null), comparisonSelection());
+    client.reconcileAccess({ L2: access('L2') }, 2);
+    assert.equal(client.readStored('revision-comparison:L1', null), null);
+    assert.equal(storage.stored.has(client.storageKey('revision-comparison:L1')), false);
+    assert.deepEqual(client.readStored('revision-comparison:L2', null), comparisonSelection('L2'));
+    assert.deepEqual(client.readStored('comment-source:L2:immutable-two', null), { body: 'Keep unrelated draft' });
+    assert.equal(client.quarantinedDrafts().length, 0);
+    assert.equal(client.writeStored('revision-comparison:L1', comparisonSelection()), false);
+  } finally { storage.close(); }
+});
+test('protected comparison metadata remains session-only and cannot survive account replacement', () => {
+  const storage = localStorageFixture();
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.writeStored('revision-comparison:L1', comparisonSelection());
+    assert.deepEqual(client.readStored('revision-comparison:L1', null), comparisonSelection());
+    assert.equal([...storage.stored.keys()].some(key => key.includes('revision-comparison:')), false);
+    const next = createWorkspaceClient(activateSession(identity('bob')));
+    assert.equal(next.readStored('revision-comparison:L1', null), null);
+    assert.equal(client.writeStored('revision-comparison:L1', comparisonSelection()), false);
+  } finally { storage.close(); }
+});

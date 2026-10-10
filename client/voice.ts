@@ -7,7 +7,8 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
 }
 
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';
-export type VoiceCommand = { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange';
+export type VoiceCommand = { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: ComparisonVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -35,6 +36,9 @@ export function parseCommand(input: string): VoiceCommand {
   if (task) return { type: 'task', title: task[1] };
   if (/^(read|read the|read my|give me a|give me the) (summary|overview)$/.test(text)) return { type: 'summary' };
   if (/^read (?:the )?changes$/.test(text)) return { type: 'changes' };
+  if (/^read (?:(?:the )?current |this )?change$/.test(text)) return { type: 'currentChange' };
+  if (/^(?:(?:read|show|go to) (?:the )?)?next change$/.test(text)) return { type: 'nextChange' };
+  if (/^(?:(?:read|show|go to) (?:the )?)?(?:previous|prior) change$/.test(text)) return { type: 'previousChange' };
   if (/^read (?:the )?(discussion|threads|open threads)$/.test(text)) return { type: 'discussion' };
   if (/^(?:show|open) (?:my tasks|tasks assigned to me)$/.test(text)) return { type: 'taskFilter', value: 'mine' };
   if (/^(?:show|open) unassigned tasks$/.test(text)) return { type: 'taskFilter', value: 'unassigned' };

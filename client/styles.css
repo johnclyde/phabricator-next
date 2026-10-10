@@ -456,3 +456,41 @@
 .workboard-bulk-recovery { margin: 16px 0; }
 .workboard-bulk-recovery article { padding: 10px 0; border-top: 1px solid #dce3e9; }
 @media (max-width: 700px) { .workboard-bulk-recovery .project-actions { display: flex; flex-wrap: wrap; gap: 8px; }.workboard-bulk-recovery .button { min-height: 44px; flex: 1 1 140px; white-space: normal; justify-content: center; } }
+
+/* Immutable comparison selection and literal, bounded change passages. */
+.comparison-toolbar { flex-wrap: wrap; }
+.file-toolbar { flex-wrap: wrap; gap: 12px; }
+.file-toolbar label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.file-toolbar label:first-child { flex: 1 1 200px; }
+.file-toolbar label:first-child select { min-width: 0; width: 100%; }
+.file-toolbar select { max-width: 100%; }
+.comparison-identity { margin: 0; padding: 12px 18px; color: var(--muted); overflow-wrap: anywhere; border-bottom: 1px solid var(--border); }
+.passage-navigation { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 18px; background: #f5f7f8; border-bottom: 1px solid var(--border); }
+.passage-navigation span { text-align: center; font-size: 13px; }
+.literal-diff { white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+.literal-diff.line-comparison { font: 13px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.literal-diff .active-change { outline: 2px solid #496e8a; outline-offset: 2px; border-radius: 2px; }
+.comparison-limit { padding: 18px; }
+.comparison-limit h3 { margin: 0 0 10px; }
+.comparison-limit details { margin-top: 14px; }
+.raw-comparison-source { max-height: 500px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f8; padding: 14px; }
+@media (max-width: 700px) {
+  .comparison-toolbar { gap: 10px; padding: 12px; }
+  .comparison-toolbar > label { flex: 1 1 115px; }
+  .comparison-toolbar select, .comparison-toolbar button, .file-toolbar select, .passage-navigation button, .comparison-limit button, .comparison-limit summary { min-height: 44px; }
+  .comparison-toolbar .segmented { width: 100%; margin: 0; }
+  .comparison-toolbar .segmented button { flex: 1; }
+  .file-toolbar { padding: 12px; }
+  .file-toolbar label { flex-wrap: wrap; }
+  .file-toolbar .content-hash { width: 100%; }
+  .passage-navigation { padding: 10px; gap: 6px; }
+  .passage-navigation .button { padding-inline: 8px; }
+  .comparison-identity { padding: 12px; font-size: 13px; }
+}
+.literal-line-diff .active-change { box-shadow: inset 3px 0 #496e8a; }
+.literal-line-diff th { padding: 7px; text-align: left; color: #536577; background: #eef1f3; font: 12px/1.5 var(--font, sans-serif); }
+.diff-no-newline { display: block; font: italic 11px/1.5 sans-serif; color: #627486; padding-block: 4px; }
+@media (max-width: 700px) {
+  .literal-line-diff .line-number button { min-height: 44px; min-width: 44px; }
+  .literal-line-diff .diff-code pre { min-height: 44px; }
+}
