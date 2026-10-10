@@ -37,6 +37,11 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | O204 | Authenticated mobile deployment | Real phone access over TLS with sessions/tokens, private drafts and installable app testing on iOS/Android |
 | O205 | Cross-device synchronization | Multiple devices retain drafts and detect conflicts; no silent last-write-wins for manuscript revisions |
 | O206 | Local model lifecycle | Model availability/context checks, cancellation, resource budgets, trusted local-only configuration and evaluations |
+| O207 | Configurable path-prefix hosting | Planned; root and non-root installs pass browser/API/CLI tests; assets, redirects, manifest and service worker stay within the configured mount and leave sibling routes alone |
+| O208 | Account-aware offline storage | Planned; caches, drafts, outbox and locks distinguish deployments/workspaces/principals; logout and account switching cannot reveal another user's data or replay their writes; unsynced work has an explicit retention/export policy |
+| O209 | Portable release and hosting contract | Planned; document validated origin/base-path/proxy configuration, persistent data and health interface; reproduce a pinned release with independent site configuration and no operator-specific files or credentials in this repository |
+
+For hosted access, complete the authentication and object-policy requirements in O204/P301 alongside O207–O209 before exposing a workspace. These requirements are reusable product work. Site-specific infrastructure and rollout plans remain in a separate repository; see [ADR 006](architecture.md#adr-006-portable-application-separate-site-operations).
 
 ## Then: scale the Phabricator platform
 
@@ -49,4 +54,4 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | P305 | Conduit/import/export compatibility | Historical fixtures migrate without losing identities, versions, policies or discussion context |
 | P306 | Remaining apps and infrastructure | Advance each row in the full parity inventory with demonstrable behavior, not just matching names |
 
-The source is public under Apache 2.0. The working title, deployment model and long-term compatibility promises remain product decisions. None blocks using this local foundation to iterate.
+The source is public under Apache 2.0. The working title, hosting implementation and long-term compatibility promises remain product decisions. The boundary between the reusable application and site operations is established in ADR 006. None blocks using this local foundation to iterate.

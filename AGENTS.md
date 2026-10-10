@@ -7,4 +7,5 @@
 - Never label a local deterministic check as AI. Review evidence is tied to immutable versions. Changing content invalidates acceptance.
 - Never send source to an external provider implicitly. Hosted AI review is an explicit operation, configured by the server operator.
 - Do not claim feature parity until it is implemented and verified. Track gaps explicitly.
+- Keep operator-specific domains, infrastructure, secrets, and deployment automation in a separate site/infrastructure repository. This repository owns reusable hosting capabilities and generic documentation.
 - Run `npm run check`, `npm test`, and `npm run build` after meaningful implementation changes.

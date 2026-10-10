@@ -42,6 +42,18 @@ The first server is loopback-only and single-user. Strict Host/Origin validation
 
 Before sharing a workspace, implement humans/services/agents as distinct principals, object policies, project membership, Spaces, scoped tokens, auditable agent capabilities and retention controls. Search, model context, notifications and exports must enforce the same policies as object reads. A prompt is not an access-control boundary.
 
+## ADR 006: portable application, separate site operations
+
+The public repository owns the reusable product: application code, authentication and policies, a documented configuration interface, reproducible builds, and tests. Operator-specific domains, DNS/TLS configuration, reverse-proxy rules, infrastructure, identity-provider registrations, secrets, backups and deployment automation belong in a separate site/infrastructure repository. That repository should consume a pinned application commit or immutable release artifact without requiring a site-specific application fork. Public CI checks the product; it does not deploy a particular operator's site.
+
+Support both a site root and a configurable path prefix, for example `/workspace/`. A future hosting mode must validate an explicit public origin and base path, and apply them consistently to assets, API requests, redirects, CLI URLs, health routes, web-manifest identity/start URL/scope and service-worker registration. Define one prefix-preserving proxy contract; do not rely on ad hoc HTML rewrites. Build and server configuration must agree, with a clear error on mismatches. These are planned capabilities, not configuration switches available in the current prototype.
+
+Offline support must coexist with other applications: restrict the service worker to the mount and explicit static assets, and keep API/authentication responses out of its shell cache. Namespace caches, drafts, snapshots, outbox entries and cross-tab locks by deployment/workspace identity, and private records by authenticated principal. Define logout, account switching and expired-session behavior before network deployment: another user must not see cached private drafts, and queued writes must never replay as a different principal. Unsynced work needs an explicit retention/export policy rather than silent deletion.
+
+A URL path is a routing boundary, not a browser security boundary. Applications sharing an origin also share browser storage access; namespacing prevents accidental collisions but does not isolate untrusted sibling applications. The site operator must account for that shared trust and any broader service worker already present. See [same-origin behavior](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Same-origin_policy) and [service-worker scope](https://developer.mozilla.org/en-US/docs/Web/API/ServiceWorkerContainer/register).
+
+Authenticated hosting remains gated on ADR 005. Preserve the loopback-only default while adding explicit trusted-proxy handling, session/CSRF protection and object authorization; forwarding traffic through a proxy is not authentication. Scope server-side idempotency records to the principal/workspace and recheck authorization before returning a stored result. Verify root and non-root installations, unrelated sibling routes, desktop/mobile navigation, offline reload, account changes and CLI requests before declaring a release deployable. The current implementation still uses root-relative URLs and a single local workspace storage namespace.
+
 ## Code map
 
 | Directory | Responsibility |
