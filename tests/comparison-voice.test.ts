@@ -70,3 +70,44 @@ test('long Unicode excerpts and metadata have explicit speech bounds and truncat
   assert.ok(Array.from(expanded).length <= COMPARISON_SPEECH_LIMIT);
   assert.match(expanded, /speech length limit/);
 });
+
+test('filtered narration uses original passage identities and reports skipped space/tab-only changes', () => {
+  const selected = { ...snapshot('First  sentence. Stable separator. Last old claim.', 'First sentence. Stable separator. Last new claim.'), skipSpaceTabOnly: true, passageIndex: 1 };
+  assert.equal(selected.result.status, 'ready');
+  if (selected.result.status !== 'ready') return;
+  assert.equal(selected.result.passages.length, 2);
+  const original = structuredClone(selected.result);
+  const current = comparisonNarration(selected, 'current');
+  assert.match(current, /Space and tab-only changes are skipped for navigation/);
+  assert.match(current, /Navigating 1 of 2 changed passages\. 1 space\/tab-only passage skipped/);
+  assert.match(current, /Change 1 of 1 under this filter/);
+  assert.match(current, /Removed text: old.*Added text: new/s);
+  assert.doesNotMatch(current, /Removed text: \[2 spaces\]/);
+  assert.match(comparisonNarration({ ...selected, passageIndex: 0 }, 'current'), /Select a changed passage first/);
+  assert.match(comparisonNarration({ ...selected, skipSpaceTabOnly: false }, 'current'), /Change 2 of 2/);
+  assert.deepEqual(selected.result, original, 'narration must not rewrite literal evidence');
+});
+
+test('all-filtered changes, true equality, and added/deleted whitespace files stay distinct', () => {
+  const filtered = comparisonNarration({ ...snapshot('a  b', 'a\tb'), skipSpaceTabOnly: true });
+  assert.match(filtered, /Navigating 0 of 1 changed passage/);
+  assert.match(filtered, /No changed passages remain under this filter/);
+  assert.doesNotMatch(filtered, /No text changes in this file/);
+  assert.match(comparisonNarration({ ...snapshot('same', 'same'), skipSpaceTabOnly: true }), /No text changes in this file/);
+  assert.match(comparisonNarration({ ...snapshot(null, '  \t'), skipSpaceTabOnly: true }), /File added\..*Added text:/s);
+  assert.match(comparisonNarration({ ...snapshot(' \t', null), skipSpaceTabOnly: true }), /File deleted\..*Removed text:/s);
+  assert.match(comparisonNarration({ ...snapshot('', null), skipSpaceTabOnly: true }), /Empty file deleted/);
+});
+
+test('filtered narration retains line-ending and non-ASCII whitespace changes and respects speech limits', () => {
+  for (const [before, after, expected] of [['a b', 'a\u00a0b', /non-breaking space/], ['a\nb', 'a\r\nb', /carriage return/]] as const) {
+    const spoken = comparisonNarration({ ...snapshot(before, after), skipSpaceTabOnly: true });
+    assert.match(spoken, expected); assert.doesNotMatch(spoken, /No changed passages remain under this filter/);
+  }
+  const spoken = comparisonNarration({ ...snapshot('\u2003\n'.repeat(100), '\u00a0\r'.repeat(100)), skipSpaceTabOnly: true });
+  assert.ok(Array.from(spoken).length <= COMPARISON_SPEECH_LIMIT);
+  assert.match(spoken, /speech length limit/);
+  const huge = comparisonNarration({ ...snapshot('x'.repeat(210000), 'small'), skipSpaceTabOnly: true });
+  assert.match(huge, /exceeds the comparison limit/);
+  assert.doesNotMatch(huge, /0 of|No changed passages remain/);
+});

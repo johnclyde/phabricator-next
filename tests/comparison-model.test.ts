@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { comparisonMetadata, comparisonPaths, defaultComparison, isComparisonSelection, resolveComparison, versionIdentity, type ComparisonSelection } from '../client/comparison-model.ts';
+import { comparisonIdentity, comparisonMetadata, comparisonPaths, defaultComparison, isComparisonSelection, resolveComparison, versionIdentity, type ComparisonSelection } from '../client/comparison-model.ts';
 import type { RevisionDetail, RevisionKind, RevisionVersion, SourceFile } from '../shared/types.ts';
 
 function version(number: number, files: SourceFile[], revisionId = 'P1'): RevisionVersion {
@@ -29,6 +29,7 @@ test('comparison identities contain only the immutable ID and hash, independent 
   const latest = version(3, [{ path: 'latest-only.txt', content: 'New head.' }]);
   assert.deepEqual(resolveComparison(detail([latest, first, second], 3), saved), { base: first, target: second });
   assert.deepEqual(saved, before, 'a head refresh cannot rewrite the selected pair or file');
+  assert.equal(comparisonIdentity(saved), comparisonIdentity({ ...saved, base: { contentHash: saved.base!.contentHash, id: saved.base!.id, ignored: 'extra' }, target: { contentHash: saved.target.contentHash, id: saved.target.id, ignored: 'extra' } } as ComparisonSelection), 'context identity ignores property order and untrusted extra fields');
 });
 
 test('initial selection uses the stated head and immediate predecessor, with kind-appropriate literal mode', () => {
@@ -109,4 +110,16 @@ test('shape validation rejects malformed stored records instead of coercing enum
     { ...saved, mode: ['words'] }, { ...saved, view: ['changes'] }, { ...saved, view: 'preview' },
   ];
   for (const value of invalid) assert.equal(isComparisonSelection(value, 'P1'), false, JSON.stringify(value));
+});
+
+test('navigation preference is optional for old metadata and accepts only a boolean without copying source', () => {
+  const legacy = selection();
+  assert.equal(isComparisonSelection(legacy, 'P1'), true);
+  assert.equal(Boolean(legacy.skipSpaceTabOnly), false);
+  for (const flag of [true, false]) {
+    const selected = { ...legacy, skipSpaceTabOnly: flag };
+    assert.equal(isComparisonSelection(selected, 'P1'), true);
+    assert.deepEqual(comparisonMetadata({ ...selected, source: 'excluded' } as ComparisonSelection), selected);
+  }
+  for (const flag of [null, 0, 1, 'true', [], {}]) assert.equal(isComparisonSelection({ ...legacy, skipSpaceTabOnly: flag }, 'P1'), false);
 });

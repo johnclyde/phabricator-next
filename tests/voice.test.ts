@@ -16,5 +16,7 @@ test('comparison commands are explicit navigation and reading actions', () => {
   for (const command of ['read change', 'read current change', 'Read the current change!', 'read this change']) assert.deepEqual(parseCommand(command), { type: 'currentChange' });
   for (const command of ['next change', 'read next change', 'go to the next change']) assert.deepEqual(parseCommand(command), { type: 'nextChange' });
   for (const command of ['previous change', 'read the previous change', 'show prior change']) assert.deepEqual(parseCommand(command), { type: 'previousChange' });
-  for (const command of ['next change and accept it', 'delete current change', 'read all files', 'apply next change']) assert.equal(parseCommand(command).type, 'unknown');
+  for (const command of ['next file', 'read next file', 'go to the next file', 'open next file']) assert.deepEqual(parseCommand(command), { type: 'nextFile' });
+  for (const command of ['previous file', 'Read the previous file.', 'show prior file']) assert.deepEqual(parseCommand(command), { type: 'previousFile' });
+  for (const command of ['next change and accept it', 'delete current change', 'read all files', 'apply next change', 'next file and publish it', 'delete previous file', 'apply next file']) assert.equal(parseCommand(command).type, 'unknown');
 });

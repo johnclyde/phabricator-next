@@ -1,4 +1,5 @@
 import type { FileComparison, ReadyComparison } from '../shared/comparison';
+import { comparisonPassages } from '../shared/comparison-navigation';
 
 interface SpokenVersion { id: string; number: number; contentHash: string }
 export interface ComparisonVoiceSnapshot {
@@ -8,6 +9,7 @@ export interface ComparisonVoiceSnapshot {
   filePath: string;
   result: FileComparison;
   passageIndex: number;
+  skipSpaceTabOnly?: boolean;
 }
 
 export const COMPARISON_SPEECH_LIMIT = 2_200;
@@ -50,12 +52,12 @@ function excerpt(value: string): string {
   return `${parts.join('').trim()}${selected.shortened ? ' … Excerpt shortened.' : ''}`;
 }
 
-function passage(result: ReadyComparison, index: number): string {
+function passage(result: ReadyComparison, index: number, position: number, count: number, filtered: boolean): string {
   const selected = result.passages[index]!;
   const segments = result.segments.slice(selected.segmentStart, selected.segmentEnd);
   const removed = segments.filter(segment => segment.kind === 'removed').map(segment => segment.text).join('');
   const added = segments.filter(segment => segment.kind === 'added').map(segment => segment.text).join('');
-  return `Change ${index + 1} of ${result.passages.length}. ${removed ? `Removed text: ${excerpt(removed)}. ` : ''}${added ? `Added text: ${excerpt(added)}.` : ''}`.trim();
+  return `Change ${position + 1} of ${count}${filtered ? ' under this filter' : ''}. ${removed ? `Removed text: ${excerpt(removed)}. ` : ''}${added ? `Added text: ${excerpt(added)}.` : ''}`.trim();
 }
 
 /**
@@ -72,6 +74,8 @@ export function comparisonNarration(snapshot: ComparisonVoiceSnapshot, scope: 'a
   const filename = clip(snapshot.filePath, 160);
   const header = `${snapshot.revisionId}, ${snapshot.base ? `version ${snapshot.base.number}` : 'empty base'} to version ${snapshot.target.number}, file ${filename.text}${filename.shortened ? ' (filename shortened)' : ''}. `;
   const result = snapshot.result;
+  const filtered = snapshot.skipSpaceTabOnly === true;
+  const filterNotice = filtered ? 'Space and tab-only changes are skipped for navigation. All literal changes remain visible. ' : '';
   let body: string;
   if (result.status === 'too_large') {
     body = 'This file exceeds the comparison limit. No changes were summarized. Read or download the selected source versions.';
@@ -79,17 +83,22 @@ export function comparisonNarration(snapshot: ComparisonVoiceSnapshot, scope: 'a
     body = result.fileChange === 'added' ? 'Empty file added.' : result.fileChange === 'removed' ? 'Empty file deleted.' : 'No text changes in this file.';
   } else {
     const fileChange = result.fileChange === 'added' ? 'File added. ' : result.fileChange === 'removed' ? 'File deleted. ' : '';
-    if (scope === 'current') {
-      body = fileChange + (Number.isInteger(snapshot.passageIndex) && snapshot.passageIndex >= 0 && snapshot.passageIndex < result.passages.length
-        ? passage(result, snapshot.passageIndex) : 'Select a changed passage first.');
+    const navigation = comparisonPassages(result, filtered);
+    const position = navigation.indexes.indexOf(snapshot.passageIndex);
+    const counts = filtered ? `Navigating ${navigation.indexes.length} of ${result.passages.length} changed ${result.passages.length === 1 ? 'passage' : 'passages'}. ${navigation.skipped} space/tab-only ${navigation.skipped === 1 ? 'passage' : 'passages'} skipped. ` : '';
+    if (!navigation.indexes.length) {
+      body = counts + 'No changed passages remain under this filter. Turn the filter off to navigate every literal change.';
+    } else if (scope === 'current') {
+      body = fileChange + counts + (position >= 0
+        ? passage(result, snapshot.passageIndex, position, navigation.indexes.length, filtered) : 'Select a changed passage first.');
     } else {
-      body = fileChange + `${result.passages.length} changed ${result.passages.length === 1 ? 'passage' : 'passages'}. `
-        + (result.passages.length > PASSAGE_LIMIT ? `Reading the first ${PASSAGE_LIMIT}. Use next change to continue through the selected file. ` : '')
-        + result.passages.slice(0, PASSAGE_LIMIT).map((_, index) => passage(result, index)).join(' ');
+      body = fileChange + (filtered ? counts : `${result.passages.length} changed ${result.passages.length === 1 ? 'passage' : 'passages'}. `)
+        + (navigation.indexes.length > PASSAGE_LIMIT ? `Reading the first ${PASSAGE_LIMIT}. Use next change to continue through the selected file. ` : '')
+        + navigation.indexes.slice(0, PASSAGE_LIMIT).map((index, ordinal) => passage(result, index, ordinal, navigation.indexes.length, filtered)).join(' ');
     }
   }
   const notice = ' … Reading stopped at the speech length limit. Use read current change to hear one passage.';
-  const narration = header + body;
+  const narration = header + filterNotice + body;
   const bounded = clip(narration, COMPARISON_SPEECH_LIMIT - Array.from(notice).length);
   return bounded.shortened ? bounded.text + notice : narration;
 }
