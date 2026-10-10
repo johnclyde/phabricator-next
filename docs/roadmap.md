@@ -22,12 +22,12 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 
 | ID | Work | Acceptance criterion |
 | --- | --- | --- |
-| D101 | Paragraph and sentence anchors | Comments survive insertions; moved/deleted text remains understandable; ambiguous relocation is disclosed |
+| D101 | Paragraph and sentence anchors | Partial: immutable source-passage anchors and exact-quote projection across versions; repeated/changed/missing passages retain explicit uncertainty and original context. Semantic paragraph identities and rename/rebase mapping remain open. See [review threads](review-threads.md). |
 | D102 | Document compare controls | Compare any versions, distinguish moves, filter formatting changes, navigate and read changes aloud |
 | D103 | Sandboxed TeX jobs and PDF artifacts | Reproducible build manifest, source/PDF alignment, compile diagnostics, no unsafe shell or network access |
 | D104 | Citation/evidence objects | Import BibTeX and structured sources; show where a claim came from and whether the source was actually checked |
 | D105 | DOCX interchange | Preserve headings, footnotes, comments and tracked changes across golden-fixture round trips |
-| D106 | Review threads and resolutions | Resolve/reopen findings, propose a patch, show its exact scope, apply atomically to the expected version |
+| D106 | Review threads and resolutions | Partial: immutable replies, optimistic resolve/reopen and version-bound resolution history. Suggested patches, exact patch scope and atomic application remain open. |
 | D107 | Review evaluations | Curated code/paper/prose fixtures measure false positives, groundedness, missed defects, cost and latency per model |
 
 ## Next: private, hands-off and mobile work

@@ -170,3 +170,52 @@
   .repository-row { flex-wrap: wrap; }
   .repository-row > div { min-width: 0; flex: 1; }
 }
+
+.review-threads { min-width: 0; }
+.thread-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.thread-toolbar h3 { font-size: 15px; margin: 0; }
+.thread-toolbar .filter-bar { margin: 0; padding: 0; border: 0; }
+.review-thread { border: 1px solid #d9dfe5; border-left: 3px solid #4985b3; border-radius: 4px; margin: 16px 0; padding: 16px; background: #fff; }
+.review-thread.thread-resolved { border-left-color: #739577; }
+.thread-heading { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.thread-heading h4 { font-size: 14px; margin: 0; }
+.thread-quotation { margin: 10px 0; border-left: 3px solid #b0bfca; background: #f5f7f9; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; max-height: 250px; overflow: auto; }
+.anchor-projection { font-size: 12px; color: #5c6c78; margin: 8px 0; }
+.projection-ambiguous, .projection-changed, .projection-file_missing { color: #8a5e16; }
+.thread-anchor > small { display: block; color: #697885; margin-bottom: 9px; }
+.original-thread-location { display: block; margin: 9px 0; text-align: left; overflow-wrap: anywhere; }
+.thread-actions { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; padding-top: 12px; }
+.thread-events { list-style: none; margin: 8px 0; padding: 10px 0; border-top: 1px solid #e3e7eb; font-size: 12px; color: #667582; }
+.thread-events li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 5px 0; }
+.thread-reply { margin-top: 14px; padding: 14px; background: #f5f7fa; border: 1px solid #dce3e9; border-radius: 4px; }
+.thread-reply .field { margin-bottom: 8px; }
+.review-thread .comment { margin-top: 14px; }
+.review-thread .comment > div { min-width: 0; }
+.review-thread .comment p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.comment-form > h3 { font-size: 15px; margin: 0 0 10px; }
+.comment-target .thread-quotation { font-weight: normal; color: #354957; }
+.source-passages { min-width: 0; }
+.passage-tools { padding: 14px 18px; background: #f6f8fa; border-bottom: 1px solid #dfe5ea; }
+.passage-tools > p { color: #657481; font-size: 12px; line-height: 1.6; margin: 0 0 10px; }
+.selection-summary { display: block; margin-top: 8px; color: #607382; }
+.passage-range { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; padding-top: 12px; }
+.passage-range label { display: grid; gap: 5px; font-size: 12px; color: #536776; }
+.passage-range input { width: 110px; min-height: 36px; border: 1px solid #bbc8d2; border-radius: 3px; padding: 6px 8px; }
+.passage-source-scroll { display: flex; max-width: 100%; overflow: auto; align-items: stretch; background: white; }
+.passage-line-numbers { display: flex; flex: 0 0 48px; flex-direction: column; user-select: none; padding: 10px 0; border-right: 1px solid #dbe3e9; background: #f4f7fa; }
+.passage-line-numbers button { display: block; width: 100%; border: 0; border-radius: 0; background: none; color: #677d8f; font: 12px/22px ui-monospace, SFMono-Regular, Menlo, monospace; height: 22px; padding: 0 10px; text-align: right; }
+.passage-line-numbers button:hover:not(:disabled), .passage-line-numbers .selected-line { background: #dcecf7; color: #236599; }
+.selectable-source { margin: 0; padding: 10px 12px; font: 12px/22px ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 4; white-space: pre; min-width: 0; flex: 1 0 auto; user-select: text; }
+@media (max-width: 650px) {
+  .review-thread { padding: 12px; }
+  .thread-toolbar { align-items: flex-start; }
+  .thread-toolbar .filter-bar button, .thread-actions button, .original-thread-location { min-height: 44px; }
+  .thread-reply { padding: 10px; }
+  .passage-tools { padding: 12px; }
+  .passage-range input { min-height: 44px; width: 100%; }
+  .passage-range label { flex: 1; min-width: 95px; }
+  .passage-range > button { flex-basis: 100%; min-height: 44px; }
+  .passage-tools > button { min-height: 44px; width: 100%; }
+  .passage-line-numbers button { height: 44px; line-height: 44px; }
+  .selectable-source { line-height: 44px; }
+}

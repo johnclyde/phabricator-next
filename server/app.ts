@@ -200,6 +200,9 @@ export function createApp(options: AppOptions = {}): App {
         if (revision && method === 'PATCH' && !revision[2]) return { status: 200, body: store.updateRevision(revision[1]!, input, attribution) };
         if (revision && method === 'POST' && revision[2] === 'versions') return { status: 201, body: store.createVersion(revision[1]!, input, attribution) };
         if (revision && method === 'POST' && revision[2] === 'comments') return { status: 201, body: store.createComment(revision[1]!, input, attribution) };
+        const thread = /^\/api\/revisions\/([DPL]\d+)\/threads\/([^/]+)(\/replies)?$/.exec(path);
+        if (thread && method === 'POST' && thread[3]) return { status: 201, body: store.createReply(thread[1]!, thread[2]!, input, attribution) };
+        if (thread && method === 'PATCH' && !thread[3]) return { status: 200, body: store.updateThread(thread[1]!, thread[2]!, input, attribution) };
         throw new HttpError(404, 'Route not found.');
       }, authorize, present);
     };

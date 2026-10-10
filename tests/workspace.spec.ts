@@ -53,7 +53,7 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   await expect(page.locator('.prose-content del')).toContainText('short');
   await expect(page.getByRole('combobox', { name: 'Revision status', exact: true }).locator('option[value="accepted"]')).toHaveJSProperty('disabled', true);
   await page.getByRole('button', { name: 'Discussion', exact: false }).click();
-  await expect(page.getByText('Please make the requested duration precise.', { exact: true })).not.toBeVisible();
+  await expect(page.getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');
   await expect(page.getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('2');

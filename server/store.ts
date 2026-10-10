@@ -2,9 +2,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { ActorAttribution, Activity, AppState, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
+import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, Task, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 import { initializePolicies, registerDefaultPolicy } from './policy.ts';
+import { createPassageAnchor } from '../shared/anchors.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -27,7 +28,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 4) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 5) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -64,6 +65,30 @@ export class Store {
     if (version < 4) {
       try { this.transaction(() => { initializePolicies(this.database); this.database.exec('PRAGMA user_version = 4'); }); }
       catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 5) {
+      try {
+        this.transaction(() => {
+          this.database.exec(`
+            CREATE TABLE review_threads (id TEXT PRIMARY KEY, revision_id TEXT NOT NULL REFERENCES entities(id), root_comment_id TEXT NOT NULL UNIQUE REFERENCES comments(id), data TEXT NOT NULL CHECK(json_valid(data)));
+            CREATE INDEX review_threads_revision ON review_threads(revision_id);
+            CREATE TABLE thread_events (id TEXT PRIMARY KEY, revision_id TEXT NOT NULL REFERENCES entities(id), thread_id TEXT NOT NULL REFERENCES review_threads(id), version_id TEXT NOT NULL REFERENCES versions(id), data TEXT NOT NULL CHECK(json_valid(data)));
+            CREATE INDEX thread_events_revision ON thread_events(revision_id);
+            CREATE TRIGGER comments_no_update BEFORE UPDATE ON comments BEGIN SELECT RAISE(ABORT, 'Review comments are immutable'); END;
+            CREATE TRIGGER comments_no_delete BEFORE DELETE ON comments BEGIN SELECT RAISE(ABORT, 'Review comments are immutable'); END;
+            CREATE TRIGGER thread_events_no_update BEFORE UPDATE ON thread_events BEGIN SELECT RAISE(ABORT, 'Thread events are immutable'); END;
+            CREATE TRIGGER thread_events_no_delete BEFORE DELETE ON thread_events BEGIN SELECT RAISE(ABORT, 'Thread events are immutable'); END;
+          `);
+          // Existing comments are already historical evidence. Only add their
+          // thread records; never rewrite their JSON, anchors or attribution.
+          for (const row of this.database.prepare('SELECT id, revision_id, data FROM comments ORDER BY rowid').all() as { id: string; revision_id: string; data: string }[]) {
+            const comment = JSON.parse(row.data) as ReviewComment;
+            const thread: ReviewThread = { id: row.id, revisionId: row.revision_id, rootCommentId: row.id, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
+            this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, thread.revisionId, thread.rootCommentId, JSON.stringify(thread));
+          }
+          this.database.exec('PRAGMA user_version = 5');
+        });
+      } catch (error) { this.database.close(); throw error; }
     }
   }
 
@@ -266,17 +291,96 @@ export class Store {
     this.save('revision', revision); this.event(id, status, `${status === 'closed' ? 'Manually closed' : `Set status to ${status.replaceAll('_', ' ')}`} at version ${revision.currentVersion}.`, attribution); return revision;
   }
   createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
-    const data = object(input, ['body', 'versionId', 'filePath', 'line']); const detail = this.detail(id);
-    const versionId = string(data.versionId, 'Version ID', 100); const version = detail.versions.find(item => item.id === versionId);
-    if (!version) throw new HttpError(400, 'Comment version does not belong to this revision.');
-    const filePath = data.filePath === undefined || data.filePath === null ? null : string(data.filePath, 'File path', 240);
-    const file = filePath ? version.files.find(item => item.path === filePath) : undefined;
-    if (filePath && !file) throw new HttpError(400, 'Comment file does not exist in the selected version.');
-    const line = data.line === undefined || data.line === null ? null : integer(data.line, 'Line');
-    if (line !== null && (!file || line > file.content.split('\n').length)) throw new HttpError(400, 'Comment line must exist in the selected file and version.');
-    const comment: ReviewComment = { id: randomUUID(), revisionId: id, versionId, filePath, line, body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
-    this.database.prepare('INSERT INTO comments (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(comment.id, id, versionId, JSON.stringify(comment));
-    this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); return comment;
+    return this.discussionMutation(() => {
+      const data = object(input, ['body', 'versionId', 'filePath', 'line', 'passage']);
+      const version = this.commentVersion(id, data.versionId);
+      const filePath = data.filePath === undefined || data.filePath === null ? null : string(data.filePath, 'File path', 240);
+      const file = filePath ? version.files.find(item => item.path === filePath) : undefined;
+      if (filePath && !file) throw new HttpError(400, 'Comment file does not exist in the selected version.');
+      let line = data.line === undefined || data.line === null ? null : integer(data.line, 'Line');
+      if (line !== null && (!file || line > file.content.split('\n').length)) throw new HttpError(400, 'Comment line must exist in the selected file and version.');
+      let anchor: PassageAnchor | undefined;
+      if (data.passage !== undefined) {
+        if (!filePath || !file) throw new HttpError(400, 'A passage requires a file in the selected version.');
+        const passage = object(data.passage, ['start', 'end', 'quote']);
+        if (typeof passage.start !== 'number' || typeof passage.end !== 'number') throw new HttpError(400, 'Passage offsets must be numbers.');
+        const quote = string(passage.quote, 'Passage quote', 20_000, true);
+        try { anchor = createPassageAnchor(version, filePath, { start: passage.start, end: passage.end, quote }); }
+        catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
+        const firstLine = file.content.slice(0, anchor.start).split('\n').length;
+        if (line !== null && line !== firstLine) throw new HttpError(400, 'Comment line must match the beginning of the selected passage.');
+        line = firstLine;
+      }
+      const commentId = randomUUID();
+      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      this.insertComment(comment);
+      const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
+      this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, id, commentId, JSON.stringify(thread));
+      this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); return comment;
+    });
+  }
+  private discussionMutation<T>(work: () => T): T {
+    this.database.exec('SAVEPOINT discussion_write');
+    try {
+      // A no-op write acquires the SQLite writer lock before thread versions
+      // are read, including direct Store callers outside an API transaction.
+      this.database.prepare("UPDATE sequences SET value = value WHERE name = 'revision'").run();
+      const result = work(); this.database.exec('RELEASE discussion_write'); return result;
+    } catch (error) { this.database.exec('ROLLBACK TO discussion_write; RELEASE discussion_write'); throw error; }
+  }
+  private commentVersion(id: string, value: unknown): RevisionVersion {
+    this.get<Revision>('revision', id);
+    const versionId = string(value, 'Version ID', 100);
+    const row = this.database.prepare('SELECT data FROM versions WHERE revision_id = ? AND id = ?').get(id, versionId) as JsonRow | undefined;
+    if (!row) throw new HttpError(400, 'Comment version does not belong to this revision.');
+    return JSON.parse(row.data) as RevisionVersion;
+  }
+  private thread(id: string, threadId: string): ReviewThread {
+    const row = typeof threadId === 'string' && threadId.length <= 100
+      ? this.database.prepare('SELECT data FROM review_threads WHERE revision_id = ? AND id = ?').get(id, threadId) as JsonRow | undefined : undefined;
+    if (!row) throw new HttpError(404, 'Discussion thread was not found.', 'THREAD_UNAVAILABLE');
+    return JSON.parse(row.data) as ReviewThread;
+  }
+  private insertComment(comment: ReviewComment): void {
+    this.database.prepare('INSERT INTO comments (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(comment.id, comment.revisionId, comment.versionId, JSON.stringify(comment));
+  }
+  private advanceThread(thread: ReviewThread, now: string): ReviewThread {
+    if (!Number.isSafeInteger(thread.version + 1)) throw new HttpError(409, 'This discussion has reached the supported version limit.');
+    return { ...thread, version: thread.version + 1, updatedAt: now };
+  }
+  private saveThread(thread: ReviewThread): void {
+    this.database.prepare('UPDATE review_threads SET data = ? WHERE id = ? AND revision_id = ?').run(JSON.stringify(thread), thread.id, thread.revisionId);
+  }
+  createReply(id: string, threadId: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
+    return this.discussionMutation(() => {
+      const thread = this.thread(id, threadId);
+      const data = object(input, ['body', 'viewedVersionId']);
+      const viewedVersion = this.commentVersion(id, data.viewedVersionId);
+      const row = this.database.prepare('SELECT data FROM comments WHERE revision_id = ? AND id = ?').get(id, thread.rootCommentId) as JsonRow | undefined;
+      if (!row) throw new HttpError(404, 'Discussion thread was not found.', 'THREAD_UNAVAILABLE');
+      const root = JSON.parse(row.data) as ReviewComment;
+      const comment: ReviewComment = { id: randomUUID(), threadId, revisionId: id, versionId: root.versionId, viewedVersionId: viewedVersion.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), body: string(data.body, 'Reply', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      const updated = this.advanceThread(thread, comment.createdAt);
+      this.insertComment(comment); this.saveThread(updated);
+      this.event(id, 'replied', `Replied to a discussion while viewing version ${viewedVersion.number}.`, attribution);
+      return comment;
+    });
+  }
+  updateThread(id: string, threadId: string, input: unknown, attribution?: ActorAttribution): ReviewThread {
+    return this.discussionMutation(() => {
+      const current = this.thread(id, threadId);
+      const data = object(input, ['status', 'expectedThreadVersion', 'versionId']);
+      if (integer(data.expectedThreadVersion, 'expectedThreadVersion') !== current.version) throw new HttpError(409, 'This discussion changed. Reload its replies before changing its status.');
+      const status = choice(data.status, 'status', ['open', 'resolved']);
+      if (status === current.status) throw new HttpError(409, 'This discussion already has the requested status.');
+      const version = this.commentVersion(id, data.versionId);
+      const thread = { ...this.advanceThread(current, new Date().toISOString()), status };
+      const event: ReviewThreadEvent = { id: randomUUID(), revisionId: id, threadId, action: status === 'resolved' ? 'resolved' : 'reopened', versionId: version.id, threadVersion: thread.version, actor: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: thread.updatedAt };
+      this.saveThread(thread);
+      this.database.prepare('INSERT INTO thread_events (id, revision_id, thread_id, version_id, data) VALUES (?, ?, ?, ?, ?)').run(event.id, id, threadId, version.id, JSON.stringify(event));
+      this.event(id, event.action, `${status === 'resolved' ? 'Resolved' : 'Reopened'} a discussion while viewing version ${version.number}.`, attribution);
+      return thread;
+    });
   }
   saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis, attribution?: ActorAttribution): ReviewRun {
     const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
@@ -292,8 +396,10 @@ export class Store {
     const revision = this.get<Revision>('revision', id);
     const versions = (this.database.prepare('SELECT data FROM versions WHERE revision_id = ? ORDER BY number').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as RevisionVersion);
     const comments = (this.database.prepare('SELECT data FROM comments WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewComment);
+    const threads = (this.database.prepare('SELECT data FROM review_threads WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewThread);
+    const threadEvents = (this.database.prepare('SELECT data FROM thread_events WHERE revision_id = ? ORDER BY rowid').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewThreadEvent);
     const reviews = (this.database.prepare('SELECT data FROM reviews WHERE revision_id = ? ORDER BY rowid DESC').all(id) as JsonRow[]).map(row => JSON.parse(row.data) as ReviewRun);
-    return { revision, versions, comments, reviews, activity: this.activities(id) };
+    return { revision, versions, comments, threads, threadEvents, reviews, activity: this.activities(id) };
   }
 }
 

@@ -1,5 +1,5 @@
 import type { AuthContext } from '../shared/auth.ts';
-import type { AppState, RevisionDetail, SpaceSummary, WikiDetail } from '../shared/types.ts';
+import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, WikiDetail } from '../shared/types.ts';
 import type { Capability, ObjectAccess, Space } from '../shared/policy.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
@@ -71,7 +71,8 @@ export class AccessLayer {
     if (space) return { id: space[1]!, capability: method === 'GET' ? 'view' : 'edit' };
     const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions)\/((?:PROJ|R|T|W|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
-    return { id: object[1]!, capability: method === 'GET' ? 'view' : ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
+    const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
+    return { id: object[1]!, capability: method === 'GET' ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
@@ -98,6 +99,35 @@ export class AccessLayer {
     this.policies.configureNew(id, record(input)?.access, this.principal);
     return response;
   }
+  private legacyDiscussionSnapshot(detail: Record<string, unknown>, revisionId: string): void {
+    if (detail.threads !== undefined) return;
+    const invalid = () => new HttpError(409, 'This saved discussion response cannot be safely replayed. Reload the revision.');
+    if (!Array.isArray(detail.comments) || !Array.isArray(detail.versions) || (detail.threadEvents !== undefined && (!Array.isArray(detail.threadEvents) || detail.threadEvents.length !== 0))) throw invalid();
+    const versionIds = new Set<string>();
+    for (const value of detail.versions) {
+      const version = record(value);
+      if (!version || typeof version.id !== 'string' || !version.id || version.revisionId !== revisionId || versionIds.has(version.id)) throw invalid();
+      versionIds.add(version.id);
+    }
+    const rootIds = new Set<string>();
+    const threads: ReviewThread[] = [];
+    for (const value of detail.comments) {
+      const comment = record(value);
+      // Schema 4 had only root comments, with no passage/reply metadata. Never
+      // reinterpret a newer or malformed response as a historical snapshot.
+      if (!comment || comment.threadId !== undefined || comment.viewedVersionId !== undefined || comment.anchor !== undefined
+        || typeof comment.id !== 'string' || !comment.id || rootIds.has(comment.id) || comment.revisionId !== revisionId
+        || typeof comment.versionId !== 'string' || !versionIds.has(comment.versionId)
+        || (comment.filePath !== null && typeof comment.filePath !== 'string')
+        || (comment.line !== null && (typeof comment.line !== 'number' || !Number.isSafeInteger(comment.line) || comment.line < 1))
+        || typeof comment.body !== 'string' || typeof comment.author !== 'string'
+        || typeof comment.createdAt !== 'string' || !Number.isFinite(Date.parse(comment.createdAt))) throw invalid();
+      rootIds.add(comment.id);
+      threads.push({ id: comment.id, rootCommentId: comment.id, revisionId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt });
+    }
+    detail.threads = threads;
+    detail.threadEvents = [];
+  }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
   present(method: string, path: string, response: MutationResponse): MutationResponse {
     let target = this.target(method, path);
@@ -112,8 +142,10 @@ export class AccessLayer {
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
     const result = this.redact(response.body);
     const detail = record(result);
-    const id = record(detail?.revision)?.id ?? record(detail?.document)?.id;
+    const revisionId = record(detail?.revision)?.id;
+    const id = revisionId ?? record(detail?.document)?.id;
     if (detail && typeof id === 'string') {
+      if (typeof revisionId === 'string') this.legacyDiscussionSnapshot(detail, revisionId);
       detail.access = this.describe(id); detail.accessEpoch = this.policies.epoch();
     }
     return { status: response.status, body: result };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createWorkspaceClient, RequestError, type PendingMutation } from '../client/offline.ts';
+import { canQueue, createWorkspaceClient, RequestError, type PendingMutation } from '../client/offline.ts';
 import { activateSession, lockSession } from '../client/session.ts';
 import type { SessionState } from '../shared/auth.ts';
 import type { ObjectAccess } from '../shared/policy.ts';
@@ -271,4 +271,39 @@ test('discard shares the outbox lock and rereads a concurrently queued unrelated
     assert.equal(client.quarantinedDrafts().length, 0);
     assert.deepEqual(JSON.parse(storage.stored.get(client.storageKey('outbox')) || '[]').map((item: PendingMutation) => item.id), ['T2']);
   } finally { if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else Reflect.deleteProperty(globalThis, 'navigator'); storage.close(); }
+});
+
+
+test('thread replies use interaction permission and preserve their fixed parent in durable quarantine after access returns', async () => {
+  const storage = localStorageFixture(); const fetch = globalThis.fetch;
+  try {
+    const client = storage.reopen();
+    client.reconcileAccess({ D1: access('D1', false, true), W1: access('W1') }, 1, ['S1']);
+    const path = '/api/revisions/D1/threads/root-comment/replies';
+    const key = 'comment-source:D1:reply:root-comment:V2';
+    const body = { body: 'A reply while inspecting the second version', viewedVersionId: 'V2' };
+    const queued: PendingMutation = { id: 'queued-reply', path, method: 'POST', body, label: 'Reply', createdAt: '2026-10-10' };
+    client.writeStored(key, { ...body, threadId: 'root-comment' });
+    client.writeStored('draft:document:W1:v1', { content: 'Independent wiki work' });
+    client.writeStored('outbox', [queued]);
+    assert.equal(canQueue(path, 'POST'), true);
+    assert.equal(canQueue('/api/revisions/D1/threads/root-comment', 'PATCH'), false, 'thread resolution always requires a live server');
+    let sent = 0;
+    globalThis.fetch = async (_path, options) => { sent++; assert.deepEqual(JSON.parse(String(options?.body)), body); return Response.json({ id: 'saved-reply' }); };
+    await client.request(path, { method: 'POST', body, id: queued.id, queued: true });
+    assert.equal(sent, 1, 'a member who can interact may reply without edit access');
+    await assert.rejects(client.request('/api/revisions/D1/threads/root-comment', { method: 'PATCH', body: { status: 'resolved' } }), withCode('ACTION_FORBIDDEN'));
+    client.reconcileAccess({ D1: access('D1', false, false), W1: access('W1') }, 2, ['S1']);
+    assert.equal(client.quarantinedDrafts().length, 2);
+    assert.deepEqual(client.readStored('outbox', []), []);
+    assert.equal(client.readStored(key, null), null);
+    assert.deepEqual(client.readStored('draft:document:W1:v1', null), { content: 'Independent wiki work' });
+    await assert.rejects(client.request(path, { method: 'POST', body }), withCode('ACTION_FORBIDDEN'));
+    client.reconcileAccess({ D1: access('D1', true, true), W1: access('W1') }, 3, ['S1']);
+    const reopened = storage.reopen();
+    assert.deepEqual(reopened.quarantinedDrafts().find(draft => draft.key === `outbox:${queued.id}`)?.value, queued);
+    assert.equal(reopened.readStored(key, null), null, 'a new reply slot cannot restore a held draft');
+    await assert.rejects(reopened.request(path, { method: 'POST', body, id: queued.id, queued: true }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(sent, 1, 'revoked replies never automatically resume when access returns');
+  } finally { globalThis.fetch = fetch; storage.close(); }
 });

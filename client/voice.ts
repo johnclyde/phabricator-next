@@ -1,5 +1,7 @@
+import type { RevisionDetail, ReviewThread } from '../shared/types';
+
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';
-export type VoiceCommand = { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -19,7 +21,31 @@ export function parseCommand(input: string): VoiceCommand {
   if (task) return { type: 'task', title: task[1] };
   if (/^(read|read the|read my|give me a|give me the) (summary|overview)$/.test(text)) return { type: 'summary' };
   if (/^read (?:the )?changes$/.test(text)) return { type: 'changes' };
+  if (/^read (?:the )?(discussion|threads|open threads)$/.test(text)) return { type: 'discussion' };
   const filter = text.match(/^(?:filter|show) (?:by )?(open|all|in progress|resolved|accepted|needs review|draft)$/);
   if (filter) return { type: 'filter', value: filter[1].replaceAll(' ', '_') };
   return { type: 'unknown', text: original };
+}
+
+/** Reads already-authorized, locally loaded discussion; never invokes a model. */
+export function discussionSummary(detail: Pick<RevisionDetail, 'comments' | 'versions' | 'threads'>): string {
+  const threads = new Map<string, Pick<ReviewThread, 'id' | 'rootCommentId' | 'status'>>((detail.threads || []).map(thread => [thread.id, thread]));
+  for (const comment of detail.comments) {
+    const id = comment.threadId || comment.id;
+    if (!threads.has(id)) threads.set(id, { id, rootCommentId: id, status: 'open' });
+  }
+  if (!threads.size) return 'No discussion threads are recorded for this revision.';
+  const open = [...threads.values()].filter(thread => thread.status === 'open');
+  const shorten = (value: string, length: number) => {
+    const text = value.replace(/\s+/g, ' ').trim();
+    return text.length <= length ? text : text.slice(0, length).trimEnd() + '…';
+  };
+  const excerpts = open.slice(0, 3).map(thread => {
+    const root = detail.comments.find(comment => comment.id === thread.rootCommentId);
+    if (!root) return 'An open thread has no loaded original comment.';
+    const version = detail.versions.find(item => item.id === root.versionId);
+    const count = detail.comments.filter(comment => (comment.threadId || comment.id) === thread.id).length;
+    return `Thread from version ${version?.number ?? 'unknown'}, ${count} ${count === 1 ? 'comment' : 'comments'}. ${root.anchor ? `Original passage: ${shorten(root.anchor.quote, 200)}. ` : ''}${shorten(root.body, 220)}`;
+  });
+  return `${open.length} open and ${threads.size - open.length} resolved discussion threads. ${open.length > 3 ? 'Reading the first three open threads. ' : ''}${excerpts.join(' ')}`.trim();
 }

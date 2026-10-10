@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { parseCommand } from '../client/voice.ts';
+import { discussionSummary, parseCommand } from '../client/voice.ts';
+import type { ReviewComment, RevisionVersion, ReviewThread } from '../shared/types.ts';
 import { canQueue, RequestError, isNetworkError } from '../client/offline.ts';
 import { applicationBase, applicationPath, storageKey } from '../client/mount.ts';
 import { activateSession, lockSession } from '../client/session.ts';
@@ -20,10 +21,26 @@ test('voice task creation is a draft command and preserves content case', () => 
   assert.deepEqual(parseCommand('show in progress'), { type: 'filter', value: 'in_progress' });
   assert.deepEqual(parseCommand('read summary'), { type: 'summary' });
   assert.deepEqual(parseCommand('read changes'), { type: 'changes' });
+  assert.deepEqual(parseCommand('Read the discussion.'), { type: 'discussion' });
+  assert.deepEqual(parseCommand('read open threads'), { type: 'discussion' });
 });
 test('voice commands never interpret acceptance or provider calls as authorized operations', () => {
   assert.equal(parseCommand('accept all reviews').type, 'unknown');
   assert.equal(parseCommand('send everything to AI').type, 'unknown');
+  assert.equal(parseCommand('resolve all threads').type, 'unknown');
+});
+test('spoken discussion preserves original-version provenance, groups replies and limits long source excerpts', () => {
+  const version: RevisionVersion = { id: 'v1', revisionId: 'P1', number: 1, files: [{ path: 'paper.tex', content: 'Original claim' }], message: 'Original', contentHash: 'hash', createdAt: '2026-10-10' };
+  const root: ReviewComment = { id: 'one', threadId: 'one', revisionId: 'P1', versionId: 'v1', filePath: 'paper.tex', line: 1, body: 'Check the citation.', author: 'Reader', createdAt: '2026-10-10', anchor: { versionId: 'v1', contentHash: 'hash', filePath: 'paper.tex', start: 0, end: 14, quote: 'Original claim', prefix: '', suffix: '' } };
+  const thread: ReviewThread = { id: 'one', rootCommentId: 'one', revisionId: 'P1', status: 'open', version: 2, createdAt: '2026-10-10', updatedAt: '2026-10-10' };
+  const summary = discussionSummary({ versions: [version, { ...version, id: 'v2', number: 2 }], comments: [root, { ...root, id: 'reply', viewedVersionId: 'v2', body: 'Replying on the new version.' }, { ...root, id: 'resolved', threadId: 'resolved', body: 'Resolved content should not be read aloud.' }], threads: [thread, { ...thread, id: 'resolved', rootCommentId: 'resolved', status: 'resolved' }] });
+  assert.match(summary, /1 open and 1 resolved/); assert.match(summary, /Thread from version 1, 2 comments/);
+  assert.match(summary, /Original passage: Original claim/); assert.match(summary, /Check the citation/);
+  assert.doesNotMatch(summary, /Resolved content should not/);
+  const long = Array.from({ length: 20 }, (_, index) => ({ ...root, id: String(index), threadId: undefined, body: 'Long comment '.repeat(1500), anchor: { ...root.anchor!, quote: 'Long source '.repeat(1500) } }));
+  const bounded = discussionSummary({ versions: [version], comments: long, threads: [] });
+  assert.match(bounded, /20 open/); assert.match(bounded, /first three/); assert.ok(bounded.length < 1600);
+  assert.match(discussionSummary({ versions: [], comments: [], threads: [] }), /No discussion/);
 });
 test('offline queue permits only supported idempotent mutation routes', () => {
   assert.equal(canQueue('/api/tasks', 'POST'), true);

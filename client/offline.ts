@@ -6,7 +6,7 @@ export { RequestError } from './session';
 export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
 export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
 export function canQueue(path: string, method: MutationMethod): boolean {
-  return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST');
+  return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
 }
 export function isNetworkError(error: unknown): boolean { return error instanceof TypeError; }
 function objectFromPath(path: string): string | null { return /^\/api\/(?:revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
@@ -186,7 +186,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       try { const value: unknown = JSON.parse(json); if (hasSavedWork(key, value)) { const saved = quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); draftsChanged = true; if (!saved) continue; } removeStored(key); } catch { /* Preserve unreadable draft bytes in place. */ }
     }
     const queue = readStored<PendingMutation[]>('outbox', []);
-    const forbidden = queue.filter(item => { const id = queuedObject(item); if (id?.startsWith('S')) return !spaceIds.includes(id) || archivedSpaceIds.includes(id); const capabilities = id ? session.objectCapabilities.get(id) : null; return capabilities && !(item.path.endsWith('/comments') ? capabilities.interact : capabilities.edit); });
+    const forbidden = queue.filter(item => { const id = queuedObject(item); if (id?.startsWith('S')) return !spaceIds.includes(id) || archivedSpaceIds.includes(id); const capabilities = id ? session.objectCapabilities.get(id) : null; return capabilities && !((item.path.endsWith('/comments') || item.path.endsWith('/replies')) ? capabilities.interact : capabilities.edit); });
     for (const item of forbidden) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'Permission or destination Space changed; automatic submission stopped' }); draftsChanged = true; }
     if (draftsChanged) for (const listener of session.accessListeners) listener([]);
     session.visibleObjects = visible;
@@ -223,7 +223,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const objectGeneration = objectId ? session.objectGenerations.get(objectId) || 0 : 0;
     if (objectId && session.unavailableObjects.has(objectId)) throw unavailable();
     const capabilities = objectId ? session.objectCapabilities.get(objectId) : null;
-    if (options && capabilities && !(/\/(comments|reviews)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit)) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
+    if (options && capabilities && !(/\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit)) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
