@@ -6,6 +6,7 @@ import { analyzeLocally } from '../shared/review.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import type { ActorAttribution, AppState, ReviewAnalysis, RevisionKind, SourceFile } from '../shared/types.ts';
 import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
+import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
 import { createStore, type MutationResponse, type Store } from './store.ts';
@@ -193,6 +194,17 @@ export function createApp(options: AppOptions = {}): App {
           return { status: 200, body: updated };
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
+        const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(columns|moves)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
+        if (workboard) {
+          const id = workboard[1]!; const section = workboard[2]; const columnId = workboard[3];
+          if (method === 'PUT' && !section) return { status: 200, body: store.configureWorkboard(id, input, attribution) };
+          if (method === 'POST' && section === 'moves' && !columnId) return { status: 200, body: store.moveWorkboardCard(id, input, attribution) };
+          if (section === 'columns') {
+            if (method === 'POST' && !columnId) return { status: 201, body: store.createWorkboardColumn(id, input, attribution) };
+            if (method === 'PATCH' && columnId && !workboard[4]) return { status: 200, body: store.updateWorkboardColumn(id, columnId, input, attribution) };
+            if (method === 'POST' && columnId && workboard[4]) return { status: 200, body: store.reorderWorkboardColumn(id, columnId, input, attribution) };
+          }
+        }
         const project = /^\/api\/projects\/(PROJ\d+)(?:\/(members|membership|watchers|silence))?$/.exec(path);
         if (project && ((method === 'PATCH' && !project[2]) || method === 'POST')) {
           const id = project[1]!;
@@ -290,6 +302,29 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(history)|\/columns\/([^/]+)\/cards)?$/.exec(path);
+          if (workboard) {
+            const id = workboard[1]!; const history = Boolean(workboard[2]); const columnId = workboard[3]; access.require(id);
+            const allowed = history ? ['before', 'limit'] : ['status', 'ownerId', 'showHidden', 'limit', ...(columnId ? ['after', 'expectedBoardVersion'] : [])];
+            for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid workboard read parameters.');
+            const positive = (name: string): number | undefined => {
+              const value = url.searchParams.get(name); if (value === null) return undefined;
+              if (!/^[1-9]\d*$/.test(value)) throw new HttpError(400, `${name} must be a positive integer.`);
+              return integer(Number(value), name);
+            };
+            if (history) { send(res, 200, access.workboardHistory(id, positive('before'), positive('limit'))); return; }
+            const status = url.searchParams.get('status'); const ownerId = url.searchParams.get('ownerId'); const showHidden = url.searchParams.get('showHidden');
+            if (showHidden !== null && showHidden !== 'true' && showHidden !== 'false') throw new HttpError(400, 'showHidden must be true or false.');
+            const query: WorkboardQuery = { ...(status === null ? {} : { status: choice(status, 'status', ['open', 'all'] as const) }),
+              ...(ownerId === null ? {} : { ownerId: ownerId === 'null' ? null : ownerId }),
+              ...(showHidden === null ? {} : { showHidden: showHidden === 'true' }), ...(positive('limit') === undefined ? {} : { limit: positive('limit') }) };
+            if (columnId) {
+              const expectedBoardVersion = positive('expectedBoardVersion');
+              if (expectedBoardVersion === undefined) throw new HttpError(400, 'Card pages require expectedBoardVersion.');
+              send(res, 200, access.workboardCards(id, columnId, { ...query, expectedBoardVersion, ...(url.searchParams.has('after') ? { after: url.searchParams.get('after')! } : {}) })); return;
+            }
+            send(res, 200, access.workboard(id, query)); return;
+          }
           if (path === '/api/projects/resolve') {
             if (url.searchParams.getAll('slug').length !== 1 || [...url.searchParams.keys()].some(name => name !== 'slug')) throw new HttpError(400, 'Project resolution requires exactly one slug parameter.');
             send(res, 200, access.resolveProject(url.searchParams.get('slug')!)); return;

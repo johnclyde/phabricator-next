@@ -11,6 +11,8 @@ import { normalizeProjectTags } from '../shared/project-hierarchy.ts';
 import type { ProjectChildPreview, ProjectKind, ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectPreferences, ProjectWatchersPage } from '../shared/projects.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
 import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
+import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from './workboards.ts';
+import type { TaskColumnMove, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -29,13 +31,14 @@ export class Store {
   readonly fresh: boolean;
   private taskProjectsReady = false;
   private projects: ProjectStore;
+  private workboards?: WorkboardStore;
   constructor(options: StoreOptions = {}) {
     const path = options.path ?? '.data/phabricator.sqlite';
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 12) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 13) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -200,7 +203,12 @@ export class Store {
       try { this.transaction(() => { initializeProjectHierarchy(this.database); this.database.exec('PRAGMA user_version = 12'); }); }
       catch (error) { this.database.close(); throw error; }
     }
-    this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id) });
+    if (version < 13) {
+      try { this.transaction(() => { initializeWorkboards(this.database); this.database.exec('PRAGMA user_version = 13'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now) => this.writeTaskColumnMove(task, ids, move, attribution, now) });
+    this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id), changed: (project, created, attribution) => this.workboards!.projectChanged(project, created, attribution) });
   }
 
   close(): void { this.database.close(); }
@@ -269,6 +277,7 @@ export class Store {
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
     if (created.changes) registerDefaultPolicy(this.database, value.id);
     else this.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(json, value.id);
+    if (kind === 'task') this.workboards?.touchTask(value as Task);
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -293,6 +302,15 @@ export class Store {
     return this.projects.create(input, attribution);
   }
   getProject(id: string): Project { return this.projects.get(id); }
+  workboard(id: string, query: WorkboardQuery = {}, visibility?: WorkboardVisibility): WorkboardDetail { return this.workboards!.detail(id, query, visibility); }
+  workboardCards(id: string, columnId: string, query: WorkboardCardsQuery, visibility?: WorkboardVisibility): WorkboardCardPage { return this.workboards!.cards(id, columnId, query, visibility); }
+  workboardHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): WorkboardHistory { return this.workboards!.history(id, before, limit, visible); }
+  workboardColumn(id: string, columnId: string): WorkboardColumn { return this.workboards!.column(id, columnId); }
+  configureWorkboard(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.configure(id, input, attribution); }
+  createWorkboardColumn(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.createColumn(id, input, attribution); }
+  updateWorkboardColumn(id: string, columnId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.updateColumn(id, columnId, input, attribution); }
+  reorderWorkboardColumn(id: string, columnId: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.workboards!.reorderColumn(id, columnId, input, attribution); }
+  moveWorkboardCard(id: string, input: unknown, attribution?: ActorAttribution): WorkboardReceipt { return this.taskMutation(() => this.workboards!.moveCard(id, input, attribution)); }
   projectDetail(id: string, viewerId: string): ProjectDetail { return this.projects.detail(id, viewerId); }
   projectChildPreview(id: string, kind: ProjectKind): ProjectChildPreview { return this.projects.childPreview(id, kind); }
   projectHistory(id: string, before?: number, limit?: number, visible?: (id: string) => boolean): ProjectHistory { return this.projects.history(id, before, limit, visible); }
@@ -315,14 +333,14 @@ export class Store {
     try {
       // Lock before loading task versions or traversing the dependency graph.
       this.database.prepare("UPDATE sequences SET value = value WHERE name = 'task'").run();
-      const result = work(); this.database.exec('RELEASE task_write'); return result;
+      const result = this.workboards ? this.workboards.batch(work) : work(); this.database.exec('RELEASE task_write'); return result;
     } catch (error) { this.database.exec('ROLLBACK TO task_write; RELEASE task_write'); throw error; }
   }
   private advanceTask(task: Task, now: string): Task {
     if (!Number.isSafeInteger(task.version) || task.version < 1 || !Number.isSafeInteger(task.version + 1)) throw new HttpError(409, 'This task has reached the supported version limit.');
     return { ...task, version: task.version + 1, updatedAt: now };
   }
-  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge' | 'project'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
+  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge' | 'project' | 'column'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
     const last = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id) as { sequence: number };
     const sequence = last.sequence + 1;
     if (!Number.isSafeInteger(sequence) || sequence < 1) throw new HttpError(409, 'This task has reached the supported history limit.');
@@ -414,6 +432,7 @@ export class Store {
       if (!removed.length && !added.length) return this.taskDetail(id);
       const now = new Date().toISOString(); const operationId = randomUUID();
       const task = this.advanceTask(current, now);
+      this.workboards!.tagsChanged(current, wanted);
       for (const projectId of removed) this.database.prepare('DELETE FROM task_projects WHERE task_id = ? AND project_id = ?').run(id, projectId);
       for (const projectId of added) this.database.prepare('INSERT INTO task_projects (task_id, project_id) VALUES (?, ?)').run(id, projectId);
       this.save('task', task);
@@ -423,12 +442,26 @@ export class Store {
       return this.taskDetail(id);
     });
   }
+  private writeTaskColumnMove(current: Task, projectIds: string[], column: TaskColumnMove, attribution: ActorAttribution | undefined, now: string): Task {
+    const task = { ...this.advanceTask(current, now), projectIds };
+    const wanted = new Set(projectIds); const old = new Set(current.projectIds);
+    const removed = current.projectIds.filter(id => !wanted.has(id)); const added = projectIds.filter(id => !old.has(id));
+    this.workboards!.tagsChanged(current, projectIds);
+    for (const id of removed) this.database.prepare('DELETE FROM task_projects WHERE task_id=? AND project_id=?').run(task.id,id);
+    for (const id of added) this.database.prepare('INSERT INTO task_projects(task_id,project_id) VALUES(?,?)').run(task.id,id);
+    this.save('task', task);
+    for (const id of removed) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'removed',operationId:column.operationId}},attribution,now);
+    for (const id of added) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'added',operationId:column.operationId}},attribution,now);
+    this.appendTaskTransaction(task,{kind:'column',column},attribution,now);
+    this.event(task.id,'column_changed','Moved task on a workboard.',attribution);
+    return task;
+  }
   taskHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): TaskHistory {
     this.get<Task>('task', id);
     const cursor = before === undefined ? null : integer(before, 'before');
     const size = integer(limit, 'limit');
     if (size > 100) throw new HttpError(400, 'limit must be at most 100.');
-    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)) && (!item.project || visible(item.project.projectId)));
+    const canSee = (item: TaskTransaction) => !visible || ((!item.dependency || visible(item.dependency.taskId)) && (!item.dependencyStatus || visible(item.dependencyStatus.taskId)) && (!item.merge || visible(item.merge.taskId)) && (!item.project || visible(item.project.projectId)) && (!item.column || [item.column.projectId,...item.column.fromColumns.flatMap(column=>column.proxyProjectId?[column.proxyProjectId]:[]),...(item.column.toColumn.proxyProjectId?[item.column.toColumn.proxyProjectId]:[])].every(visible)));
     const pageStatement = this.database.prepare(cursor === null
       ? 'SELECT data FROM task_transactions WHERE task_id = ? ORDER BY sequence DESC'
       : 'SELECT data FROM task_transactions WHERE task_id = ? AND sequence < ? ORDER BY sequence DESC');

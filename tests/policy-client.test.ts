@@ -768,3 +768,103 @@ test('old project presentation caches never imply direct membership or missing p
     client.reconcileAccess({}, 1, ['S1']); assert.equal(client.quarantinedDrafts()[0]?.key, 'project-draft:PROJ1', 'old cached access still participates in revocation');
   } finally { storage.close(); }
 });
+
+const boardMoveDraft = (taskId = 'T1') => ({ input: { taskId, columnId: 'COL1', expectedBoardVersion: 3, expectedTaskVersion: 2, position: { beforeTaskId: 'T2' } }, taskTitle: 'A retained task', columnName: 'Milestone', proxyProjectId: 'PROJ2', referenceTitle: 'Reference task', requestId: `move-${taskId}` });
+
+test('workboard move authority uses board view and task edit; its receipt clears same-epoch aggregate snapshots', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity()));
+    client.reconcileAccess({ PROJ1: access('PROJ1', false), PROJ2: access('PROJ2'), T1: access('T1'), T2: access('T2', false) }, 4);
+    for (const key of ['task:T1', 'project:PROJ1', 'workboard:PROJ1:open']) client.writeStored(key, { accessEpoch: 4, old: true });
+    const input = boardMoveDraft().input; let calls = 0;
+    globalThis.fetch = async (_path, options) => { calls++; assert.deepEqual(JSON.parse(String(options?.body)), input); return Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 4, taskId: 'T1', taskVersion: 3, accessEpoch: 4 }); };
+    const receipt = await client.request('/api/projects/PROJ1/workboard/moves', { method: 'POST', body: input });
+    assert.deepEqual(receipt, { projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 4, accessEpoch: 4 });
+    for (const key of ['task:T1', 'project:PROJ1', 'workboard:PROJ1:open']) assert.equal(client.readStored(key, null), null);
+    assert.equal(calls, 1);
+    client.reconcileAccess({ PROJ1: access('PROJ1'), T1: access('T1', false), T2: access('T2') }, 5);
+    await assert.rejects(client.request('/api/projects/PROJ1/workboard/moves', { method: 'POST', body: input }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(calls, 1, 'board edit does not grant task edit');
+    for (const path of ['/api/projects/PROJ1/workboard', '/api/projects/PROJ1/workboard/moves', '/api/projects/PROJ1/workboard/columns']) assert.equal(canQueue(path, 'POST', input), false);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('committed board receipt survives object revocation but stale layout and a superseded session do not', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1'), T1: access('T1'), T2: access('T2') }, 1);
+    let release!: (response: Response) => void; let signal: AbortSignal | null | undefined;
+    globalThis.fetch = async (_path, options) => { signal = options?.signal; return await new Promise<Response>(resolve => { release = resolve; }); };
+    const pending = client.request('/api/projects/PROJ1/workboard/moves', { method: 'POST', body: boardMoveDraft().input });
+    client.reconcileAccess({}, 2); assert.equal(signal?.aborted, false, 'object loss must not abort a committed receipt');
+    release(Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 4, accessEpoch: 2 })); assert.equal((await pending as { saved: boolean }).saved, true);
+    client.reconcileAccess({ PROJ1: access('PROJ1'), T1: access('T1'), T2: access('T2') }, 3);
+    const oldLayout = client.request('/api/projects/PROJ1/workboard'); client.reconcileAccess({ PROJ1: access('PROJ1'), T1: access('T1') }, 4);
+    release(Response.json({ projectId: 'PROJ1', cards: ['T2'], accessEpoch: 3 })); await assert.rejects(oldLayout, withCode('ACCESS_CHANGED'));
+    client.reconcileAccess({ PROJ1: access('PROJ1'), T1: access('T1'), T2: access('T2') }, 5);
+    const oldSession = client.request('/api/projects/PROJ1/workboard/moves', { method: 'POST', body: boardMoveDraft().input });
+    activateSession(identity('bob')); assert.equal(signal?.aborted, true);
+    release(Response.json({ projectId: 'PROJ1', saved: true, refreshRequired: true, boardVersion: 5, accessEpoch: 5 })); await assert.rejects(oldSession, /session changed/i);
+  } finally { lockSession(); globalThis.fetch = fetch; }
+});
+
+test('workboard move drafts retain every reviewed authority and remain held after access returns and local reload', async () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen();
+    const rules = { PROJ1: access('PROJ1', false), PROJ2: access('PROJ2'), T1: access('T1'), T2: access('T2'), T3: access('T3') };
+    client.reconcileAccess(rules, 1); const draft = boardMoveDraft();
+    client.writeStored('workboard-move:PROJ1:T1', draft); client.writeStored('task-draft:T3', { changed: ['title'], title: 'Independent draft' });
+    const { PROJ2: _hidden, ...visible } = rules; client.reconcileAccess(visible, 2);
+    assert.equal(client.draftIsHeld('workboard-move:PROJ1:T1'), true);
+    assert.deepEqual(client.quarantinedDrafts().map(item => item.value), [draft]);
+    assert.deepEqual(client.readStored('task-draft:T3', null), { changed: ['title'], title: 'Independent draft' });
+    client.reconcileAccess(rules, 3); assert.equal(client.readStored('workboard-move:PROJ1:T1', null), null);
+    const reopened = storage.reopen(); assert.equal(reopened.draftIsHeld('workboard-move:PROJ1:T1'), true);
+    assert.deepEqual(reopened.quarantinedDrafts()[0]?.value, draft);
+    await reopened.discardQuarantinedDraft('workboard-move:PROJ1:T1'); assert.equal(reopened.readStored('workboard-move:PROJ1:T1', null), null);
+  } finally { storage.close(); }
+});
+
+test('password workboard move drafts are included in explicit unsaved-work export', () => {
+  try {
+    const client = createWorkspaceClient(activateSession(identity())); client.reconcileAccess({ PROJ1: access('PROJ1', false), PROJ2: access('PROJ2'), T1: access('T1'), T2: access('T2') }, 1);
+    client.writeStored('workboard-move:PROJ1:T1', boardMoveDraft());
+    assert.deepEqual(client.draftRecords(), [{ key: 'workboard-move:PROJ1:T1', value: boardMoveDraft() }]);
+  } finally { lockSession(); }
+});
+
+for (const revoked of ['T2', 'T3', 'both']) test(`physical workboard drafts keep distinct anchors when ${revoked} is revoked`, () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); const key = 'workboard-move:PROJ1:T1';
+    const rules = { PROJ1: access('PROJ1', false), PROJ2: access('PROJ2'), T1: access('T1'), T2: access('T2'), T3: access('T3') };
+    client.reconcileAccess(rules, 1); const older = boardMoveDraft(); const newer = { ...boardMoveDraft(), input: { ...boardMoveDraft().input, position: { beforeTaskId: 'T3' } }, referenceTitle: 'Newer reference' };
+    assert.equal(client.writeStored(key, older), true); storage.failWrites(true); assert.equal(client.writeStored(key, newer), false);
+    assert.equal(client.draftHasUnsavedMemory(key), true, 'the first failed write is distinguishable before more editing');
+    storage.failWrites(false);
+    client.reconcileAccess(Object.fromEntries(Object.entries(rules).filter(([id]) => revoked === 'both' ? !['T2', 'T3'].includes(id) : id !== revoked)), 2);
+    const held = client.quarantinedDrafts();
+    assert.deepEqual(held.find(item => item.key === key)?.value, older);
+    assert.deepEqual(held.find(item => item.key === `${key}:unsaved-memory`)?.value, newer, 'holding one physical copy secures every copy in this editor family');
+    const reopened = storage.reopen();
+    assert.deepEqual(reopened.quarantinedDrafts().map(item => item.value), [older, newer], 'both physical copies remain explicitly recoverable after reload');
+    assert.equal(reopened.readStored(key, null), null, 'a held physical copy holds the entire editor family');
+  } finally { storage.close(); }
+});
+
+test('successful move cleanup removes a failed attempt marker without deleting a different saved move', () => {
+  const storage = localStorageFixture();
+  try {
+    const client = storage.reopen(); const key = 'workboard-move:PROJ1:T1'; const original = boardMoveDraft(); const attempted = { ...original, attempted: true };
+    client.reconcileAccess({ PROJ1: access('PROJ1'), PROJ2: access('PROJ2'), T1: access('T1'), T2: access('T2') }, 1);
+    client.writeStored(key, original); storage.failWrites(true); client.writeStored(key, attempted);
+    client.removeStoredIfEqual(key, attempted); client.removeStoredIfEqual(key, original);
+    assert.equal(client.readStored(key, null), null, 'both exact pre-submit and submitted physical copies are cleared');
+    storage.failWrites(false); const newer = { ...original, columnName: 'Newer draft from another tab', requestId: 'different-request' }; client.writeStored(key, newer);
+    storage.failWrites(true); client.writeStored(key, attempted);
+    client.removeStoredIfEqual(key, attempted); client.removeStoredIfEqual(key, original);
+    assert.deepEqual(client.readStored(key, null), newer);
+  } finally { storage.close(); }
+});

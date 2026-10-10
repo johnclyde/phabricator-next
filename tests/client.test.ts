@@ -232,3 +232,10 @@ test('hierarchy creation cannot queue and milestone display names remain availab
   assert.equal(projectMatches({ id: 'PROJ4', name: 'Draft', displayName: 'Research (Milestone 1: Draft)', primarySlug: null, aliases: [] }, 'Research (Milestone 1: Draft)'), true);
   for (const command of ['create milestone Draft', 'convert Research to parent', 'join subproject Research']) assert.equal(parseCommand(command).type, 'unknown');
 });
+
+
+test('workboard commands navigate only and never infer card mutations', () => {
+  assert.deepEqual(parseCommand('open workboard Research Papers'), { type: 'openWorkboard', project: 'Research Papers' });
+  assert.deepEqual(parseCommand('show workboard for PROJ 12'), { type: 'openWorkboard', project: 'PROJ12' });
+  for (const command of ['move this card to Done', 'create workboard Research', 'disable workboard Research', 'read workboard cards']) assert.equal(parseCommand(command).type, 'unknown');
+});

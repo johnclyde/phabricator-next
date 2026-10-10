@@ -10,6 +10,7 @@ import { isTaskClosed } from '../shared/tasks';
 import { normalizeProjectSlug, projectDisplayName } from '../shared/projects';
 import { visibleProjectScope } from '../shared/project-hierarchy';
 import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
+import type { WorkboardCardPage, WorkboardDetail } from '../shared/workboards';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -19,6 +20,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- list
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
+  npm run arc -- board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
   npm run arc -- show P2|T1|PROJ1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
@@ -36,10 +38,37 @@ Repeat it to require a matching tag in each selected project's subtree.
 show T1 includes the current task, visible dependencies, and the first history page.
 projects lists active visible projects; --joined and --watching select your relationships.
 show PROJ1 includes the project profile, hierarchy, preferences, and first history page.
+board reads the project's actual workboard in column order. It defaults to open
+tasks with all owners; --limit caps cards per column. Without a limit it follows
+all pages, rejecting concurrent board or access changes instead of mixing pages.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
 `;
+
+function visibleProjectId(value: string, state: AppState): string {
+  const byId = state.projects.find(project => project.id === value);
+  if (byId) return byId.id;
+  const matches = state.projects.filter(project => project.name.toLocaleLowerCase() === value.toLocaleLowerCase() || projectDisplayName(project).toLocaleLowerCase() === value.toLocaleLowerCase());
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length === 0) {
+    const slug = normalizeProjectSlug(value.replace(/^#/, ''));
+    const aliases = state.projects.filter(project => project.primarySlug === slug || project.aliases.includes(slug));
+    if (aliases.length === 1) return aliases[0]!.id;
+  }
+  throw new Error('Project is unavailable or its name is ambiguous. Use a visible project ID, exact name or alias.');
+}
+
+function visibleOwnerId(owner: string, state: AppState): string | null | undefined {
+  if (owner === 'me') return state.currentPrincipalId;
+  if (owner === 'unassigned') return null;
+  if (owner === 'all') return undefined;
+  const username = owner.startsWith('user:') ? owner.slice(5) : owner;
+  const id = state.principals.find(account => account.username.toLowerCase() === username.toLowerCase() || account.id === owner)?.id;
+  if (id) return id;
+  if (state.tasks.some(task => task.ownerId === owner)) return owner;
+  throw new Error('Owner is not an available workspace account. Use a username, principal ID, me, all or unassigned.');
+}
 
 async function main() {
   const { values, positionals } = parseArgs({
@@ -52,6 +81,7 @@ async function main() {
       status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' },
       project: { type: 'string', multiple: true }, owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
       joined: { type: 'boolean' }, watching: { type: 'boolean' },
+      'show-hidden': { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -124,27 +154,8 @@ async function main() {
     const state = await request<AppState>('/api/state');
     if (values.unassigned && values.owner) throw new Error('Use --unassigned or --owner, not both.');
     const owner = values.unassigned ? 'unassigned' : values.owner || 'me';
-    let ownerId: string | null | undefined;
-    if (owner === 'me') ownerId = state.currentPrincipalId;
-    else if (owner === 'unassigned') ownerId = null;
-    else if (owner !== 'all') {
-      const username = owner.startsWith('user:') ? owner.slice(5) : owner;
-      ownerId = state.principals.find(account => account.username.toLowerCase() === username.toLowerCase() || account.id === owner)?.id;
-      if (!ownerId && state.tasks.some(task => task.ownerId === owner)) ownerId = owner;
-      if (!ownerId) throw new Error('Owner is not an available workspace account. Use a username, principal ID, me, all or unassigned.');
-    }
-    const projectIds = (values.project || []).map(value => {
-      const byId = state.projects.find(project => project.id === value);
-      if (byId) return byId.id;
-      const matches = state.projects.filter(project => project.name.toLocaleLowerCase() === value.toLocaleLowerCase() || projectDisplayName(project).toLocaleLowerCase() === value.toLocaleLowerCase());
-      if (matches.length === 1) return matches[0]!.id;
-      if (matches.length === 0) {
-        const slug = normalizeProjectSlug(value.replace(/^#/, ''));
-        const aliases = state.projects.filter(project => project.primarySlug === slug || project.aliases.includes(slug));
-        if (aliases.length === 1) return aliases[0]!.id;
-      }
-      throw new Error('Project is unavailable or its name is ambiguous. Use a visible project ID, exact name or alias.');
-    });
+    const ownerId = visibleOwnerId(owner, state);
+    const projectIds = (values.project || []).map(value => visibleProjectId(value, state));
     const projectScopes = projectIds.map(id => new Set(visibleProjectScope(id, state.projects)));
     const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
     const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task.status) : !isTaskClosed(task.status)))
@@ -178,6 +189,47 @@ async function main() {
     const detail = id && /^T[1-9]\d*$/.test(id) ? await request<TaskDetail>(`/api/tasks/${id}`)
       : id && /^PROJ[1-9]\d*$/.test(id) ? await request<ProjectDetail>(`/api/projects/${id}`) : await getDetail(id);
     return console.log(JSON.stringify(detail, null, 2));
+  }
+  if (command === 'board') {
+    if (args.length !== 1) throw new Error('Provide one project ID, exact name or alias.');
+    const status = values.status || 'open';
+    if (!['open', 'all'].includes(status)) throw new Error('--status must be open or all. Open includes tasks in progress.');
+    if (values.unassigned && values.owner) throw new Error('Use --unassigned or --owner, not both.');
+    const limit = values.limit === undefined ? undefined : Number(values.limit);
+    if (limit !== undefined && (!/^[1-9]\d*$/.test(values.limit!) || !Number.isSafeInteger(limit))) throw new Error('--limit must be a positive integer.');
+    const state = await request<AppState>('/api/state');
+    const id = visibleProjectId(args[0]!, state);
+    const ownerId = visibleOwnerId(values.unassigned ? 'unassigned' : values.owner || 'all', state);
+    const query = new URLSearchParams({ status, showHidden: String(Boolean(values['show-hidden'])), limit: String(Math.min(limit ?? 100, 100)) });
+    if (ownerId !== undefined) query.set('ownerId', ownerId === null ? 'null' : ownerId);
+    const path = `/api/projects/${id}/workboard`;
+    const board = await request<WorkboardDetail>(`${path}?${query}`);
+    for (const column of board.columns) {
+      const cursors = new Set<string>();
+      while (column.cards.nextAfter !== null && (limit === undefined || column.cards.cards.length < limit)) {
+        const cursor = column.cards.nextAfter;
+        if (cursors.has(cursor)) throw new Error('The board page cursor repeated. Reload the board.');
+        cursors.add(cursor);
+        const pageQuery = new URLSearchParams(query);
+        pageQuery.set('after', cursor); pageQuery.set('expectedBoardVersion', String(board.board.version));
+        if (limit !== undefined) pageQuery.set('limit', String(Math.min(100, limit - column.cards.cards.length)));
+        const page = await request<WorkboardCardPage>(`${path}/columns/${encodeURIComponent(column.id)}/cards?${pageQuery}`);
+        if (page.projectId !== id || page.columnId !== column.id || page.boardVersion !== board.board.version || page.accessEpoch !== board.accessEpoch || page.filter.status !== board.filter.status || page.filter.showHidden !== board.filter.showHidden || page.filter.ownerId !== board.filter.ownerId) throw new Error('The board or its access changed while reading pages. Run the command again.');
+        const known = new Set(column.cards.cards.map(card => card.id));
+        if (page.cards.some(card => known.has(card.id)) || new Set(page.cards.map(card => card.id)).size !== page.cards.length) throw new Error('The board returned overlapping pages. Run the command again.');
+        column.cards = { ...page, cards: [...column.cards.cards, ...page.cards] };
+      }
+    }
+    if (values.json) console.log(JSON.stringify(board, null, 2));
+    else {
+      console.log(`${id} · ${projectDisplayName(board.project)} · ${board.board.enabled ? `Board v${board.board.version}` : 'Workboard disabled'}`);
+      for (const column of board.columns) {
+        console.log(`\n${column.name}${column.hidden ? ' [hidden]' : ''} · ${column.cards.cards.length}/${column.visibleCardCount} visible cards${column.pointLimit === null ? '' : ` · limit ${column.pointLimit}${column.overLimit ? ' exceeded' : ''}`}`);
+        for (const card of column.cards.cards) console.log(`${card.id}\tv${card.version}\t${card.status}\t${card.priority}\t${card.title}`);
+        if (column.cards.nextAfter !== null) console.log('More cards available; increase or omit --limit.');
+      }
+    }
+    return;
   }
   if (command === 'review') {
     if (!['local', 'openai', 'ollama'].includes(values.provider!)) throw new Error('--provider must be local, openai or ollama.');

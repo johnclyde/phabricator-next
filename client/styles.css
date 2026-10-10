@@ -388,3 +388,55 @@
   .project-child-editor .checkbox { min-height: 44px; }
   .project-child-confirmation { padding: 12px; }
 }
+
+/* Workboards keep manual columns on desktop and full-width cards on phones. */
+.project-workboard-link { margin-bottom: 12px; }
+.workboard-page { min-width: 0; }
+.workboard-page h1 { display: flex; align-items: center; gap: 9px; }
+.workboard-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 16px 0; }
+.workboard-toolbar .field { min-width: 150px; margin: 0; }
+.workboard-toolbar .checkbox { min-height: 40px; margin: 0; }
+.workboard-columns { display: flex; align-items: flex-start; gap: 14px; overflow-x: auto; padding: 4px 2px 18px; max-width: 100%; }
+.workboard-column { flex: 0 0 304px; min-width: 0; background: #e9edf1; border: 1px solid #c8d0d8; border-radius: 4px; }
+.workboard-column > header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; background: #dfe5ec; border-bottom: 1px solid #c8d0d8; }
+.workboard-column h2 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.workboard-column h2 small { display: block; color: #606f7e; font-weight: 400; font-size: 11px; margin-top: 4px; }
+.workboard-count { font-size: 12px; font-weight: 600; padding: 3px 7px; background: #f8fafc; border: 1px solid #cad3dc; border-radius: 10px; white-space: nowrap; }
+.workboard-count.over-limit { color: #a72c2c; background: #fff0ed; border-color: #d88d83; }
+.workboard-limit { font-size: 12px; margin: 10px 12px; color: #8a342c; }
+.workboard-column-actions { padding: 8px 10px; border-bottom: 1px solid #d2d8e0; font-size: 12px; }
+.workboard-column-actions summary { cursor: pointer; padding: 6px 0; color: #426584; }
+.workboard-column-actions > div { display: flex; flex-wrap: wrap; gap: 6px; padding: 5px 0; }
+.workboard-column-actions p { margin-bottom: 0; }
+.workboard-cards { list-style: none; margin: 0; padding: 10px; display: grid; gap: 10px; }
+.workboard-card { background: white; border: 1px solid #c9d1d9; border-left: 4px solid #8b9ba9; border-radius: 3px; box-shadow: 0 1px 2px #25374b0a; padding: 11px; }
+.workboard-card.priority-urgent { border-left-color: #c0392b; }.workboard-card.priority-high { border-left-color: #e67e22; }.workboard-card.priority-low { border-left-color: #90a4ae; }
+.workboard-task-link { display: block; line-height: 1.5; overflow-wrap: anywhere; color: #225578; }
+.workboard-card-meta { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin: 10px 0; font-size: 12px; color: #61717d; }
+.workboard-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
+.workboard-load-more { margin: 0 10px 12px; }
+.workboard-column.hidden-column { border-style: dashed; }
+.workboard-mobile-navigation { display: none; }
+.workboard-column-editor, .workboard-confirm, .workboard-move-editor, .workboard-history { margin: 16px 0; }
+.workboard-confirm, .workboard-move-editor { scroll-margin-top: 100px; }
+.workboard-move-confirm { padding: 15px; background: #f0f6fa; border: 1px solid #c5d8e6; margin: 14px 0; }
+.workboard-move-confirm .button { margin: 4px 8px 4px 0; }
+.workboard-history li { padding: 12px 0; border-bottom: 1px solid #e1e6ea; }
+@media (max-width: 700px) {
+  .workboard-toolbar { align-items: stretch; gap: 10px; }
+  .workboard-toolbar .field { flex: 1 1 130px; min-width: 0; }
+  .workboard-page .button, .workboard-page select, .workboard-page input:not([type=checkbox]), .workboard-page summary, .workboard-task-link { min-height: 44px; }
+  .workboard-page .button { justify-content: center; white-space: normal; }
+  .workboard-page .text-button { min-height: 44px; }
+  .workboard-columns { display: block; overflow-x: visible; padding: 0; }
+  .workboard-column { display: none; width: 100%; }
+  .workboard-column.mobile-selected { display: block; }
+  .workboard-mobile-navigation { display: flex; align-items: end; gap: 8px; margin: 16px 0 10px; }
+  .workboard-mobile-navigation .field { margin: 0; flex: 1; min-width: 0; }
+  .workboard-mobile-navigation > div { display: flex; gap: 6px; }
+  .workboard-card > .button { width: 100%; }
+  .workboard-page .project-actions { display: flex; flex-wrap: wrap; }
+  .workboard-page .project-actions .button { flex: 1 1 145px; }
+  .workboard-move-confirm .button { width: 100%; margin: 4px 0; }
+  .workboard-move-editor .panel-heading { flex-wrap: wrap; }
+}

@@ -14,6 +14,7 @@ interface ProjectStoreOptions {
   nextId: () => string;
   event: (id: string, action: string, detail: string, attribution?: ActorAttribution) => void;
   activities: (id: string) => Activity[];
+  changed?: (project: Project, created: boolean, attribution?: ActorAttribution) => void;
 }
 let savepoint = 0;
 
@@ -189,7 +190,7 @@ export class ProjectStore {
         this.options.event(parent.id, 'hierarchy_changed', 'Updated project hierarchy.', attribution);
       }
       if (parent || memberIds.length) this.bumpEpoch();
-      return this.get(id);
+      const created = this.get(id); this.options.changed?.(created, true, attribution); return created;
     });
   }
   update(id: string, input: unknown, attribution?: ActorAttribution): ProjectDetail {
@@ -209,6 +210,7 @@ export class ProjectStore {
       if (changes.length) {
         const now = new Date().toISOString(); const updated: Project = { ...project, ...values, ...(renamed && primarySlug ? { primarySlugSource: 'name' as const } : {}), version: increment(project.version, 'version'), updatedAt: now };
         this.save(updated); this.append(updated, { kind: 'edit', changes }, attribution, now); this.options.event(id, 'updated', 'Updated project profile.', attribution);
+        this.options.changed?.(this.get(id), false, attribution);
       }
       return this.detail(id, attribution?.principalId ?? '');
     });

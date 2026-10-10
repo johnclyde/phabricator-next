@@ -10,6 +10,7 @@ import { createServer } from 'node:http';
 import { createApp } from '../server/app.ts';
 import { createAuth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
+import type { WorkboardDetail, WorkboardReceipt } from '../shared/workboards.ts';
 
 const cli = fileURLToPath(new URL('../cli/index.ts', import.meta.url));
 const loader = import.meta.resolve('tsx');
@@ -344,6 +345,75 @@ test('CLI project filters include visible descendants and distinguish milestone 
     assert.equal(detail.viewer.effectiveWatching, true); assert.deepEqual(detail.viewer.watchingInheritedFrom, [parent.id]);
     assert.deepEqual(detail.hierarchy.ancestors.map((project: { id: string }) => project.id), [parent.id, methods.id]);
     assert.ok(!shown.stdout.includes(secret.id)); assert.ok(!shown.stdout.includes(hiddenLeaf.id));
+  } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('CLI workboards read all filtered pages with scoped tokens and reject concurrent layout or access changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'phab-cli-workboards-'));
+  const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+  const alice = await provision.createAccount({ username: 'alice', displayName: 'Alice', password: 'test-only-board-cli-password' });
+  const bob = await provision.createAccount({ username: 'bob', displayName: 'Bob', password: 'test-only-board-cli-password' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/workspace/' });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
+  const readToken = app.auth.createToken(bob.id, { name: 'Board CLI read', scopes: ['read'] });
+  const writeToken = app.auth.createToken(bob.id, { name: 'Board fixture write', scopes: ['read', 'write'] });
+  const actor = { principalId: bob.id, displayName: bob.displayName, credentialId: null, requestId: 'cli-workboard' };
+  const paths: string[] = [];
+  app.server.prependListener('request', req => paths.push(req.url || ''));
+  const read = (args: string[]) => runCommand(root, [...args, '--server', server], readToken.token);
+  const request = async <T>(path: string, method = 'GET', body?: unknown): Promise<T> => {
+    const response = await fetch(new URL(`api${path}`, server), { method, headers: { Authorization: `Bearer ${writeToken.token}`, 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const result: unknown = await response.json(); assert.equal(response.ok, true, JSON.stringify(result)); return result as T;
+  };
+  try {
+    const project = store.createProject({ name: 'CLI research board', aliases: ['research-board'] }, actor);
+    const secret = store.createProject({ name: 'Private board project marker' }, actor);
+    const tasks = Array.from({ length: 105 }, (_, index) => store.createTask({ title: `Visible board card ${index}`, projectIds: [project.id, secret.id], ownerId: index % 2 === 0 ? bob.id : null }, actor));
+    const closed = store.createTask({ title: 'Closed board card', status: 'resolved', projectIds: [project.id] }, actor);
+    // Leave this task unassigned so Bob gets no automatic owner access.
+    const hidden = store.createTask({ title: 'Private task marker', projectIds: [project.id] });
+    app.policies.configureNew(hidden.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
+    app.policies.configureNew(secret.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
+    const path = `/projects/${project.id}/workboard`;
+    await request(path, 'PUT', { enabled: true, expectedBoardVersion: 0 });
+    let board = await request<WorkboardDetail>(path);
+    const column = await request<WorkboardReceipt>(`${path}/columns`, 'POST', { name: 'Writing', expectedBoardVersion: board.board.version });
+    board = await request<WorkboardDetail>(path);
+    const writing = board.columns.find(item => item.name === 'Writing')!;
+    assert.equal(column.columnId, writing.id);
+    await request(`${path}/moves`, 'POST', { taskId: tasks[0]!.id, columnId: writing.id, expectedBoardVersion: board.board.version, expectedTaskVersion: tasks[0]!.version, position: { edge: 'start' } });
+    const listed = await read(['board', '#research-board', '--json']);
+    assert.equal(listed.code, 0, listed.stderr);
+    const result = JSON.parse(listed.stdout) as WorkboardDetail;
+    assert.equal(result.canEdit, false);
+    assert.equal(result.columns.flatMap(item => item.cards.cards).length, 105);
+    assert.ok(result.columns.every(item => item.cards.nextAfter === null && item.cards.cards.every(card => !card.canMove)));
+    assert.equal(result.columns.find(item => item.name === 'Writing')!.cards.cards[0]!.id, tasks[0]!.id);
+    assert.ok(paths.some(path => path.includes('/cards?') && path.includes('expectedBoardVersion=')));
+    for (const value of [hidden.id, hidden.title, secret.id, secret.name, readToken.token, writeToken.token]) assert.ok(!listed.stdout.includes(value), value);
+    for (const [args, count] of [[['--owner', 'me'], 53], [['--unassigned'], 52], [['--status', 'all'], 106]] as [string[], number][]) {
+      const filtered = await read(['board', project.id, ...args, '--json']); assert.equal(filtered.code, 0, filtered.stderr);
+      assert.equal((JSON.parse(filtered.stdout) as WorkboardDetail).columns.flatMap(item => item.cards.cards).length, count);
+    }
+    const limited = await read(['board', project.id, '--limit', '2', '--json']); assert.equal(limited.code, 0, limited.stderr);
+    const limitedBoard = JSON.parse(limited.stdout) as WorkboardDetail;
+    assert.equal(limitedBoard.columns.find(item => item.isDefault)!.cards.cards.length, 2);
+    assert.notEqual(limitedBoard.columns.find(item => item.isDefault)!.cards.nextAfter, null);
+    assert.ok(!(JSON.parse(listed.stdout) as WorkboardDetail).columns.flatMap(item => item.cards.cards).some(task => task.id === closed.id));
+    const denied = await read(['board', secret.id]); const missing = await read(['board', 'PROJ99999']);
+    assert.equal(denied.code, 1); assert.equal(denied.stderr, missing.stderr);
+    for (const args of [[], [project.id, 'extra'], [project.id, '--status', 'closed'], [project.id, '--limit', '0'], [project.id, '--owner', 'me', '--unassigned']]) assert.equal((await read(['board', ...args])).code, 1);
+    let change: (() => void) | null = () => { store.createTask({ title: 'Concurrent board card', projectIds: [project.id] }, actor); };
+    const interrupt = (req: import('node:http').IncomingMessage) => { if (req.url?.includes('/cards?') && change) { const next = change; change = null; next(); } };
+    app.server.prependListener('request', interrupt);
+    try {
+      const changed = await read(['board', project.id]); assert.equal(changed.code, 1); assert.equal(changed.stdout, '');
+      change = () => { app.policies.configureNew(tasks[1]!.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id); };
+      const revoked = await read(['board', project.id]); assert.equal(revoked.code, 1); assert.equal(revoked.stdout, '');
+    } finally { app.server.removeListener('request', interrupt); }
+    assert.ok(paths.every(path => path.startsWith('/workspace/api/')));
   } finally { await app.close(); store.close(); await rm(root, { recursive: true, force: true }); }
 });
 

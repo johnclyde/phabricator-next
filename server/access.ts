@@ -3,6 +3,7 @@ import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, P
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
 import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
+import type { WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import type { MutationResponse, Store } from './store.ts';
@@ -68,6 +69,49 @@ export class AccessLayer {
   }
   projectWatchers(id: string, after?: string, limit?: number): ProjectWatchersPage { this.require(id); const page = this.store.projectWatchers(id, this.principal, after, limit); return { ...page, viewer: this.projectPreferenceSnapshot(page.viewer), accessEpoch: this.policies.epoch() }; }
   projectPreferences(id: string): ProjectPreferences { this.require(id); return this.projectPreferenceSnapshot(this.store.projectPreferences(id, this.principal)); }
+  private workboardVisibility() {
+    const canWrite = this.context.scopes.includes('write');
+    return { canViewProject: (id: string) => this.canView(id), canViewTask: (id: string) => this.canView(id),
+      canEditTask: (id: string) => canWrite && this.policies.access(id, this.principal).edit,
+      canEditProject: (id: string) => canWrite && this.policies.access(id, this.principal).edit };
+  }
+  private workboardQuery(query: WorkboardQuery): void {
+    if (query.ownerId === undefined || query.ownerId === null) return;
+    const id = query.ownerId;
+    if (typeof id !== 'string' || id.length > 200 || !id || id.includes('\0')) throw new HttpError(400, 'Selected member is unavailable.');
+    if (this.auth.listAccounts().some(account => account.id === id) || (this.context.kind === 'local' && id === this.principal)) return;
+    // Historical identities (including a former local owner) remain valid
+    // filters only when already visible on an accessible task.
+    const tasks = this.store.database.prepare("SELECT id FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ?").all(id) as { id: string }[];
+    if (!tasks.some(task => this.canView(task.id))) throw new HttpError(400, 'Selected member is unavailable.');
+  }
+  workboard(id: string, query: WorkboardQuery): WorkboardDetail {
+    this.require(id); this.workboardQuery(query);
+    const detail = this.store.workboard(id, query, this.workboardVisibility());
+    const accessEpoch = this.policies.epoch();
+    return this.redact({ ...detail, columns: detail.columns.map(column => ({ ...column, cards: { ...column.cards, accessEpoch } })), accessEpoch });
+  }
+  workboardCards(id: string, columnId: string, query: WorkboardCardsQuery): WorkboardCardPage {
+    this.require(id); this.workboardColumnReference(id, columnId); this.workboardQuery(query);
+    return this.redact({ ...this.store.workboardCards(id, columnId, query, this.workboardVisibility()), accessEpoch: this.policies.epoch() });
+  }
+  workboardHistory(id: string, before?: number, limit?: number): WorkboardHistory {
+    this.require(id);
+    return { ...this.store.workboardHistory(id, before, limit, related => this.canView(related)), accessEpoch: this.policies.epoch() };
+  }
+  /** Child failures must not be mistaken for revocation of a visible board. */
+  private workboardColumnReference(projectId: string, value: unknown): WorkboardColumn {
+    const unavailable = () => new HttpError(404, 'Workboard column was not found.', 'COLUMN_UNAVAILABLE');
+    if (typeof value !== 'string' || !/^COL[1-9]\d*$/.test(value)) throw unavailable();
+    const column = this.store.workboardColumn(projectId, value);
+    if (column.proxyProjectId && (!this.canView(column.proxyProjectId) || this.store.getProject(column.proxyProjectId).kind !== 'milestone')) throw unavailable();
+    return column;
+  }
+  private workboardTaskReference(value: unknown, edit = false): string {
+    if (typeof value !== 'string' || !/^T[1-9]\d*$/.test(value) || !this.canView(value)) throw new HttpError(404, 'Task reference was not found.', 'TASK_REFERENCE_UNAVAILABLE');
+    if (edit) this.require(value, 'edit');
+    return value;
+  }
   private projectPreferenceSnapshot(preferences: ProjectPreferences): ProjectPreferences {
     return { ...preferences, membership: { ...preferences.membership, sourceProjectIds: preferences.membership.sourceProjectIds.filter(id => this.canView(id)) }, watchingInheritedFrom: preferences.watchingInheritedFrom.filter(id => this.canView(id)), accessEpoch: this.policies.epoch() };
   }
@@ -99,7 +143,9 @@ export class AccessLayer {
   }
   private visibleTaskTransaction(transaction: TaskTransaction): boolean {
     const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId ?? transaction.merge?.taskId ?? transaction.project?.projectId;
-    return !related || this.canView(related);
+    if (related && !this.canView(related)) return false;
+    const column = transaction.column;
+    return !column || (this.canView(column.projectId) && [...column.fromColumns, column.toColumn].every(item => !item.proxyProjectId || this.canView(item.proxyProjectId)));
   }
   /** Filter only this response's evidence; retries must never borrow live history. */
   private taskSnapshot(detail: TaskDetail): TaskDetail {
@@ -178,11 +224,30 @@ export class AccessLayer {
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
     const selfProject = object[1]!.startsWith('PROJ') && ['membership', 'watchers', 'silence'].includes(object[2] ?? '');
-    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
+    const boardMove = method === 'POST' && object[1]!.startsWith('PROJ') && object[2] === 'workboard/moves';
+    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject || boardMove ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|columns)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
+    if (workboard && method !== 'GET') {
+      const id = workboard[1]!; const data = record(input);
+      if (workboard[2] === 'moves') {
+        this.workboardTaskReference(data?.taskId, true);
+        this.workboardColumnReference(id, data?.columnId);
+        const position = record(data?.position);
+        for (const name of ['beforeTaskId', 'afterTaskId']) if (position && Object.hasOwn(position, name)) this.workboardTaskReference(position[name]);
+      } else if (workboard[3]) {
+        this.workboardColumnReference(id, workboard[3]);
+        if (workboard[4]) {
+          const position = record(data?.position);
+          for (const name of ['beforeColumnId', 'afterColumnId']) if (position && Object.hasOwn(position, name)) this.workboardColumnReference(id, position[name]);
+        }
+      }
+      // Versions, enabled/hidden state and current anchor placement belong to
+      // the fresh operation. Saved retries still recheck all current authority.
+    }
     if (method === 'POST' && path === '/api/projects') {
       const data = record(input);
       if (data?.parentId !== undefined && data.parentId !== null) {
@@ -380,6 +445,14 @@ export class AccessLayer {
     } else if (target) this.require(target.id, target.capability);
     if (path.startsWith('/api/policies/') && target) return { status: response.status, body: this.describe(target.id) };
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
+    if (/^\/api\/projects\/PROJ\d+\/workboard(?:\/|$)/.test(path)) {
+      if (!body || body.projectId !== target?.id || body.saved !== true || body.refreshRequired !== true || !Number.isSafeInteger(body.boardVersion) || Number(body.boardVersion) < 0) throw new HttpError(409, 'This saved workboard response cannot be safely replayed. Reload the board.');
+      // A receipt never becomes a fresh layout or a new CAS baseline. Preserve
+      // its historical pins while stamping only the current permission epoch.
+      return { status: response.status, body: { projectId: body.projectId, saved: true, refreshRequired: true, boardVersion: body.boardVersion,
+        ...(typeof body.columnId === 'string' ? { columnId: body.columnId } : {}), ...(typeof body.taskId === 'string' ? { taskId: body.taskId } : {}),
+        ...(typeof body.taskVersion === 'number' ? { taskVersion: body.taskVersion } : {}), accessEpoch: this.policies.epoch() } };
+    }
     if (path.startsWith('/api/projects') && body) {
       const project = record(body.project) ?? (path === '/api/projects' ? body : null);
       if (project && typeof project.id === 'string' && /^PROJ[1-9]\d*$/.test(project.id) && (project.version === undefined || project.kind === undefined || project.hierarchyVersion === undefined || (body.project !== undefined && !record(body.hierarchy)) || this.projectNeedsRefresh(project, body))) return { status: response.status, body: { id: project.id, saved: true, refreshRequired: true, accessEpoch: this.policies.epoch() } };

@@ -7,7 +7,7 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
 }
 
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';
-export type VoiceCommand = { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -25,6 +25,8 @@ export function parseCommand(input: string): VoiceCommand {
   if (project) return { type: 'taskProjectFilter', project: project[1].trim() };
   const projectFilter = text.match(/^(?:show|open) (joined|watching|active|all) projects$/);
   if (projectFilter) return { type: 'projectFilter', value: projectFilter[1] as 'joined' | 'watching' | 'active' | 'all' };
+  const board = original.match(/^(?:open|show|go to) (?:the )?workboard (?:for )?(.+)$/i);
+  if (board) return { type: 'openWorkboard', project: board[1].replace(/^PROJ\s+(\d+)$/i, 'PROJ$1').trim() };
   const profile = original.match(/^(?:open|show|go to) project (.+)$/i) || original.match(/^(?:open|show|go to) (PROJ\s*[1-9]\d*)$/i);
   if (profile) return { type: 'openProject', project: profile[1].replace(/^PROJ\s+(\d+)$/i, 'PROJ$1').trim() };
   const search = original.match(/^(?:search(?: for)?|find)\s+(.+)$/i);
