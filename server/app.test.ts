@@ -86,7 +86,8 @@ test('persistent idempotency replays one committed response after restart and re
     assert.deepEqual((await app.request<Task>('/api/tasks', 'POST', { title: 'Write once' }, { 'Idempotency-Key': 'offline-task-1' })).body, first.body);
     assert.equal((await app.request('/api/tasks', 'POST', { title: 'Different body' }, { 'Idempotency-Key': 'offline-task-1' })).status, 409);
     const state = (await app.request<AppState>('/api/state')).body;
-    assert.equal(state.tasks.length, 1); assert.equal(state.activity.length, 1);
+    assert.equal(state.tasks.length, 1);
+    assert.deepEqual(state.activity.map(event => event.action).sort(), ['created', 'subscription_changed']);
     assert.equal((await app.request('/api/tasks', 'POST', { title: '' }, { 'Idempotency-Key': 'retry-validation' })).status, 400);
     assert.equal((await app.request('/api/tasks', 'POST', { title: 'Corrected input' }, { 'Idempotency-Key': 'retry-validation' })).status, 201);
   } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }

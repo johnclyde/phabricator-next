@@ -293,3 +293,15 @@
 }
 
 @media (max-width: 650px) { .task-row .task-link { min-height: 44px; } }
+
+.task-assignment-filter { padding: 12px 18px 0; border-bottom: 1px solid #e0e7ec; background: #fafbfd; }
+.task-assignment-filter .field { max-width: 300px; }
+.task-owner { margin: 0 0 12px; color: #456579; }
+.task-assignment-confirmation { padding: 12px; margin-top: 14px; background: #edf5fb; border: 1px solid #b7cddb; border-radius: 3px; font-size: 12px; line-height: 1.65; }
+.task-following-status { font-size: 13px; line-height: 1.6; }
+.task-followers { list-style: none; margin: 12px 0; padding: 0; }
+.task-followers li { display: flex; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid #e0e7ec; font-size: 13px; }
+.task-followers li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.task-followers small { display: block; color: #718291; font-size: 11px; padding-top: 3px; }
+.task-subscribers form { margin-top: 16px; }
+@media (max-width: 650px) { .task-assignment-filter .field { max-width: none; } .task-assignment-filter select { min-height: 44px; } }

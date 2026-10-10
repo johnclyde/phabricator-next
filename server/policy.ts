@@ -4,7 +4,7 @@ import { audienceLabel, effectiveAccess, spaceAccess } from '../shared/policy.ts
 import { HttpError, integer, object, optionalString, string } from './validation.ts';
 
 type JsonRow = { data: string };
-type PolicyRow = { data: string; space_data: string };
+type PolicyRow = { data: string; space_data: string; owner_id: string | null };
 export interface PolicyStoreOptions { principalExists: (id: string) => boolean }
 const workspace = (): Audience => ({ kind: 'workspace' });
 const sharedRules = (): PolicyRules => ({ view: workspace(), edit: workspace(), interact: workspace() });
@@ -58,12 +58,18 @@ export class PolicyStore {
     const row = this.database.prepare('SELECT data FROM policy_spaces WHERE id = ?').get(id) as JsonRow | undefined;
     return row ? JSON.parse(row.data) as Space : undefined;
   }
-  private resolved(id: string, principalId: string): { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess } | undefined {
+  private owner(id: string): string | null {
+    if (!/^T[1-9]\d*$/.test(id)) return null;
+    const row = this.database.prepare("SELECT json_extract(data, '$.ownerId') AS owner_id FROM entities WHERE id = ?").get(id) as { owner_id: unknown } | undefined;
+    return typeof row?.owner_id === 'string' ? row.owner_id : null;
+  }
+  private resolved(id: string, principalId: string): { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null } | undefined {
     if (!isObjectId(id) || !this.member(principalId)) return undefined;
-    const row = this.database.prepare('SELECT p.data, s.data AS space_data FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?').get(id) as PolicyRow | undefined;
+    const row = this.database.prepare("SELECT p.data, s.data AS space_data, CASE WHEN substr(e.id, 1, 1) = 'T' THEN json_extract(e.data, '$.ownerId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
     if (!row) return undefined;
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
-    return { policy, space, capabilities: effectiveAccess(policy, space, principalId) };
+    const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
+    return { policy, space, capabilities: effectiveAccess(policy, space, principalId, ownerId === principalId), ownerId };
   }
   spaces(principalId: string): Space[] {
     if (!this.member(principalId)) return [];
@@ -95,9 +101,9 @@ export class PolicyStore {
   describe(id: string, principalId: string): ObjectAccess {
     const result = this.resolved(id, principalId);
     if (!result?.capabilities.view) throw notFound();
-    const { policy, space, capabilities } = result;
-    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}`;
-    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact') };
+    const { policy, space, capabilities, ownerId } = result;
+    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? '; task owner also has access' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}`;
+    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(ownerId ? { automatic: { kind: 'task-owner' as const, principalId: ownerId } } : {}) };
   }
   private audience(input: unknown): Audience {
     const data = object(input, ['kind', 'principalIds']);
@@ -162,7 +168,7 @@ export class PolicyStore {
       const data = object(input, ['expectedVersion', 'spaceId', 'view', 'edit', 'interact']);
       const space = this.destination(data.spaceId, principalId, current.spaceId);
       const policy: ObjectPolicy = { objectId: id, spaceId: space.id, version: this.version(current.version, data.expectedVersion), rules: { view: this.audience(data.view), edit: this.audience(data.edit), interact: this.audience(data.interact) } };
-      this.retain(effectiveAccess(policy, space, principalId));
+      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId));
       this.save(policy); return policy;
     });
   }
@@ -177,7 +183,7 @@ export class PolicyStore {
       const data = input === undefined ? {} : object(input, ['spaceId', 'view', 'edit', 'interact']);
       const space = this.destination(input === undefined ? 'S1' : data.spaceId, principalId);
       const policy: ObjectPolicy = { objectId: id, spaceId: space.id, version: 1, rules: { view: data.view === undefined ? workspace() : this.audience(data.view), edit: data.edit === undefined ? workspace() : this.audience(data.edit), interact: data.interact === undefined ? workspace() : this.audience(data.interact) } };
-      this.retain(effectiveAccess(policy, space, principalId));
+      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId));
       this.save(policy); return policy;
     });
   }

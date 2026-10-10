@@ -129,7 +129,8 @@ export function createApp(options: AppOptions = {}): App {
       scope = choice(data.provider, 'provider', ['local', 'openai', 'ollama']) === 'openai' ? 'review:hosted' : 'review:local';
     }
     const authorize = () => { auth.revalidate(context, scope); access.authorize(method, path, input); };
-    const present = (response: MutationResponse) => access.present(method, path, response);
+    const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
+    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed);
     store.read(authorize);
     const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
     // Preserve legacy local retries, while every authenticated principal has a
@@ -192,7 +193,8 @@ export function createApp(options: AppOptions = {}): App {
         }
         const task = /^\/api\/tasks\/(T\d+)$/.exec(path);
         if (method === 'PATCH' && task) return { status: 200, body: store.updateTask(task[1]!, input, attribution) };
-        const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies)$/.exec(path);
+        const taskAction = /^\/api\/tasks\/(T\d+)\/(comments|dependencies|subscriptions)$/.exec(path);
+        if (method === 'POST' && taskAction?.[2] === 'subscriptions') return { status: 200, body: store.updateTaskSubscription(taskAction[1]!, input, attribution) };
         if (method === 'POST' && taskAction?.[2] === 'comments') return { status: 201, body: store.createTaskComment(taskAction[1]!, input, attribution) };
         if (method === 'POST' && taskAction?.[2] === 'dependencies') {
           const detail = store.updateTaskDependencies(taskAction[1]!, input, attribution);
@@ -274,6 +276,20 @@ export function createApp(options: AppOptions = {}): App {
           if (space) { send(res, 200, access.space(policies.getSpace(space[1]!, context.principalId))); return; }
           const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
           if (policy) { send(res, 200, access.describe(policy[1]!)); return; }
+          const subscriptions = /^\/api\/tasks\/(T\d+)\/subscriptions(?:\/([^/]+))?$/.exec(path);
+          if (subscriptions) {
+            access.require(subscriptions[1]!);
+            if (subscriptions[2]) {
+              if (url.search) throw new HttpError(400, 'Subscription status URLs may not contain query parameters.');
+              let principalId: string;
+              try { principalId = decodeURIComponent(subscriptions[2]); } catch { throw new HttpError(400, 'Selected member is unavailable.'); }
+              send(res, 200, access.taskSubscriptionStatus(subscriptions[1]!, principalId)); return;
+            }
+            for (const name of url.searchParams.keys()) if (!['after', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Subscriptions accept only one after cursor and one limit.');
+            const limit = url.searchParams.get('limit');
+            if (limit !== null && !/^[1-9]\d*$/.test(limit)) throw new HttpError(400, 'limit must be a positive integer.');
+            send(res, 200, access.taskSubscriptions(subscriptions[1]!, url.searchParams.get('after') ?? undefined, limit === null ? undefined : integer(Number(limit), 'limit'))); return;
+          }
           const task = /^\/api\/tasks\/(T\d+)(\/history)?$/.exec(path);
           if (task) {
             access.require(task[1]!);

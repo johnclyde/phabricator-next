@@ -5,7 +5,8 @@ export { RequestError } from './session';
 
 export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
 export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
-export function canQueue(path: string, method: MutationMethod): boolean {
+export function canQueue(path: string, method: MutationMethod, body?: unknown): boolean {
+  if ((path === '/api/tasks' || /^\/api\/tasks\/T\d+$/.test(path)) && body && typeof body === 'object' && 'ownerId' in body && (method === 'PATCH' || body.ownerId !== null)) return false;
   return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+\/comments$/.test(path) && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
 }
 export function isNetworkError(error: unknown): boolean { return error instanceof TypeError; }
@@ -134,9 +135,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || holdingLegacy) return;
     holdingLegacy = true;
     try {
-      for (const item of rawOutbox()) if (item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
-        const body = item.body as { expectedVersion?: unknown } | null;
-        if (!body || !Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 1) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older task change has no source version. Export it, inspect the current task, and make a new edit explicitly. Automatic submission is stopped.' });
+      for (const item of rawOutbox()) if (((item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path)) || (item.method === 'POST' && item.path === '/api/tasks')) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
+        const body = item.body as { expectedVersion?: unknown; ownerId?: unknown } | null;
+        if (body && 'ownerId' in body && (item.method === 'PATCH' || body.ownerId !== null)) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'Assignment changes require an online review of access effects. Export this saved change and assign the task explicitly. Automatic submission is stopped.' }); continue; }
+        if (item.method === 'PATCH' && (!body || !Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 1)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older task change has no source version. Export it, inspect the current task, and make a new edit explicitly. Automatic submission is stopped.' });
       }
     } finally { holdingLegacy = false; }
   };
@@ -266,7 +268,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }): Promise<T> => {
     assertSession(session);
     syncDurableQuarantine();
-    if (options?.queued) holdLegacyTaskUpdates();
+    if (options?.queued) { holdLegacyTaskUpdates(); if (!canQueue(path, options.method, options.body)) throw new RequestError('This operation requires an explicit online save and cannot submit from the outbox.', 403, 'ACTION_FORBIDDEN'); }
     if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     const objectId = objectFromPath(path);
@@ -274,10 +276,14 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (objectId && !objectId.startsWith('S') && !session.objectGenerations.has(objectId)) session.objectGenerations.set(objectId, 0);
     const objectGeneration = objectId ? session.objectGenerations.get(objectId) || 0 : 0;
     const taskRequest = /^\/api\/tasks\/T\d+(?:[/?]|$)/.test(path);
+    const ownershipMutation = options?.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && options.body && typeof options.body === 'object' && 'ownerId' in options.body;
     let taskGeneration = session.taskSnapshotGeneration;
     if (objectId && session.unavailableObjects.has(objectId)) throw unavailable();
     const capabilities = objectId ? session.objectCapabilities.get(objectId) : null;
-    if (options && capabilities && !(/\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit)) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
+    const subscription = /^\/api\/tasks\/T\d+\/subscriptions$/.test(path) && options?.method === 'POST' ? options.body as { principalId?: unknown; action?: unknown } | null : null;
+    const selfId = session.state.account?.id || `local:${session.state.workspaceId}`;
+    const mutationAllowed = capabilities && (subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
+    if (options && capabilities && !mutationAllowed) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
@@ -286,7 +292,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const controller = new AbortController();
     session.controllers.add(controller);
     if (taskRequest && !options) session.taskReadControllers.add(controller);
-    if (objectId) session.objectControllers.set(controller, objectId);
+    // A committed handoff may revoke this object's access before its receipt arrives.
+    // Session invalidation still aborts it; object invalidation must allow the receipt.
+    if (objectId && !ownershipMutation) session.objectControllers.set(controller, objectId);
     const headers: Record<string, string> = {};
     if (session.state.sessionContext) headers['X-Session-Context'] = session.state.sessionContext;
     if (options) {
@@ -298,6 +306,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       assertSession(session);
       if (response.status === 401) { lockSession('Your session ended or changed in another tab. Sign in again.'); throw new RequestError('Your session ended. Sign in again.', 401); }
       const data: unknown = await response.json();
+      // A committed reassignment may remove the caller's view. This content-free receipt
+      // remains a success even when a concurrent refresh already observed that loss.
+      if (response.ok && ownershipMutation && data && typeof data === 'object' && 'id' in data && data.id === objectId && 'saved' in data && data.saved === true && 'accessLost' in data && data.accessLost === true && 'accessEpoch' in data && Number.isSafeInteger(data.accessEpoch)) {
+        assertSession(session); session.accessEpoch = Math.max(session.accessEpoch, Number(data.accessEpoch)); invalidateObjects([objectId!]);
+        return { id: objectId, saved: true, accessLost: true, accessEpoch: data.accessEpoch } as T;
+      }
       assertObject();
       if (path === '/api/state' && accessGeneration !== session.accessGeneration) throw new RequestError('Access changed while loading. Reload the workspace.', 409, 'ACCESS_CHANGED');
       if (!response.ok) {

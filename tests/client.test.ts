@@ -20,6 +20,10 @@ test('voice task creation is a draft command and preserves content case', () => 
   assert.deepEqual(parseCommand('Search for Smith 2021'), { type: 'search', query: 'Smith 2021' });
   assert.deepEqual(parseCommand('show in progress'), { type: 'filter', value: 'in_progress' });
   assert.deepEqual(parseCommand('read summary'), { type: 'summary' });
+  assert.deepEqual(parseCommand('show my tasks'), { type: 'taskFilter', value: 'mine' });
+  assert.deepEqual(parseCommand('show unassigned tasks'), { type: 'taskFilter', value: 'unassigned' });
+  assert.deepEqual(parseCommand('show tasks I follow'), { type: 'taskFilter', value: 'following' });
+  assert.deepEqual(parseCommand('assign this task to me').type, 'unknown');
   assert.deepEqual(parseCommand('read changes'), { type: 'changes' });
   assert.deepEqual(parseCommand('Read the discussion.'), { type: 'discussion' });
   assert.deepEqual(parseCommand('read open threads'), { type: 'discussion' });
@@ -47,6 +51,10 @@ test('offline queue permits only supported idempotent mutation routes', () => {
   assert.equal(canQueue('/api/tasks/T1', 'PATCH'), true);
   assert.equal(canQueue('/api/tasks/T1/comments', 'POST'), true);
   assert.equal(canQueue('/api/tasks/T1/dependencies', 'POST'), false);
+  assert.equal(canQueue('/api/tasks/T1/subscriptions', 'POST', { principalId: 'alice', action: 'subscribe', expectedMembershipVersion: 0 }), false);
+  assert.equal(canQueue('/api/tasks/T1', 'PATCH', { ownerId: null, expectedVersion: 1 }), false);
+  assert.equal(canQueue('/api/tasks', 'POST', { ownerId: 'alice' }), false);
+  assert.equal(canQueue('/api/tasks', 'POST', { ownerId: null }), true);
   assert.equal(canQueue('/api/revisions/P1/comments', 'POST'), true);
   assert.equal(canQueue('/api/revisions/L3/versions', 'POST'), true);
   assert.equal(canQueue('/api/documents/W1', 'PUT'), true);

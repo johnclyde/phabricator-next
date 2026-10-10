@@ -94,7 +94,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
     store.database.exec('DROP TRIGGER fail_transfer_audit');
     const epoch = policies.epoch();
     const transferred = operator.transferLocalPolicies(alice.id);
-    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1 });
+    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1, tasks: 0 });
     assert.equal(policies.epoch(), epoch + 1);
     const afterPolicy = policies.policy(wiki.id, alice.id);
     const afterSpace = policies.getSpace(space.id, alice.id);
@@ -115,7 +115,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
       assert.doesNotMatch(audit.detail, /Alice|Bob|Research/);
     }
     before = permissions();
-    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0 });
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0 });
     assert.deepEqual(permissions(), before, 'repeat handoff is a no-op, including versions, epoch and audit');
     assert.equal(latch(store), undefined);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
@@ -134,6 +134,7 @@ test('transfer-local command reports the chosen account and counts without activ
     const identity = operator.authenticate(request).principalId;
     const policies = new PolicyStore(store.database, { principalExists: id => [identity, account.id].includes(id) });
     const space = policies.createSpace({ name: 'CLI handoff' }, identity);
+    const ownedTask = store.createTask({ title: 'CLI ownership handoff', ownerId: identity });
     const run = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveRun, reject) => {
       const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../scripts/accounts.ts', import.meta.url)), ...args], { env: { ...process.env, DATABASE_PATH: path }, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = ''; let stderr = '';
@@ -143,10 +144,11 @@ test('transfer-local command reports the chosen account and counts without activ
     assert.equal((await run(['transfer-local', 'missing'])).code, 1);
     const result = await run(['transfer-local', 'ALICE']);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /Transferred local-only grants to alice \([a-f0-9-]+\): 1 Space\(s\), 0 object\(s\)/);
+    assert.match(result.stdout, /Transferred local-only grants to alice \([a-f0-9-]+\): 1 Space\(s\), 0 object\(s\), 1 task owner\(s\)/);
     assert.match(result.stdout, /Password authentication remains inactive/);
     assert.equal(latch(store), undefined);
     assert.deepEqual(policies.getSpace(space.id, account.id).view, selected(account.id));
+    assert.equal(store.taskDetail(ownedTask.id).task.ownerId, account.id);
     const repeat = await run(['transfer-local', 'alice']);
     assert.equal(repeat.code, 0, repeat.stderr); assert.match(repeat.stdout, /0 Space\(s\), 0 object\(s\)/);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
@@ -188,5 +190,55 @@ test('every explicit local Space and object grant blocks transition, without fal
     const historical = { ...policy, rules: { ...policy.rules, interact: selected(identity, account.id) } };
     store.database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify(historical), task.id);
     assert.doesNotThrow(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }));
+  } finally { store.close(); }
+});
+
+test('local task ownership blocks password activation and terminal transfer preserves author, subscriptions and prior history atomically', async () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const ordinary = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
+    const identity = ordinary.authenticate(request).principalId;
+    const alice = await ordinary.createAccount({ username: 'alice', displayName: 'Alice', password });
+    const policies = new PolicyStore(store.database, { principalExists: id => [identity, alice.id].includes(id) });
+    const attribution = { principalId: identity, displayName: 'You', credentialId: null, requestId: 'local-author' };
+    const task = store.createTask({ title: 'An owner-only task', ownerId: identity }, attribution);
+    const noOne = selected();
+    policies.configureNew(task.id, { spaceId: 'S1', view: noOne, edit: noOne, interact: noOne }, identity);
+    assert.equal(policies.access(task.id, identity).edit, true);
+    assert.equal(policies.access(task.id, alice.id).view, false);
+    assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /task ownership references the local-only principal/);
+    assert.equal(latch(store), undefined);
+    const space = policies.createSpace({ name: 'Also transfer this Space' }, identity);
+    const tables = ['entities', 'policy_spaces', 'object_policies', 'policy_meta', 'task_transactions', 'task_subscriptions', 'activity'];
+    const snapshot = () => tables.map(table => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = snapshot();
+    assert.throws(() => ordinary.transferLocalPolicies(alice.id), /current accounts command/);
+    assert.deepEqual(snapshot(), before, 'a missing owner-transfer integration must roll back policy edits');
+    const operator = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true, transferTaskOwners: (from, to, actor) => store.transferTaskOwners(from, to, actor) });
+    store.database.exec("CREATE TRIGGER reject_owner_transfer BEFORE INSERT ON task_transactions WHEN json_extract(NEW.data, '$.attribution.principalId') LIKE 'operator:%' BEGIN SELECT RAISE(ABORT, 'Injected ownership audit failure'); END;");
+    assert.throws(() => operator.transferLocalPolicies(alice.id), /Injected ownership audit failure/);
+    assert.deepEqual(snapshot(), before, 'ownership, policy changes, membership and evidence share one transaction');
+    store.database.exec('DROP TRIGGER reject_owner_transfer');
+    const oldHistory = store.database.prepare('SELECT * FROM task_transactions ORDER BY rowid').all();
+    const oldSubscriptions = store.database.prepare('SELECT * FROM task_subscriptions ORDER BY rowid').all();
+    const result = operator.transferLocalPolicies(alice.id);
+    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 1 });
+    const current = store.taskDetail(task.id).task;
+    assert.equal(current.ownerId, alice.id); assert.equal(current.authorId, identity);
+    assert.equal(current.version, task.version + 1);
+    assert.deepEqual(store.database.prepare('SELECT * FROM task_subscriptions ORDER BY rowid').all(), oldSubscriptions, 'existing personal preferences are not transferred');
+    assert.deepEqual(store.database.prepare('SELECT * FROM task_transactions ORDER BY rowid LIMIT ?').all(oldHistory.length), oldHistory);
+    const ownerEdit = store.taskHistory(task.id).transactions.find(item => item.kind === 'edit')!;
+    assert.deepEqual(ownerEdit.changes, [{ field: 'ownerId', oldValue: identity, newValue: alice.id }]);
+    assert.equal(ownerEdit.attribution?.principalId, `operator:${operator.workspaceId}`);
+    assert.equal(policies.access(task.id, alice.id).edit, true);
+    assert.equal(policies.access(task.id, identity).view, false);
+    assert.deepEqual(policies.getSpace(space.id, alice.id).view, selected(alice.id));
+    const transferred = snapshot();
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0 });
+    assert.deepEqual(snapshot(), transferred);
+    createAuth({ database: store.database, mode: 'password', basePath: '/' });
+    assert.ok(latch(store));
+    assert.equal((store.database.prepare("SELECT json_extract(data, '$.authorId') AS author FROM entities WHERE id = ?").get(task.id) as { author: string }).author, identity);
   } finally { store.close(); }
 });

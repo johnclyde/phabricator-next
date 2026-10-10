@@ -4,7 +4,7 @@ export interface PolicyRules { view: Audience; edit: Audience; interact: Audienc
 export interface ObjectPolicy { objectId: string; spaceId: string; version: number; rules: PolicyRules }
 export interface Space { id: string; name: string; description: string; version: number; isDefault: boolean; archived: boolean; view: Audience; edit: Audience }
 export interface EffectiveAccess { view: boolean; edit: boolean; interact: boolean; managePolicy: boolean }
-export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string }
+export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; automatic?: { kind: 'task-owner'; principalId: string } }
 export interface NewObjectAccessInput { spaceId: string; view?: Audience; edit?: Audience; interact?: Audience }
 export interface CreateSpaceInput { name: string; description?: string; view?: Audience; edit?: Audience }
 export interface UpdateSpaceInput { expectedVersion: number; name?: string; description?: string; view?: Audience; edit?: Audience; archived?: boolean }
@@ -15,10 +15,10 @@ export function audienceAllows(audience: Audience, principalId: string): boolean
   return Boolean(principalId) && (audience.kind === 'workspace' || audience.principalIds.includes(principalId));
 }
 
-export function effectiveAccess(policy: ObjectPolicy, space: Space, principalId: string): EffectiveAccess {
-  const view = policy.spaceId === space.id && audienceAllows(space.view, principalId) && audienceAllows(policy.rules.view, principalId);
-  const edit = view && audienceAllows(policy.rules.edit, principalId);
-  return { view, edit, interact: view && audienceAllows(policy.rules.interact, principalId), managePolicy: edit };
+export function effectiveAccess(policy: ObjectPolicy, space: Space, principalId: string, automatic = false): EffectiveAccess {
+  const view = policy.spaceId === space.id && audienceAllows(space.view, principalId) && (automatic || audienceAllows(policy.rules.view, principalId));
+  const edit = view && (automatic || audienceAllows(policy.rules.edit, principalId));
+  return { view, edit, interact: view && (automatic || audienceAllows(policy.rules.interact, principalId)), managePolicy: edit };
 }
 
 export function spaceAccess(space: Space, principalId: string): EffectiveAccess {

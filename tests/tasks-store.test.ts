@@ -14,7 +14,7 @@ const alice: ActorAttribution = { principalId: 'alice', displayName: 'Alice Writ
 const bob: ActorAttribution = { principalId: 'bob', displayName: 'Bob Reviewer', credentialId: 'bob-token', requestId: 'bob-request' };
 const create = (store: Store, title = 'Prepare the revised paper') => store.createTask({ title, description: 'Keep the record exact.' }, alice);
 const status = (value: number) => (error: unknown) => typeof error === 'object' && error !== null && 'status' in error && error.status === value;
-const tables = ['entities', 'task_transactions', 'task_dependencies', 'activity', 'sequences', 'idempotency'];
+const tables = ['entities', 'task_transactions', 'task_dependencies', 'task_subscriptions', 'policy_meta', 'activity', 'sequences', 'idempotency'];
 const raw = (store: Store, table: string) => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
 const snapshot = (store: Store) => tables.map(table => raw(store, table));
 const depend = (store: Store, id: string, dependencyId: string, action: 'add' | 'remove' = 'add') => store.updateTaskDependencies(id, { taskId: dependencyId, action, expectedVersion: store.taskDetail(id).task.version }, alice);
@@ -24,13 +24,13 @@ test('task creation and edits preserve attributed snapshots and exact structured
   try {
     const project = store.createProject({ name: 'Paper project' }, alice);
     const task = create(store); assert.equal(task.version, 1);
-    const created = store.taskHistory(task.id).transactions[0]!;
+    const created = store.taskHistory(task.id).transactions.find(item => item.kind === 'create')!;
     assert.equal(created.kind, 'create'); assert.equal(created.sequence, 1); assert.equal(created.taskVersion, 1);
     assert.equal(created.actor, alice.displayName); assert.deepEqual(created.attribution, alice); assert.deepEqual(created.snapshot, task);
     const updated = store.updateTask(task.id, { expectedVersion: 1, title: 'Prepare the final draft', description: '  Preserve whitespace.\n', status: 'in_progress', priority: 'urgent', projectId: project.id }, bob);
     assert.equal(updated.version, 2); assert.equal(updated.createdAt, task.createdAt);
     const edited = store.taskHistory(task.id).transactions[0]!;
-    assert.equal(edited.kind, 'edit'); assert.equal(edited.sequence, 2); assert.equal(edited.taskVersion, 2);
+    assert.equal(edited.kind, 'edit'); assert.equal(edited.sequence, 3); assert.equal(edited.taskVersion, 2);
     assert.deepEqual(edited.attribution, bob); assert.equal(edited.actor, bob.displayName);
     assert.deepEqual(edited.changes, [
       { field: 'title', oldValue: task.title, newValue: updated.title },
@@ -41,10 +41,10 @@ test('task creation and edits preserve attributed snapshots and exact structured
     ]);
     const first = store.createTaskComment(task.id, { body: '  First independent comment.\n' }, alice);
     const second = store.createTaskComment(task.id, { body: 'A concurrent response.' }, bob);
-    assert.equal(first.sequence, 3); assert.equal(second.sequence, 4); assert.equal(first.taskVersion, 2); assert.equal(second.taskVersion, 2);
+    assert.equal(first.sequence, 4); assert.equal(second.sequence, 6); assert.equal(first.taskVersion, 2); assert.equal(second.taskVersion, 2);
     assert.equal(first.comment, '  First independent comment.\n'); assert.deepEqual(second.attribution, bob);
     assert.deepEqual(store.taskDetail(task.id).task, updated, 'comments do not change task fields, version or timestamps');
-    assert.deepEqual(store.taskHistory(task.id).transactions.map(item => item.sequence), [4, 3, 2, 1]);
+    assert.deepEqual(store.taskHistory(task.id).transactions.map(item => item.sequence), [6, 5, 4, 3, 2, 1]);
     assert.deepEqual(store.taskHistory(task.id).transactions.at(-1), created);
     assert.throws(() => store.database.exec('UPDATE task_transactions SET data = data'), /immutable/);
     assert.throws(() => store.database.exec('DELETE FROM task_transactions'), /immutable/);
@@ -66,7 +66,7 @@ test('task edits enforce CAS and strict input without needless versions or histo
     assert.deepEqual(snapshot(store), before);
     const edited = store.updateTask(task.id, { expectedVersion: 1, title: 'A real change.' }, bob);
     assert.throws(() => store.updateTask(task.id, { expectedVersion: 1, title: edited.title }, alice), status(409));
-    assert.equal(store.taskHistory(task.id).transactions.length, 2);
+    assert.equal(store.taskHistory(task.id).transactions.length, 3);
   } finally { store.close(); }
 });
 
@@ -142,15 +142,17 @@ test('task history paginates only visible transactions and never reports hidden 
     depend(store, parent.id, secret.id, 'remove');
     const visible = (id: string) => id !== secret.id;
     const first = store.taskHistory(parent.id, undefined, 2, visible);
-    assert.deepEqual(first.transactions.map(item => item.kind), ['comment', 'dependency']);
+    assert.deepEqual(first.transactions.map(item => item.kind), ['comment', 'subscription']);
     assert.equal(first.nextBefore, first.transactions[1]!.sequence); assert.equal(first.firstAvailableSequence, 1);
     assert.doesNotMatch(JSON.stringify(first), new RegExp(secret.id + '|Hidden prerequisite'));
-    const last = store.taskHistory(parent.id, first.nextBefore!, 2, visible);
+    const middle = store.taskHistory(parent.id, first.nextBefore!, 2, visible);
+    assert.deepEqual(middle.transactions.map(item => item.kind), ['dependency', 'subscription']);
+    const last = store.taskHistory(parent.id, middle.nextBefore!, 2, visible);
     assert.deepEqual(last.transactions.map(item => item.kind), ['create']); assert.equal(last.nextBefore, null);
     const empty = store.taskHistory(parent.id, 1, 2, visible); assert.deepEqual(empty.transactions, []); assert.equal(empty.nextBefore, null); assert.equal(empty.firstAvailableSequence, 1);
-    assert.equal(store.taskHistory(parent.id).transactions.length, 6, 'filtering leaves the immutable raw audit intact');
+    assert.equal(store.taskHistory(parent.id).transactions.length, 8, 'filtering leaves the immutable raw audit intact');
     for (let index = 0; index < 55; index++) store.createTaskComment(parent.id, { body: `Comment ${index}` }, alice);
-    assert.equal(store.taskHistory(parent.id).transactions.length, 50); assert.equal(store.taskHistory(parent.id, undefined, 100).transactions.length, 61);
+    assert.equal(store.taskHistory(parent.id).transactions.length, 50); assert.equal(store.taskHistory(parent.id, undefined, 100).transactions.length, 63);
     for (const before of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => store.taskHistory(parent.id, before), status(400));
     for (const limit of [0, -1, 1.5, 101]) assert.throws(() => store.taskHistory(parent.id, undefined, limit), status(400));
   } finally { store.close(); }
@@ -195,7 +197,7 @@ test('task histories and graph mutations survive restart and idempotent retries 
       assert.throws(() => store.mutate(key, 'different-input', () => ({ status: 200, body: {} })), status(409));
     }
     assert.deepEqual([store.taskDetail(parent.id), store.taskDetail(child.id)], before);
-    assert.equal(store.taskHistory(parent.id).transactions.length, 4); assert.equal(store.taskHistory(child.id).transactions.length, 3);
+    assert.equal(store.taskHistory(parent.id).transactions.length, 5); assert.equal(store.taskHistory(child.id).transactions.length, 4);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -234,9 +236,10 @@ test('a task writer waits for SQLite before reading CAS state, including a depen
       for (const task of [workerData.a, workerData.b]) {
         const next = { ...task, version: 2, updatedAt: now };
         db.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify(next), next.id);
-        const transaction = { id: 'worker-' + task.id, taskId: task.id, sequence: 2, taskVersion: 2, kind: 'dependency', actor: 'Concurrent writer', createdAt: now,
+        const sequence = db.prepare('SELECT MAX(sequence) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id).sequence + 1;
+        const transaction = { id: 'worker-' + task.id, taskId: task.id, sequence, taskVersion: 2, kind: 'dependency', actor: 'Concurrent writer', createdAt: now,
           dependency: { taskId: task.id === workerData.b.id ? workerData.a.id : workerData.b.id, action: 'added', direction: task.id === workerData.b.id ? 'depends_on' : 'blocks' } };
-        db.prepare('INSERT INTO task_transactions (id, task_id, sequence, task_version, data) VALUES (?, ?, ?, ?, ?)').run(transaction.id, task.id, 2, 2, JSON.stringify(transaction));
+        db.prepare('INSERT INTO task_transactions (id, task_id, sequence, task_version, data) VALUES (?, ?, ?, ?, ?)').run(transaction.id, task.id, sequence, 2, JSON.stringify(transaction));
       }
       db.prepare('INSERT INTO task_dependencies (task_id, dependency_id) VALUES (?, ?)').run(workerData.b.id, workerData.a.id);
       parentPort.once('message', () => { db.exec('COMMIT'); db.close(); parentPort.close(); }); parentPort.postMessage('locked');
@@ -253,11 +256,11 @@ test('a task writer waits for SQLite before reading CAS state, including a depen
     } finally { store.database.prepare = prepare; }
     assert.equal(store.taskDetail(a.id).task.version, 2); assert.deepEqual(store.taskDetail(b.id).dependsOn.map(item => item.id), [a.id]);
     assert.throws(() => depend(store, a.id, b.id), status(409));
-    assert.equal(store.taskHistory(a.id).transactions.length, 2); assert.equal(raw(store, 'task_dependencies').length, 1);
+    assert.equal(store.taskHistory(a.id).transactions.length, 3); assert.equal(raw(store, 'task_dependencies').length, 1);
   } finally { if (worker) await worker.terminate(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-function schemaSix(path: string): { task: Omit<Task, 'version'>; other: string; replay: string; activity: string } {
+function schemaSix(path: string): { task: Omit<Task, 'version' | 'ownerId' | 'authorId'>; other: string; replay: string; activity: string } {
   const database = new DatabaseSync(path); const now = '2021-06-01T12:00:00.000Z';
   const task = { id: 'T7', title: 'Existing task', description: 'Only the latest stored description.', status: 'in_progress' as const, priority: 'high' as const, projectId: null, createdAt: now, updatedAt: '2025-10-01T12:00:00.000Z' };
   const replay = JSON.stringify(task, null, 2);
@@ -301,13 +304,13 @@ test('schema 6 migration adds an honest unknown-author baseline at migration tim
   const directory = mkdtempSync(join(tmpdir(), 'phab-task-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaSix(path); const started = Date.now(); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 7);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     assert.equal(store.fresh, false);
-    const detail = store.taskDetail(old.task.id); assert.deepEqual(detail.task, { ...old.task, version: 1 });
+    const detail = store.taskDetail(old.task.id); assert.deepEqual(detail.task, { ...old.task, ownerId: null, authorId: null, version: 1 });
     assert.deepEqual(detail.dependsOn, []); assert.deepEqual(detail.blocks, []);
     assert.equal(detail.history.transactions.length, 1); const legacy = detail.history.transactions[0]!;
     assert.equal(legacy.kind, 'legacy'); assert.equal(legacy.actor, null); assert.equal(legacy.attribution, undefined);
-    assert.equal(legacy.sequence, 1); assert.equal(legacy.taskVersion, 1); assert.deepEqual(legacy.snapshot, detail.task); assert.equal(legacy.changes, undefined);
+    assert.equal(legacy.sequence, 1); assert.equal(legacy.taskVersion, 1); assert.deepEqual(legacy.snapshot, { ...old.task, version: 1 }); assert.equal(legacy.changes, undefined);
     assert.ok(Date.parse(legacy.createdAt) >= started); assert.notEqual(legacy.createdAt, old.task.updatedAt);
     assert.equal((store.database.prepare('SELECT data FROM entities WHERE id = ?').get('PROJ1') as { data: string }).data, old.other);
     assert.equal((store.database.prepare('SELECT data FROM activity WHERE id = ?').get('historical-activity') as { data: string }).data, old.activity);

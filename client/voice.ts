@@ -1,7 +1,7 @@
 import type { RevisionDetail, ReviewThread } from '../shared/types';
 
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';
-export type VoiceCommand = { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: 'changes' } | { type: 'discussion' } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -22,6 +22,9 @@ export function parseCommand(input: string): VoiceCommand {
   if (/^(read|read the|read my|give me a|give me the) (summary|overview)$/.test(text)) return { type: 'summary' };
   if (/^read (?:the )?changes$/.test(text)) return { type: 'changes' };
   if (/^read (?:the )?(discussion|threads|open threads)$/.test(text)) return { type: 'discussion' };
+  if (/^(?:show|open) (?:my tasks|tasks assigned to me)$/.test(text)) return { type: 'taskFilter', value: 'mine' };
+  if (/^(?:show|open) unassigned tasks$/.test(text)) return { type: 'taskFilter', value: 'unassigned' };
+  if (/^(?:show|open) (?:tasks i follow|followed tasks)$/.test(text)) return { type: 'taskFilter', value: 'following' };
   const filter = text.match(/^(?:filter|show) (?:by )?(open|all|in progress|resolved|accepted|needs review|draft)$/);
   if (filter) return { type: 'filter', value: filter[1].replaceAll(' ', '_') };
   return { type: 'unknown', text: original };

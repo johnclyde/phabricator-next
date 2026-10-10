@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle2, History, MessageSquare, Pencil, Plus, RefreshCw } from 'lucide-react';
 import { diffWordsWithSpace } from 'diff';
-import type { AppState, Priority, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskStatus, TaskTransaction, UpdateTaskInput } from '../shared/types';
+import type { AppState, Priority, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskStatus, TaskTransaction, TaskUpdateResult, TaskSubscriptionPage, TaskSubscriptionStatus, UpdateTaskInput } from '../shared/types';
 import { isNetworkError, type MutationMethod } from './offline';
 import { useWorkspace } from './SessionGate';
 import { AccessSummary } from './Access';
 
 type Mutate = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
-const labels: Record<string, string> = { open: 'Open', in_progress: 'In Progress', resolved: 'Resolved', low: 'Low', normal: 'Normal', high: 'High', urgent: 'Urgent', title: 'Title', description: 'Description', status: 'Status', priority: 'Priority', projectId: 'Project' };
+const labels: Record<string, string> = { open: 'Open', in_progress: 'In Progress', resolved: 'Resolved', low: 'Low', normal: 'Normal', high: 'High', urgent: 'Urgent', title: 'Title', description: 'Description', status: 'Status', priority: 'Priority', projectId: 'Project', ownerId: 'Owner' };
+function member(id: string | null | undefined, state: AppState, empty = 'Unassigned') { if (!id) return empty; const person = state.principals.find(person => person.id === id); return person ? `${person.displayName}${person.disabled ? ' (disabled)' : ''}` : 'Unavailable member'; }
 function date(value: string) { return new Date(value).toLocaleString(); }
 function text(value: string | null) { return value === null ? 'None' : labels[value] || value; }
 function download(value: unknown, filename: string) { const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
@@ -64,30 +65,31 @@ export default function TaskPage({ id, state, online, mutate, manageAccess }: { 
     {warning && <div className="banner warning" role="status">{warning}</div>}{error && <div className="banner error" role="alert"><span>{error}</span><button disabled={loading} onClick={() => void load()}>Reload Task</button></div>}
     <div className="task-detail-layout"><div className="main-column">
       {editing && canEdit && editorTask.current && <TaskEditor task={editorTask.current} state={state} online={online} mutate={mutate} saved={async close => { if (close) setEditing(false); await load(); }}/>}
-      {detail ? <><section className="panel"><div className="panel-heading"><h2>Description</h2><button className="text-button" disabled={loading} onClick={() => void load()}><RefreshCw size={14}/>Reload Task</button></div><pre className="task-detail-description">{detail.task.description || 'No description yet.'}</pre><dl className="metadata task-metadata"><dt>Project</dt><dd>{state.projects.find(project => project.id === detail.task.projectId)?.name || (detail.task.projectId ? 'Unavailable project' : 'None')}</dd><dt>Created</dt><dd>{date(detail.task.createdAt)}</dd><dt>Updated</dt><dd>{date(detail.task.updatedAt)}</dd></dl></section>
-      <section className="panel task-history"><div className="panel-heading"><h2><History size={17}/>Task history</h2></div><p className="info-strip">Saved field changes, comments, and dependency changes form an append-only history.</p>{detail.history.transactions.some(item => item.kind === 'legacy') && <p className="info-strip">This task has a retained legacy snapshot. Earlier changes and their authors were not recorded.</p>}<ol>{detail.history.transactions.map(transaction => <Transaction key={transaction.id} transaction={transaction}/>)}</ol>{!detail.history.transactions.length && <p className="task-page-status">No visible history is available.</p>}{detail.history.nextBefore !== null && <div className="task-page-status"><button className="button" disabled={paging || !online || snapshot} onClick={() => void older()}>{paging ? 'Loading history…' : 'Load older history'}</button>{(!online || snapshot) && <p>Only loaded history is available offline.</p>}</div>}</section>
+      {detail ? <><section className="panel"><div className="panel-heading"><h2>Description</h2><button className="text-button" disabled={loading} onClick={() => void load()}><RefreshCw size={14}/>Reload Task</button></div><pre className="task-detail-description">{detail.task.description || 'No description yet.'}</pre><dl className="metadata task-metadata"><dt>Project</dt><dd>{state.projects.find(project => project.id === detail.task.projectId)?.name || (detail.task.projectId ? 'Unavailable project' : 'None')}</dd><dt>Owner</dt><dd>{member(detail.task.ownerId, state)}</dd><dt>Author</dt><dd>{member(detail.task.authorId, state, 'Unknown (legacy)')}</dd><dt>Created</dt><dd>{date(detail.task.createdAt)}</dd><dt>Updated</dt><dd>{date(detail.task.updatedAt)}</dd></dl></section>
+      <section className="panel task-history"><div className="panel-heading"><h2><History size={17}/>Task history</h2></div><p className="info-strip">Saved field changes, comments, and dependency changes form an append-only history.</p>{detail.history.transactions.some(item => item.kind === 'legacy') && <p className="info-strip">This task has a retained legacy snapshot. Earlier changes and their authors were not recorded.</p>}<ol>{detail.history.transactions.map(transaction => <Transaction key={transaction.id} transaction={transaction} state={state}/>)}</ol>{!detail.history.transactions.length && <p className="task-page-status">No visible history is available.</p>}{detail.history.nextBefore !== null && <div className="task-page-status"><button className="button" disabled={paging || !online || snapshot} onClick={() => void older()}>{paging ? 'Loading history…' : 'Load older history'}</button>{(!online || snapshot) && <p>Only loaded history is available offline.</p>}</div>}</section>
       </> : <section className="panel task-page-status"><p role="status">{loading ? 'Loading task history…' : 'Task information is unavailable. Reconnect and reload.'}</p><button className="button" disabled={loading} onClick={() => void load()}>Reload Task</button></section>}
       {canInteract ? <TaskComment key={id} taskId={id} online={online} mutate={mutate} saved={load}/> : <p className="info-strip">Read-only discussion. Interact access is required to add a comment.</p>}
-    </div><aside className="right-column">{detail && <Dependencies detail={detail} state={state} online={online && !snapshot} canEdit={canEdit} mutate={mutate} saved={load}/>}</aside></div>
+    </div><aside className="right-column">{detail && <><Assignment detail={detail} state={state} online={online && !snapshot} canEdit={canEdit} mutate={mutate} saved={load}/><Subscribers task={detail.task} state={state} online={online && !snapshot} canEdit={canEdit} canInteract={canInteract} mutate={mutate} saved={load}/></>}{detail && <Dependencies detail={detail} state={state} online={online && !snapshot} canEdit={canEdit} mutate={mutate} saved={load}/>}</aside></div>
   </div>;
 }
 
-function Transaction({ transaction }: { transaction: TaskTransaction }) {
-  const kind = { create: 'Created task', legacy: 'Retained legacy snapshot', edit: 'Edited task', comment: 'Commented', dependency: 'Changed dependency', dependency_status: 'Related task status changed' }[transaction.kind];
+function Transaction({ transaction, state }: { transaction: TaskTransaction; state: AppState }) {
+  const kind = { create: 'Created task', legacy: 'Retained legacy snapshot', edit: 'Edited task', comment: 'Commented', dependency: 'Changed dependency', dependency_status: 'Related task status changed', subscription: 'Following changed' }[transaction.kind];
   return <li className={`task-transaction transaction-${transaction.kind}`}><header><strong>{transaction.actor || 'Unknown (legacy)'}</strong><span>{kind}</span><small>{date(transaction.createdAt)} · Task version {transaction.taskVersion}</small></header>
     {transaction.comment !== undefined && <p className="task-comment-body">{transaction.comment}</p>}
-    {transaction.snapshot && <details className="task-baseline"><summary>{transaction.kind === 'legacy' ? 'View retained snapshot' : 'View original task fields'}</summary><dl><dt>Title</dt><dd>{transaction.snapshot.title}</dd><dt>Status</dt><dd>{text(transaction.snapshot.status)}</dd><dt>Priority</dt><dd>{text(transaction.snapshot.priority)}</dd><dt>Project</dt><dd>{transaction.snapshot.projectId || 'None'}</dd><dt>Description</dt><dd><pre>{transaction.snapshot.description}</pre></dd></dl></details>}
-    {transaction.changes?.map(change => <FieldChange key={change.field} change={change}/>)}
+    {transaction.snapshot && <details className="task-baseline"><summary>{transaction.kind === 'legacy' ? 'View retained snapshot' : 'View original task fields'}</summary><dl><dt>Title</dt><dd>{transaction.snapshot.title}</dd><dt>Status</dt><dd>{text(transaction.snapshot.status)}</dd><dt>Priority</dt><dd>{text(transaction.snapshot.priority)}</dd><dt>Project</dt><dd>{transaction.snapshot.projectId || 'None'}</dd><dt>Owner</dt><dd>{member(transaction.snapshot.ownerId, state, transaction.snapshot.ownerId === undefined ? 'Not recorded' : 'Unassigned')}</dd><dt>Author</dt><dd>{member(transaction.snapshot.authorId, state, 'Unknown (legacy)')}</dd><dt>Description</dt><dd><pre>{transaction.snapshot.description}</pre></dd></dl></details>}
+    {transaction.changes?.map(change => <FieldChange key={change.field} change={change} state={state}/>)}
+    {transaction.subscription && <p>{member(transaction.subscription.principalId, state)} {transaction.subscription.newState === 'subscribed' ? 'started following' : 'stopped following'} this task{transaction.subscription.reason === 'created' ? ' after creating it' : transaction.subscription.reason === 'commented' ? ' after commenting' : transaction.subscription.reason === 'former_owner' ? ' after reassignment' : ''}.</p>}
     {transaction.dependency && <p>{transaction.dependency.direction === 'depends_on' ? 'Dependency' : 'Dependent task'} {transaction.dependency.action}: <a href={`#${transaction.dependency.taskId}`}>{transaction.dependency.taskId}</a>.</p>}
     {transaction.dependencyStatus && <p><a href={`#${transaction.dependencyStatus.taskId}`}>{transaction.dependencyStatus.taskId}</a> changed from <strong>{text(transaction.dependencyStatus.oldStatus)}</strong> to <strong>{text(transaction.dependencyStatus.newStatus)}</strong>. This does not change this task’s status.</p>}
   </li>;
 }
-function FieldChange({ change }: { change: TaskFieldChange }) {
+function FieldChange({ change, state }: { change: TaskFieldChange; state: AppState }) {
   const before = change.oldValueHidden ? 'Hidden by access rules' : change.oldValue;
   const after = change.newValueHidden ? 'Hidden by access rules' : change.newValue;
   const [expanded, setExpanded] = useState(false);
   const changes = useMemo(() => expanded && change.field === 'description' && !change.oldValueHidden && !change.newValueHidden ? diffWordsWithSpace(before || '', after || '', { timeout: 100, maxEditLength: 4000 }) : null, [change, before, after, expanded]);
-  const display = (value: string | null) => value === null ? 'None' : change.field === 'status' || change.field === 'priority' ? text(value) : value;
+  const display = (value: string | null) => change.field === 'ownerId' ? member(value, state) : value === null ? 'None' : change.field === 'status' || change.field === 'priority' ? text(value) : value;
   return <div className="task-field-change"><h4>{labels[change.field]}</h4><div className="task-change-values"><div><strong>Previous</strong><pre>{display(before)}</pre></div><div><strong>New</strong><pre>{display(after)}</pre></div></div>{change.field === 'description' && <details onToggle={event => setExpanded(event.currentTarget.open)}><summary>Show description diff</summary>{changes ? <pre className="task-description-diff">{changes.map((part, index) => part.added ? <ins key={index}>{part.value}</ins> : part.removed ? <del key={index}>{part.value}</del> : <span key={index}>{part.value}</span>)}</pre> : <p>Read the complete old and new descriptions above. An interactive diff is unavailable.</p>}</details>}</div>;
 }
 function Dependencies({ detail, state, online, canEdit, mutate, saved }: { detail: TaskDetail; state: AppState; online: boolean; canEdit: boolean; mutate: Mutate; saved: () => Promise<void> }) {
@@ -103,7 +105,8 @@ function Dependencies({ detail, state, online, canEdit, mutate, saved }: { detai
   return <section className="panel task-dependency-panel"><div className="panel-heading"><h2>Visible dependencies</h2></div><div className="card-body"><p className="muted small">Relationships track work you depend on. Changing a related task never automatically closes this task.</p><h3>Depends on</h3>{links(detail.dependsOn, true)}<h3>Blocks</h3>{links(detail.blocks, false)}{canEdit && <form onSubmit={event => { event.preventDefault(); if (chosen) void change(chosen, 'add'); }}><label className="field"><span>Task to depend on</span><select aria-label="Task to depend on" value={chosen} disabled={!online || busy} onChange={event => setChosen(event.target.value)}><option value="">Choose a task…</option>{candidates.map(task => <option key={task.id} value={task.id}>{task.id}: {task.title}</option>)}</select></label><button className="button" disabled={!online || busy || !candidates.some(task => task.id === chosen)}><Plus size={14}/>Add Dependency</button></form>}{!online && canEdit && <p className="muted small">Reconnect to change dependencies.</p>}{error && <p className="error-text" role="alert">{error}</p>}</div></section>;
 }
 
-type TaskDraft = { title: string; description: string; status: TaskStatus; priority: Priority; projectId: string | null; expectedVersion: number; changed: TaskField[] };
+type EditableTaskField = Exclude<TaskField, 'ownerId'>;
+type TaskDraft = { title: string; description: string; status: TaskStatus; priority: Priority; projectId: string | null; expectedVersion: number; changed: EditableTaskField[] };
 function fields(task: Task): TaskDraft { return { title: task.title, description: task.description, status: task.status, priority: task.priority, projectId: task.projectId, expectedVersion: task.version, changed: [] }; }
 function TaskEditor({ task, state, online, mutate, saved }: { task: Task; state: AppState; online: boolean; mutate: Mutate; saved: (close: boolean) => Promise<void> }) {
   const { readStored, writeStored, removeStoredIfEqual, draftIsHeld, durable, assertActive } = useWorkspace();
@@ -115,7 +118,7 @@ function TaskEditor({ task, state, online, mutate, saved }: { task: Task; state:
   const held = draftIsHeld(key);
   const wasHeld = useRef(held);
   useEffect(() => { if (wasHeld.current && !held) { const next = fields(task); latest.current = next; setDraft(next); setError(''); } wasHeld.current = held; }, [held]);
-  const update = (patch: Partial<Pick<TaskDraft, TaskField>>) => { const next = { ...latest.current, ...patch, changed: [...new Set([...(latest.current.changed || []), ...Object.keys(patch) as TaskField[]])] }; latest.current = next; setDraft(next); setPersisted(writeStored(key, next)); };
+  const update = (patch: Partial<Pick<TaskDraft, EditableTaskField>>) => { const next = { ...latest.current, ...patch, changed: [...new Set([...(latest.current.changed || []), ...Object.keys(patch) as EditableTaskField[]])] }; latest.current = next; setDraft(next); setPersisted(writeStored(key, next)); };
   const submit = async () => {
     if (held || busy || !draft.title.trim() || !draft.changed?.length || !Number.isSafeInteger(draft.expectedVersion)) return;
     const submitted = { ...draft }; setBusy(true); setError('');
@@ -145,4 +148,70 @@ function TaskComment({ taskId, online, mutate, saved }: { taskId: string; online
     catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save this comment.'); } finally { if (mounted.current) setBusy(false); }
   };
   return <section className="panel task-comment-form"><div className="panel-heading"><h2><MessageSquare size={17}/>Add a comment</h2></div><form className="card-body" onSubmit={event => { event.preventDefault(); void submit(); }}><label className="field"><span>Task comment</span><textarea aria-label="Task comment" required rows={4} maxLength={20000} value={body} disabled={busy || held} onChange={event => { const value = event.target.value; setBody(value); setPersisted(writeStored(key, { body: value })); }}/></label>{held && <p className="info-strip">This comment is set aside for export or discard.</p>}{error && <p className="error-text" role="alert">{error}</p>}<p className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Comment draft stays on this device.' : 'Comment draft stays in this tab only.' : 'This comment is not stored. Keep it open or export it.'}</p><div className="task-form-actions">{body && <button type="button" className="button" onClick={() => download({ body }, `${taskId}-comment.json`)}>Export Comment</button>}<button className="button primary" disabled={busy || held || !body.trim() || (!online && !durable)}>{busy ? 'Saving…' : 'Add Task Comment'}</button></div></form></section>;
+}
+
+function Assignment({ detail, state, online, canEdit, mutate, saved }: { detail: TaskDetail; state: AppState; online: boolean; canEdit: boolean; mutate: Mutate; saved: () => Promise<void> }) {
+  const { session } = useWorkspace();
+  const selfId = state.currentPrincipalId || session?.state.account?.id || (session?.state.mode === 'local' ? `local:${session.state.workspaceId}` : '');
+  const [chosen, setChosen] = useState(detail.task.ownerId || '');
+  const [confirmation, setConfirmation] = useState<{ ownerId: string | null; expectedVersion: number } | null>(null);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  useEffect(() => { setChosen(detail.task.ownerId || ''); }, [detail.task.ownerId]);
+  const propose = (ownerId: string | null) => { setError(''); setConfirmation({ ownerId, expectedVersion: detail.task.version }); };
+  const save = async () => {
+    if (!confirmation || !canEdit || !online || busy) return;
+    setBusy(true); setError('');
+    try {
+      const result = await mutate<TaskUpdateResult>(`/api/tasks/${detail.task.id}`, 'PATCH', confirmation, 'Assignment saved', false);
+      setConfirmation(null);
+      if (result && !('accessLost' in result)) await saved();
+    } catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not update this assignment.'); }
+    finally { setBusy(false); }
+  };
+  return <section className="panel task-assignment-panel"><div className="panel-heading"><h2>Assignment</h2></div><div className="card-body"><p className="task-owner"><strong>{member(detail.task.ownerId, state)}</strong></p><p className="muted small">The owner automatically has view, edit, and interact access when the Space allows viewing. Assignment cannot grant access through a restricted Space.</p>{canEdit && <><label className="field"><span>Task owner</span><select aria-label="Task owner" value={chosen} disabled={!online || busy} onChange={event => { setChosen(event.target.value); setConfirmation(null); }}><option value="">Unassigned</option>{detail.task.ownerId && !state.principals.some(person => person.id === detail.task.ownerId && !person.disabled) && <option value={detail.task.ownerId} disabled>{member(detail.task.ownerId, state)}</option>}{state.principals.filter(person => !person.disabled).map(person => <option key={person.id} value={person.id}>{person.displayName} (@{person.username})</option>)}</select></label><div className="task-form-actions"><button className="button" disabled={!online || busy || chosen === (detail.task.ownerId || '')} onClick={() => propose(chosen || null)}>Change Owner</button>{selfId && detail.task.ownerId !== selfId && <button className="button" disabled={!online || busy} onClick={() => { setChosen(selfId); propose(selfId); }}>Assign to Me</button>}</div>{confirmation && <div className="task-assignment-confirmation" role="region" aria-label="Confirm assignment"><p>Change {detail.task.id} from <strong>{member(detail.task.ownerId, state)}</strong> to <strong>{member(confirmation.ownerId, state)}</strong>, based on version {confirmation.expectedVersion}?</p><p>Reassignment can remove your access. Other unsaved drafts will be set aside for export if access is lost. Field drafts keep their original version and may need a fresh edit afterward.</p><div className="task-form-actions"><button className="button" disabled={busy} onClick={() => setConfirmation(null)}>Cancel Assignment</button><button className="button primary" disabled={busy || !online} onClick={() => void save()}>{busy ? 'Saving…' : 'Confirm Assignment'}</button></div></div>}{!online && <p className="muted small">Reconnect to change ownership. Assignment is never queued offline.</p>}</>}{error && <p className="error-text" role="alert">{error}</p>}</div></section>;
+}
+
+function Subscribers({ task, state, online, canEdit, canInteract, mutate, saved }: { task: Task; state: AppState; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void> }) {
+  const { request, readStored, writeStored, taskSnapshotGeneration, unavailableObject } = useWorkspace();
+  const key = `task:${task.id}:subscriptions`;
+  const [page, setPage] = useState<TaskSubscriptionPage | null>(() => readStored(key, null));
+  const [chosen, setChosen] = useState(''); const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(false); const [error, setError] = useState(''); const [warning, setWarning] = useState('');
+  const mounted = useRef(true); const requests = useRef(0);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; requests.current++; }; }, []);
+  const load = useCallback(async (after?: string) => {
+    const number = ++requests.current; const generation = taskSnapshotGeneration(); setLoading(true);
+    try {
+      const next = await request<TaskSubscriptionPage>(`/api/tasks/${task.id}/subscriptions${after ? `?after=${encodeURIComponent(after)}&limit=50` : ''}`);
+      if (!mounted.current || requests.current !== number || generation !== taskSnapshotGeneration() || unavailableObject(task.id)) return;
+      setPage(current => {
+        const value = after && current ? { ...next, subscribers: [...new Map([...current.subscribers, ...next.subscribers].map(item => [item.principalId, item])).values()] } : next;
+        if (!writeStored(key, value)) setWarning('The loaded following list could not be saved for offline reading.');
+        return value;
+      }); setError('');
+    } catch (failure) { if (mounted.current && number === requests.current) setError(isNetworkError(failure) ? 'Reconnect to refresh the following list.' : failure instanceof Error ? failure.message : 'Could not load the following list.'); }
+    finally { if (mounted.current && number === requests.current) setLoading(false); }
+  }, [task.id]);
+  useEffect(() => { if (online) void load(); }, [load, online, task.version, state.followingTaskIds.includes(task.id)]);
+  const change = async (status: TaskSubscriptionStatus, action: 'subscribe' | 'unsubscribe') => {
+    if (!online || busy) return;
+    setBusy(true); setError('');
+    try {
+      await mutate<TaskSubscriptionStatus>(`/api/tasks/${task.id}/subscriptions`, 'POST', { principalId: status.principalId, action, expectedMembershipVersion: status.version }, action === 'subscribe' ? 'Following updated' : 'Following stopped', false);
+      if (mounted.current) { setChosen(''); await load(); await saved(); }
+    } catch (failure) { if (mounted.current) { setError(failure instanceof Error ? failure.message : 'Could not change following.'); } }
+    finally { if (mounted.current) setBusy(false); }
+  };
+  const add = async () => {
+    if (!chosen || !online || busy) return;
+    setBusy(true); setError('');
+    try {
+      const status = await request<TaskSubscriptionStatus>(`/api/tasks/${task.id}/subscriptions/${encodeURIComponent(chosen)}`);
+      if (!mounted.current) return;
+      await mutate<TaskSubscriptionStatus>(`/api/tasks/${task.id}/subscriptions`, 'POST', { principalId: chosen, action: 'subscribe', expectedMembershipVersion: status.version }, 'Follower added', false);
+      if (mounted.current) { setChosen(''); await load(); await saved(); }
+    } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not add this follower.'); }
+    finally { if (mounted.current) setBusy(false); }
+  };
+  const subscribed = new Set(page?.subscribers.map(item => item.principalId));
+  return <section className="panel task-subscribers"><div className="panel-heading"><h2>Following</h2><button className="text-button" disabled={!online || loading || busy} onClick={() => void load()}>Refresh Following</button></div><div className="card-body"><p className="muted small">Following records interest in this task. It does not grant access or send notifications yet. The owner follows automatically; creating or commenting starts following unless you previously opted out.</p>{page ? <><p className="task-following-status">{page.viewer.automatic ? 'You follow automatically as the owner.' : page.viewer.subscribed ? 'You are following this task.' : 'You are not following this task.'}</p><button className="button" disabled={!online || busy || loading || page.viewer.automatic} onClick={() => void change(page.viewer, page.viewer.subscribed ? 'unsubscribe' : 'subscribe')}>{page.viewer.subscribed ? 'Unfollow Task' : 'Follow Task'}</button>{page.viewer.automatic && <p className="muted small">Reassign the task before unfollowing as its owner.</p>}<ul className="task-followers">{page.subscribers.map(status => <li key={status.principalId}><span>{member(status.principalId, state)}{status.automatic && <small>Owner · automatic</small>}</span>{!status.automatic && (canEdit || status.principalId === page.viewer.principalId) && <button className="text-button" aria-label={`Remove follower ${member(status.principalId, state)}`} disabled={!online || busy || loading} onClick={() => void change(status, 'unsubscribe')}>Remove</button>}</li>)}</ul>{!page.subscribers.length && <p className="muted small">No followers are listed.</p>}{page.nextAfter && <button className="button" disabled={!online || loading || busy} onClick={() => void load(page.nextAfter!)}>Load more followers</button>}</> : <p className="muted small">{loading ? 'Loading following…' : 'No following list has been loaded.'}</p>}{(canInteract || canEdit) && <form onSubmit={event => { event.preventDefault(); void add(); }}><label className="field"><span>Member to follow task</span><select aria-label="Member to follow task" value={chosen} disabled={!online || busy || loading} onChange={event => setChosen(event.target.value)}><option value="">Choose a member…</option>{state.principals.filter(person => !person.disabled && !subscribed.has(person.id)).map(person => <option key={person.id} value={person.id}>{person.displayName} (@{person.username})</option>)}</select></label><button className="button" disabled={!online || busy || loading || !chosen}>Add Follower</button></form>}{!online && <p className="muted small">Loaded list only. Reconnect to follow or change members; these changes are never queued.</p>}{warning && <p className="error-text" role="status">{warning}</p>}{error && <p className="error-text" role="alert">{error} Refresh Following before trying again.</p>}</div></section>;
 }

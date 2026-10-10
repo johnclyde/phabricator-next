@@ -1,5 +1,5 @@
 import type { AuthContext } from '../shared/auth.ts';
-import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskTransaction, WikiDetail } from '../shared/types.ts';
+import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
 import type { Capability, ObjectAccess, Space } from '../shared/policy.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
@@ -29,6 +29,8 @@ export class AccessLayer {
     state.access = Object.fromEntries([...state.projects, ...state.repositories, ...state.tasks, ...state.documents, ...state.revisions].map(item => [item.id, this.describe(item.id)]));
     state.accessEpoch = this.policies.epoch();
     state.canCreate = this.context.scopes.includes('write');
+    state.currentPrincipalId = this.principal;
+    state.followingTaskIds = state.tasks.filter(task => this.store.subscriptionStatus(task.id, this.principal).subscribed).map(task => task.id);
     // This is the member directory, not an administrative credential listing.
     state.principals = this.auth.listAccounts().filter(account => !account.disabled);
     if (this.context.kind === 'local') state.principals.unshift({ id: this.principal, username: 'local', displayName: 'You', disabled: false });
@@ -51,6 +53,14 @@ export class AccessLayer {
   taskHistory(id: string, before?: number, limit?: number): TaskHistory {
     this.require(id);
     return this.redact({ ...this.store.taskHistory(id, before, limit, related => this.canView(related)), accessEpoch: this.policies.epoch() });
+  }
+  taskSubscriptions(id: string, after?: string, limit?: number): TaskSubscriptionPage {
+    this.require(id);
+    return { ...this.store.taskSubscriptions(id, this.principal, after, limit), accessEpoch: this.policies.epoch() };
+  }
+  taskSubscriptionStatus(id: string, principalId: string): TaskSubscriptionStatus {
+    this.require(id); this.principalReference(principalId, false, id);
+    return { ...this.store.subscriptionStatus(id, principalId), accessEpoch: this.policies.epoch() };
   }
   private visibleTaskTransaction(transaction: TaskTransaction): boolean {
     const related = transaction.dependency?.taskId ?? transaction.dependencyStatus?.taskId;
@@ -103,6 +113,16 @@ export class AccessLayer {
       if (!valid || !this.canView(id as string)) throw new HttpError(400, 'Reference unavailable.');
     }
   }
+  private principalReference(value: unknown, active = true, taskId?: string): string {
+    const account = typeof value === 'string' ? this.auth.listAccounts().find(item => item.id === value) : undefined;
+    let local = this.context.kind === 'local' && value === this.principal;
+    if (!active && taskId && value === `local:${this.context.workspaceId}`) {
+      const membership = this.store.subscriptionStatus(taskId, value);
+      local ||= membership.version > 0 || membership.automatic;
+    }
+    if (!local && (!account || (active && account.disabled))) throw new HttpError(400, 'Selected member is unavailable.');
+    return value as string;
+  }
   private target(method: string, path: string): { id: string; capability: Capability } | null {
     const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
     if (policy) return { id: policy[1]!, capability: method === 'GET' ? 'view' : 'edit' };
@@ -111,12 +131,26 @@ export class AccessLayer {
     const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions)\/((?:PROJ|R|T|W|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
-    return { id: object[1]!, capability: method === 'GET' ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
+    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
     if ((method === 'POST' && CREATES.has(path)) || (method === 'PATCH' && path.startsWith('/api/tasks/'))) this.references(input);
+    if ((method === 'POST' && path === '/api/tasks') || (method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path))) {
+      const ownerId = record(input)?.ownerId;
+      const current = method === 'PATCH' ? this.store.database.prepare("SELECT json_extract(data, '$.ownerId') AS ownerId FROM entities WHERE id = ?").get(target!.id) as { ownerId: unknown } | undefined : undefined;
+      if (ownerId !== undefined && ownerId !== null && ownerId !== current?.ownerId) this.principalReference(ownerId);
+    }
+    if (method === 'POST' && /^\/api\/tasks\/T\d+\/subscriptions$/.test(path)) {
+      const data = record(input);
+      const principalId = this.principalReference(data?.principalId, data?.action !== 'unsubscribe', target!.id);
+      if (data?.action !== 'subscribe' && data?.action !== 'unsubscribe') throw new HttpError(400, 'Choose subscribe or unsubscribe.');
+      if (principalId !== this.principal) {
+        const capabilities = this.policies.access(target!.id, this.principal);
+        if (data.action === 'unsubscribe' || !capabilities.edit) this.require(target!.id, data.action === 'unsubscribe' ? 'edit' : 'interact');
+      }
+    }
     if (method === 'POST' && /^\/api\/tasks\/T\d+\/dependencies$/.test(path)) {
       const id = record(input)?.taskId;
       if (typeof id !== 'string' || !/^T[1-9]\d*$/.test(id) || !this.canView(id)) throw new HttpError(400, 'Reference unavailable.');
@@ -182,7 +216,7 @@ export class AccessLayer {
     detail.suggestionApplications = [];
   }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
-  present(method: string, path: string, response: MutationResponse): MutationResponse {
+  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false): MutationResponse {
     let target = this.target(method, path);
     const body = record(response.body);
     if (method === 'POST' && (CREATES.has(path) || path === '/api/spaces')) {
@@ -190,11 +224,18 @@ export class AccessLayer {
       if (typeof id !== 'string') throw new HttpError(409, 'This saved response cannot be safely replayed.');
       target = { id, capability: 'edit' };
     }
-    if (target) this.require(target.id, target.capability);
+    // The write was authorized under the same writer lock. Reassigning a task
+    // may deliberately surrender automatic owner access; acknowledge that
+    // commit without disclosing the now-hidden task. Replays never use this.
+    if (freshTaskOwnershipChange && method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && target) {
+      if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
+      this.require(target.id, 'view');
+    } else if (target) this.require(target.id, target.capability);
     if (path.startsWith('/api/policies/') && target) return { status: response.status, body: this.describe(target.id) };
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
     const result = this.redact(response.body);
     const detail = record(result);
+    if (detail && /^\/api\/tasks\/T\d+\/subscriptions$/.test(path)) return { status: response.status, body: { ...detail, accessEpoch: this.policies.epoch() } };
     if (detail && record(detail.task)) return { status: response.status, body: this.taskSnapshot(result as TaskDetail) };
     const revisionId = record(detail?.revision)?.id;
     const id = revisionId ?? record(detail?.document)?.id;

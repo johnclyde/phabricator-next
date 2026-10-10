@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
+import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskSubscriptionPage, TaskSubscriptionState, TaskSubscriptionStatus, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 import { initializePolicies, registerDefaultPolicy } from './policy.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
@@ -29,7 +29,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 7) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 8) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -126,6 +126,30 @@ export class Store {
         });
       } catch (error) { this.database.close(); throw error; }
     }
+    if (version < 8) {
+      try {
+        this.transaction(() => {
+          this.database.exec(`
+            CREATE TABLE task_subscriptions (task_id TEXT NOT NULL REFERENCES entities(id), principal_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('subscribed', 'unsubscribed')), version INTEGER NOT NULL CHECK(version > 0), updated_at TEXT NOT NULL, PRIMARY KEY(task_id, principal_id));
+            CREATE INDEX task_subscriptions_principal ON task_subscriptions(principal_id, state, task_id);
+          `);
+          for (const task of this.all<Task>('task')) {
+            const row = this.database.prepare('SELECT data FROM task_transactions WHERE task_id = ? AND sequence = 1').get(task.id) as JsonRow | undefined;
+            const created = row ? JSON.parse(row.data) as TaskTransaction : undefined;
+            const attribution = created?.attribution;
+            const authorId = created?.kind === 'create' && created.taskId === task.id && created.sequence === 1 && created.taskVersion === 1
+              && created.snapshot?.id === task.id && created.snapshot.version === 1 && created.snapshot.createdAt === task.createdAt
+              && attribution && typeof attribution.principalId === 'string' && /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(attribution.principalId)
+              && typeof attribution.displayName === 'string' && created.actor === attribution.displayName
+              ? attribution.principalId : null;
+            // New current fields do not rewrite historical snapshots, infer
+            // prior assignment, or retroactively subscribe historical actors.
+            this.save('task', { ...task, ownerId: null, authorId });
+          }
+          this.database.exec('PRAGMA user_version = 8');
+        });
+      } catch (error) { this.database.close(); throw error; }
+    }
   }
 
   close(): void { this.database.close(); }
@@ -139,18 +163,18 @@ export class Store {
     try { const result = work(); this.database.exec('COMMIT'); return result; }
     catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
-  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse, authorize?: () => void, present?: (response: MutationResponse) => MutationResponse): MutationResponse {
+  mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse, authorize?: () => void, present?: (response: MutationResponse, replayed: boolean) => MutationResponse): MutationResponse {
     return this.transaction(() => {
       // Credential revocation in another process may commit while BEGIN waits.
       // Check authority after acquiring the write lock and before replay/writes.
       authorize?.();
       if (key) {
         const existing = this.replay(key, fingerprint);
-        if (existing) return present ? present(existing) : existing;
+        if (existing) return present ? present(existing, true) : existing;
       }
       const response = work();
       if (key) this.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(key, fingerprint, response.status, JSON.stringify(response.body), new Date().toISOString());
-      return present ? present(response) : response;
+      return present ? present(response, false) : response;
     });
   }
   replay(key: string, fingerprint: string): MutationResponse | undefined {
@@ -193,7 +217,7 @@ export class Store {
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], accessEpoch: 0, canCreate: false, ai, mode };
+    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
     const data = object(input, ['name', 'description', 'color']);
@@ -219,7 +243,7 @@ export class Store {
     if (!Number.isSafeInteger(task.version) || task.version < 1 || !Number.isSafeInteger(task.version + 1)) throw new HttpError(409, 'This task has reached the supported version limit.');
     return { ...task, version: task.version + 1, updatedAt: now };
   }
-  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
+  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
     const last = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id) as { sequence: number };
     const sequence = last.sequence + 1;
     if (!Number.isSafeInteger(sequence) || sequence < 1) throw new HttpError(409, 'This task has reached the supported history limit.');
@@ -229,8 +253,21 @@ export class Store {
   }
   createTask(input: unknown, attribution?: ActorAttribution): Task { return this.taskMutation(() => this.writeTask(input, undefined, attribution)); }
   updateTask(id: string, input: unknown, attribution?: ActorAttribution): Task { return this.taskMutation(() => this.writeTask(input, this.get<Task>('task', id), attribution)); }
+  /** Explicit operator handoff; authorship and existing preferences stay historical. */
+  transferTaskOwners(fromId: string, toId: string, attribution: ActorAttribution): number {
+    this.taskPrincipal(fromId); this.taskPrincipal(toId);
+    return this.taskMutation(() => {
+      if (fromId === toId) return 0;
+      const rows = this.database.prepare("SELECT data FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? ORDER BY id").all(fromId) as JsonRow[];
+      for (const row of rows) {
+        const task = JSON.parse(row.data) as Task;
+        this.updateTask(task.id, { expectedVersion: task.version, ownerId: toId }, attribution);
+      }
+      return rows.length;
+    });
+  }
   private writeTask(input: unknown, current?: Task, attribution?: ActorAttribution): Task {
-    const fields: TaskField[] = ['title', 'description', 'status', 'priority', 'projectId'];
+    const fields: TaskField[] = ['title', 'description', 'status', 'priority', 'projectId', 'ownerId'];
     const data = object(input, current ? [...fields, 'expectedVersion'] : fields);
     if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before saving.');
     if (current && !fields.some(field => data[field] !== undefined)) throw new HttpError(400, 'At least one task field is required.');
@@ -241,15 +278,23 @@ export class Store {
       status: data.status === undefined ? current?.status ?? 'open' : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
       priority: data.priority === undefined ? current?.priority ?? 'normal' : choice(data.priority, 'priority', ['low', 'normal', 'high', 'urgent']),
       projectId: data.projectId === undefined && current ? current.projectId : this.reference(data.projectId, 'project'),
+      ownerId: data.ownerId === undefined && current ? current.ownerId : data.ownerId === undefined || data.ownerId === null ? null : this.taskPrincipal(data.ownerId),
     };
     const changes: TaskFieldChange[] = current ? fields.filter(field => values[field] !== current[field]).map(field => ({ field, oldValue: current[field], newValue: values[field] })) : [];
     if (current && changes.length === 0) return current;
-    const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, version: 1, createdAt: now, updatedAt: now };
+    const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, authorId: attribution ? this.taskPrincipal(attribution.principalId) : null, version: 1, createdAt: now, updatedAt: now };
     const parents = current && task.status !== current.status
       ? (this.database.prepare('SELECT task_id FROM task_dependencies WHERE dependency_id = ? ORDER BY task_id').all(task.id) as { task_id: string }[]).map(row => this.advanceTask(this.get<Task>('task', row.task_id), now)) : [];
     this.save('task', task);
     this.appendTaskTransaction(task, current ? { kind: 'edit', changes } : { kind: 'create', snapshot: task }, attribution, now);
     this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`, attribution);
+    if (task.ownerId !== (current?.ownerId ?? null)) {
+      const row = this.database.prepare("SELECT value FROM policy_meta WHERE name = 'epoch'").get() as { value: number };
+      if (!Number.isSafeInteger(row.value + 1)) throw new HttpError(409, 'The workspace has reached the supported policy epoch limit.');
+      this.database.prepare("UPDATE policy_meta SET value = value + 1 WHERE name = 'epoch'").run();
+      if (current?.ownerId) this.changeTaskSubscription(task, current.ownerId, 'subscribed', 'former_owner', attribution, now);
+    }
+    if (!current && task.authorId) this.changeTaskSubscription(task, task.authorId, 'subscribed', 'created', attribution, now);
     for (const parent of parents) {
       this.save('task', parent);
       this.appendTaskTransaction(parent, { kind: 'dependency_status', dependencyStatus: { taskId: task.id, oldStatus: current!.status, newStatus: task.status } }, attribution, now);
@@ -296,9 +341,62 @@ export class Store {
     return this.taskMutation(() => {
       const data = object(input, ['body']); const body = string(data.body, 'Comment', 20_000);
       const task = this.get<Task>('task', id);
+      if (attribution && attribution.principalId !== task.ownerId) {
+        const principalId = this.taskPrincipal(attribution.principalId);
+        const membership = this.subscriptionForTask(task, principalId);
+        if (membership.state === null) this.changeTaskSubscription(task, principalId, 'subscribed', 'commented', attribution);
+      }
       const transaction = this.appendTaskTransaction(task, { kind: 'comment', comment: body }, attribution);
       this.event(id, 'commented', 'Commented on this task.', attribution);
       return transaction;
+    });
+  }
+  private taskPrincipal(value: unknown): string {
+    const principalId = string(value, 'Principal ID', 128);
+    if (!/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(principalId)) throw new HttpError(400, 'Choose a valid workspace principal.');
+    return principalId;
+  }
+  private subscriptionForTask(task: Task, principalId: string): TaskSubscriptionStatus {
+    const row = this.database.prepare('SELECT state, version, updated_at FROM task_subscriptions WHERE task_id = ? AND principal_id = ?').get(task.id, principalId) as { state: TaskSubscriptionState; version: number; updated_at: string } | undefined;
+    const automatic = task.ownerId === principalId;
+    return { taskId: task.id, principalId, state: row?.state ?? null, version: row?.version ?? 0, automatic, subscribed: automatic || row?.state === 'subscribed', updatedAt: row?.updated_at ?? null };
+  }
+  subscriptionStatus(taskId: string, principalId: string): TaskSubscriptionStatus {
+    return this.subscriptionForTask(this.get<Task>('task', taskId), this.taskPrincipal(principalId));
+  }
+  taskSubscriptions(taskId: string, viewerId: string, after?: string, limit = 50): TaskSubscriptionPage {
+    const task = this.get<Task>('task', taskId); const viewer = this.subscriptionForTask(task, this.taskPrincipal(viewerId));
+    const cursor = after === undefined ? null : this.taskPrincipal(after);
+    const size = integer(limit, 'limit'); if (size > 100) throw new HttpError(400, 'limit must be at most 100.');
+    const rows = this.database.prepare(`SELECT principal_id FROM (
+      SELECT principal_id FROM task_subscriptions WHERE task_id = ? AND state = 'subscribed'
+      UNION SELECT ? AS principal_id WHERE ? IS NOT NULL
+    ) WHERE (? IS NULL OR principal_id > ?) ORDER BY principal_id LIMIT ?`).all(taskId, task.ownerId, task.ownerId, cursor, cursor, size + 1) as { principal_id: string }[];
+    const subscribers = rows.slice(0, size).map(row => this.subscriptionForTask(task, row.principal_id));
+    return { subscribers, nextAfter: rows.length > size ? subscribers[subscribers.length - 1]!.principalId : null, viewer };
+  }
+  private changeTaskSubscription(task: Task, principalId: string, state: TaskSubscriptionState, reason: NonNullable<TaskTransaction['subscription']>['reason'], attribution?: ActorAttribution, now = new Date().toISOString()): TaskSubscriptionStatus {
+    const current = this.subscriptionForTask(task, principalId);
+    if (current.state === state) return current;
+    const version = current.version + 1;
+    if (!Number.isSafeInteger(version) || version < 1) throw new HttpError(409, 'This membership has reached the supported version limit.');
+    this.database.prepare(`INSERT INTO task_subscriptions (task_id, principal_id, state, version, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, principal_id) DO UPDATE SET state = excluded.state, version = excluded.version, updated_at = excluded.updated_at`).run(task.id, principalId, state, version, now);
+    this.appendTaskTransaction(task, { kind: 'subscription', subscription: { principalId, oldState: current.state, newState: state, membershipVersion: version, reason } }, attribution, now);
+    this.event(task.id, 'subscription_changed', 'Updated task subscription preferences.', attribution);
+    return this.subscriptionForTask(task, principalId);
+  }
+  updateTaskSubscription(id: string, input: unknown, attribution: ActorAttribution): TaskSubscriptionStatus {
+    return this.taskMutation(() => {
+      const data = object(input, ['principalId', 'action', 'expectedMembershipVersion']);
+      const principalId = this.taskPrincipal(data.principalId);
+      const action = choice(data.action, 'action', ['subscribe', 'unsubscribe']);
+      const expected = data.expectedMembershipVersion;
+      if (typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 0) throw new HttpError(400, 'expectedMembershipVersion must be a nonnegative integer.');
+      const task = this.get<Task>('task', id); const current = this.subscriptionForTask(task, principalId);
+      if (current.version !== expected) throw new HttpError(409, 'This subscription changed. Reload before changing it.');
+      if (action === 'unsubscribe' && current.automatic) throw new HttpError(409, 'The current owner is automatically subscribed. Reassign the task before unsubscribing.');
+      return this.changeTaskSubscription(task, principalId, action === 'subscribe' ? 'subscribed' : 'unsubscribed', 'explicit', attribution);
     });
   }
   updateTaskDependencies(id: string, input: unknown, attribution?: ActorAttribution): TaskDetail {

@@ -1,17 +1,18 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { normalizeBasePath } from '../shared/mount';
-import type { AppState, Project, Task, TaskDetail } from '../shared/types';
+import type { AppState, Project, Task, TaskDetail, TaskSubscriptionStatus } from '../shared/types';
 import type { ObjectAccess } from '../shared/policy';
 import { authAccounts } from './auth-fixture';
 
 const base = normalizeBasePath(process.env.APP_BASE_PATH);
-async function createTask(page: Page, info: TestInfo, label: string, description = 'Original description.') {
+async function createTask(page: Page, info: TestInfo, label: string, description = 'Original description.', ownerId?: string) {
   await page.goto('./#tasks');
   await page.getByRole('button', { name: 'Create Task', exact: true }).click();
   const dialog = page.getByRole('dialog');
   const title = `${label} ${info.project.name} ${Date.now()}`;
   await dialog.getByLabel('Title', { exact: true }).fill(title);
   await dialog.getByLabel('Description', { exact: true }).fill(description);
+  if (ownerId) await dialog.getByLabel('Owner', { exact: true }).selectOption(ownerId);
   const created = page.waitForResponse(response => response.url().endsWith('/api/tasks') && response.request().method() === 'POST');
   await dialog.getByRole('button', { name: 'Create Task', exact: true }).click();
   const task = await (await created).json() as Task;
@@ -183,4 +184,125 @@ test('discarding cross-tab recovery copies clears still-mounted task fields and 
   await expect(page.getByRole('button', { name: 'Save Task', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Add Task Comment', exact: true })).toBeDisabled();
   await other.close();
+});
+
+test('task ownership and following preserve automatic owner behavior, opt-out, offline boundaries and voice filters', async ({ page, context }, info) => {
+  await page.goto('./#tasks');
+  const state = await api<AppState>(page, '/state');
+  const task = await createTask(page, info, 'Owned follow-up', 'Owner and following lifecycle.', state.currentPrincipalId);
+  expect(task.ownerId).toBe(state.currentPrincipalId);
+  await expect(page.locator('.task-assignment-panel')).toContainText('automatically has view, edit, and interact');
+  await expect(page.locator('.task-following-status')).toHaveText('You follow automatically as the owner.');
+  await expect(page.getByRole('button', { name: 'Unfollow Task', exact: true })).toBeDisabled();
+  await page.locator('.task-assignment-panel').screenshot({ path: `.data/${info.project.name}-task-owner.png` });
+  await page.locator('.task-subscribers').screenshot({ path: `.data/${info.project.name}-task-following.png` });
+  await page.getByLabel('Task owner', { exact: true }).selectOption('');
+  await page.getByRole('button', { name: 'Change Owner', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Confirm assignment' })).toContainText('Unassigned');
+  await page.getByRole('button', { name: 'Confirm Assignment', exact: true }).click();
+  await expect(page.locator('.task-owner')).toHaveText('Unassigned');
+  await expect(page.locator('.task-following-status')).toHaveText('You are following this task.');
+  await page.getByRole('button', { name: 'Unfollow Task', exact: true }).click();
+  await expect(page.locator('.task-following-status')).toHaveText('You are not following this task.');
+  await page.getByLabel('Task comment', { exact: true }).fill('Comment after an explicit opt-out.');
+  await page.getByRole('button', { name: 'Add Task Comment', exact: true }).click();
+  await expect(page.locator('.task-comment-body')).toHaveText('Comment after an explicit opt-out.');
+  await expect(page.locator('.task-following-status')).toHaveText('You are not following this task.');
+  await context.setOffline(true);
+  await expect(page.getByLabel('Task owner', { exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Follow Task', exact: true })).toBeDisabled();
+  await context.setOffline(false);
+  await expect(page.getByRole('button', { name: 'Follow Task', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Follow Task', exact: true }).click();
+  await expect(page.locator('.task-following-status')).toHaveText('You are following this task.');
+  await page.getByRole('button', { name: 'Assign to Me', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm Assignment', exact: true }).click();
+  await expect(page.locator('.task-following-status')).toHaveText('You follow automatically as the owner.');
+  await page.getByRole('button', { name: 'Voice and commands', exact: true }).click();
+  await page.getByLabel('Workspace command', { exact: true }).fill('show my tasks');
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
+  await expect(page.getByLabel('Task assignment and following', { exact: true })).toHaveValue('mine');
+  await expect(page.getByRole('link', { name: `${task.id} ${task.title}`, exact: true })).toBeVisible();
+  await page.getByLabel('Task assignment and following', { exact: true }).selectOption('unassigned');
+  await expect(page.getByRole('link', { name: `${task.id} ${task.title}`, exact: true })).toHaveCount(0);
+  await page.getByLabel('Task assignment and following', { exact: true }).selectOption('following');
+  await expect(page.getByRole('link', { name: `${task.id} ${task.title}`, exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test('an owner handoff that removes access keeps a delayed successful receipt and recovers other unsaved work', async ({ page, browser }, info) => {
+  await signIn(page, 0);
+  const state = await api<AppState>(page, '/state');
+  const alice = state.principals.find(person => person.username === 'alice')!;
+  const bobIdentity = state.principals.find(person => person.username === 'bob')!;
+  const task = await api<Task>(page, '/tasks', 'POST', { title: `Owner handoff ${info.project.name} ${Date.now()}`, ownerId: bobIdentity.id });
+  const policy = await api<ObjectAccess>(page, `/policies/${task.id}`);
+  const restricted = { kind: 'principals', principalIds: [alice.id] };
+  await api(page, `/policies/${task.id}`, 'PUT', { expectedVersion: policy.policy.version, spaceId: policy.policy.spaceId, view: restricted, edit: restricted, interact: restricted });
+  const bobContext = await browser.newContext({ viewport: page.viewportSize(), isMobile: info.project.use.isMobile, hasTouch: info.project.use.hasTouch, deviceScaleFactor: info.project.use.deviceScaleFactor });
+  const bob = await bobContext.newPage();
+  let release!: () => void;
+  try {
+    await signIn(bob, 1); await bob.goto(`http://127.0.0.1:4312${base}#${task.id}`);
+    await expect(bob.locator('.access-summary')).toContainText('Object rules cannot remove the owner');
+    await bob.getByRole('button', { name: 'Edit Task', exact: true }).click();
+    await bob.getByLabel('Task title', { exact: true }).fill('Retain this separate field draft');
+    await bob.getByLabel('Task comment', { exact: true }).fill('Retain this unsent handoff comment');
+    let committed!: () => void; const saved = new Promise<void>(resolve => { committed = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    await bob.route(`**/api/tasks/${task.id}`, async route => {
+      if (route.request().method() !== 'PATCH') { await route.continue(); return; }
+      const response = await route.fetch(); committed(); await held; await route.fulfill({ response });
+    });
+    await bob.getByLabel('Task owner', { exact: true }).selectOption(alice.id);
+    await bob.getByRole('button', { name: 'Change Owner', exact: true }).click();
+    await bob.getByRole('button', { name: 'Confirm Assignment', exact: true }).click();
+    await saved;
+    await bob.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(bob.getByRole('heading', { name: 'Object unavailable', exact: true })).toBeVisible();
+    await expect(bob.locator('.quarantined-draft')).toHaveCount(2);
+    release();
+    await expect(bob.locator('.banner.success')).toContainText('Assignment saved. You no longer have access');
+    await expect(bob.locator('.quarantined-drafts')).toContainText('Retain this separate field draft');
+    await expect(bob.locator('.quarantined-drafts')).toContainText('Retain this unsent handoff comment');
+    expect((await api<TaskDetail>(page, `/tasks/${task.id}`)).task.ownerId).toBe(alice.id);
+    await bob.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await expect.poll(() => bob.evaluate(() => window.scrollY)).toBe(0);
+    const receipt = await bob.locator('.banner.success').boundingBox();
+    const topbar = await bob.locator('.topbar').boundingBox();
+    expect(receipt!.y).toBeGreaterThanOrEqual(topbar!.y + topbar!.height);
+    await bob.screenshot({ path: `.data/${info.project.name}-task-handoff-receipt.png` });
+    expect(await bob.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  } finally { release?.(); await bobContext.close(); }
+});
+
+test('read-only members can follow themselves and stale membership changes require a refresh', async ({ page, browser }, info) => {
+  await signIn(page, 0);
+  const state = await api<AppState>(page, '/state');
+  const alice = state.principals.find(person => person.username === 'alice')!;
+  const bobIdentity = state.principals.find(person => person.username === 'bob')!;
+  const task = await api<Task>(page, '/tasks', 'POST', { title: `Following controls ${info.project.name} ${Date.now()}` });
+  await page.goto(`http://127.0.0.1:4312${base}#${task.id}`);
+  await page.getByLabel('Member to follow task', { exact: true }).selectOption(bobIdentity.id);
+  await page.getByRole('button', { name: 'Add Follower', exact: true }).click();
+  await expect(page.locator('.task-followers')).toContainText(bobIdentity.displayName);
+  const policy = await api<ObjectAccess>(page, `/policies/${task.id}`);
+  const restricted = { kind: 'principals', principalIds: [alice.id] };
+  await api(page, `/policies/${task.id}`, 'PUT', { expectedVersion: policy.policy.version, spaceId: policy.policy.spaceId, view: { kind: 'workspace' }, edit: restricted, interact: restricted });
+  const bobContext = await browser.newContext({ viewport: page.viewportSize(), isMobile: info.project.use.isMobile, hasTouch: info.project.use.hasTouch, deviceScaleFactor: info.project.use.deviceScaleFactor });
+  const bob = await bobContext.newPage();
+  try {
+    await signIn(bob, 1); await bob.goto(`http://127.0.0.1:4312${base}#${task.id}`);
+    await expect(bob.getByRole('button', { name: 'Edit Task', exact: true })).toHaveCount(0);
+    await expect(bob.getByLabel('Member to follow task', { exact: true })).toHaveCount(0);
+    await bob.getByRole('button', { name: 'Unfollow Task', exact: true }).click();
+    await expect(bob.getByRole('button', { name: 'Follow Task', exact: true })).toBeEnabled();
+    const membership = await api<TaskSubscriptionStatus>(page, `/tasks/${task.id}/subscriptions/${encodeURIComponent(bobIdentity.id)}`);
+    await api(page, `/tasks/${task.id}/subscriptions`, 'POST', { principalId: bobIdentity.id, action: 'subscribe', expectedMembershipVersion: membership.version });
+    await bob.getByRole('button', { name: 'Follow Task', exact: true }).click();
+    await expect(bob.locator('.task-subscribers [role="alert"]')).toContainText(/changed|version|conflict/i);
+    await bob.getByRole('button', { name: 'Refresh Following', exact: true }).click();
+    await expect(bob.locator('.task-following-status')).toHaveText('You are following this task.');
+    expect((await api<TaskDetail>(page, `/tasks/${task.id}`)).task.version).toBe(task.version);
+  } finally { await bobContext.close(); }
 });

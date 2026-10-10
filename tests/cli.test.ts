@@ -133,9 +133,9 @@ test('CLI task reads preserve mounts, filters and current object visibility with
   const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/tools/tasks/`;
   const token = app.auth.createToken(bob.id, { name: 'Task read fixture', scopes: ['read'] });
   try {
-    const normal = store.createTask({ title: 'A visible normal task', priority: 'normal' });
-    const urgent = store.createTask({ title: 'A visible urgent task', priority: 'urgent', status: 'in_progress' });
-    const closed = store.createTask({ title: 'A resolved task', status: 'resolved' });
+    const normal = store.createTask({ title: 'A visible normal task', priority: 'normal', ownerId: bob.id });
+    const urgent = store.createTask({ title: 'A visible urgent task', priority: 'urgent', status: 'in_progress', ownerId: bob.id });
+    const closed = store.createTask({ title: 'A resolved task', status: 'resolved', ownerId: bob.id });
     const hidden = store.createTask({ title: 'Private task marker' });
     app.policies.configureNew(hidden.id, { spaceId: 'S1', view: { kind: 'principals', principalIds: [alice.id] } }, alice.id);
     store.updateTaskDependencies(normal.id, { taskId: hidden.id, action: 'add', expectedVersion: normal.version });
@@ -159,7 +159,28 @@ test('CLI task reads preserve mounts, filters and current object visibility with
     assert.equal(detail.task.id, normal.id); assert.equal(detail.task.version, 2); assert.deepEqual(detail.dependsOn, []);
     assert.ok(!shown.stdout.includes(hidden.id)); assert.ok(!shown.stdout.includes(hidden.title));
     const denied = await read(['show', hidden.id]); assert.equal(denied.code, 1); assert.ok(!denied.stderr.includes(hidden.title));
-    for (const args of [['tasks', '--status', 'invalid'], ['tasks', '--order', 'invalid'], ['tasks', '--limit', '0'], ['tasks', '--limit', '1.5']]) {
+    const unassigned = store.createTask({ title: 'An unassigned task' });
+    const other = store.createTask({ title: 'Another member owns this task', ownerId: alice.id });
+    const attribution = { principalId: bob.id, displayName: bob.displayName, credentialId: 'cli-fixture', requestId: 'cli-fixture' };
+    store.updateTaskSubscription(other.id, { principalId: bob.id, action: 'subscribe', expectedMembershipVersion: 0 }, attribution);
+    // Following a hidden task must not reveal it through the state or CLI filters.
+    store.updateTaskSubscription(hidden.id, { principalId: bob.id, action: 'subscribe', expectedMembershipVersion: 0 }, attribution);
+    for (const [args, ids] of [
+      [['--unassigned'], [unassigned.id]],
+      [['--owner', 'unassigned'], [unassigned.id]],
+      [['--owner', 'ALICE'], [other.id]],
+      [['--owner', 'user:alice'], [other.id]],
+      [['--owner', alice.id], [other.id]],
+      [['--owner', 'all', '--subscribed'], [urgent.id, normal.id, other.id]],
+      [['--subscribed'], [urgent.id, normal.id]],
+      [['--owner', 'all'], [urgent.id, normal.id, unassigned.id, other.id]],
+    ] as [string[], string[]][]) {
+      const filtered = await read(['tasks', ...args, '--json']);
+      assert.equal(filtered.code, 0, filtered.stderr);
+      assert.deepEqual(JSON.parse(filtered.stdout).map((task: { id: string }) => task.id), ids, args.join(' '));
+      assert.ok(!filtered.stdout.includes(hidden.id)); assert.ok(!filtered.stdout.includes(hidden.title));
+    }
+    for (const args of [['tasks', '--status', 'invalid'], ['tasks', '--order', 'invalid'], ['tasks', '--limit', '0'], ['tasks', '--limit', '1.5'], ['tasks', '--unassigned', '--owner', 'all'], ['tasks', '--owner', 'missing-user']]) {
       const invalid = await read(args); assert.equal(invalid.code, 1, args.join(' '));
     }
     for (const output of [open, resolved, limited, shown, denied]) assert.ok(!`${output.stdout}${output.stderr}`.includes(token.token));

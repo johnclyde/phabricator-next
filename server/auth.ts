@@ -3,12 +3,12 @@ import type { IncomingMessage } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AuthContext, AuthMode, AuthScope, AuthToken, PublicAccount, SessionState } from '../shared/auth.ts';
 import type { Audience, ObjectPolicy, Space } from '../shared/policy.ts';
-import type { Activity } from '../shared/types.ts';
+import type { Activity, ActorAttribution } from '../shared/types.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import { HttpError, string } from './validation.ts';
 
-export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; provisioning?: boolean; now?: () => number }
-export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number }
+export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
+export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number }
 type AccountRow = { id: string; username: string; display_name: string; disabled: number; salt: string; password_hash: string; password_scheme: string };
 type SessionRow = { id: string; account_id: string; context: string; expires_at: number };
 type TokenRow = { id: string; account_id: string; name: string; scopes: string; created_at: number; expires_at: number; revoked: number };
@@ -34,11 +34,13 @@ export class Auth {
   private readonly sessionCookie: string;
   private readonly challengeCookie: string;
   private readonly provisioning: boolean;
+  private readonly transferTaskOwners: AuthOptions['transferTaskOwners'];
   private deriving = 0;
   constructor(options: AuthOptions) {
     this.database = options.database;
     this.mode = options.mode;
     this.provisioning = options.provisioning ?? false;
+    this.transferTaskOwners = options.transferTaskOwners;
     this.basePath = normalizeBasePath(options.basePath);
     this.now = options.now ?? Date.now;
     this.database.exec(`
@@ -81,6 +83,10 @@ export class Auth {
   private meta(name: string): string | undefined { return (this.database.prepare('SELECT value FROM auth_meta WHERE name = ?').get(name) as { value: string } | undefined)?.value; }
   private requirePortablePolicies(): void {
     const localPrincipal = `local:${this.workspaceId}`;
+    if (this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entities'").get()
+      && this.database.prepare("SELECT 1 FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? LIMIT 1").get(localPrincipal)) {
+      throw new Error('Password authentication cannot be activated while task ownership references the local-only principal. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No task owners were reassigned.');
+    }
     const tables = [
       { name: 'policy_spaces', paths: ['$.view.principalIds', '$.edit.principalIds'] },
       { name: 'object_policies', paths: ['$.rules.view.principalIds', '$.rules.edit.principalIds', '$.rules.interact.principalIds'] },
@@ -286,7 +292,7 @@ export class Auth {
         if (!Number.isSafeInteger(version) || version < 1 || !Number.isSafeInteger(version + 1)) throw new HttpError(409, 'A policy has reached the supported version limit. No grants were transferred.');
         return version + 1;
       };
-      const result: LocalPolicyTransfer = { account: publicAccount(account), spaces: 0, objects: 0 };
+      const result: LocalPolicyTransfer = { account: publicAccount(account), spaces: 0, objects: 0, tasks: 0 };
       const requestId = randomUUID();
       const createdAt = new Date(this.now()).toISOString();
       const audit = (objectId: string) => {
@@ -321,6 +327,11 @@ export class Auth {
         const policy: ObjectPolicy = { ...original, version: nextVersion(original.version), rules: { view, edit, interact } };
         this.database.prepare('UPDATE object_policies SET data = ? WHERE object_id = ?').run(JSON.stringify(policy), row.object_id);
         audit(row.object_id); result.objects += 1;
+      }
+      if (this.database.prepare("SELECT 1 FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? LIMIT 1").get(localPrincipal)) {
+        if (!this.transferTaskOwners) throw new Error('Task ownership transfer requires the current accounts command. No grants or owners were transferred.');
+        result.tasks = this.transferTaskOwners(localPrincipal, account.id, { principalId: `operator:${this.workspaceId}`, displayName: 'Terminal operator', credentialId: null, requestId });
+        if (!Number.isSafeInteger(result.tasks) || result.tasks < 1 || this.database.prepare("SELECT 1 FROM entities WHERE kind = 'task' AND json_extract(data, '$.ownerId') = ? LIMIT 1").get(localPrincipal)) throw new Error('Task ownership transfer was incomplete. No grants or owners were transferred.');
       }
       if (result.spaces || result.objects) {
         const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name = 'epoch'").get() as { value: number }).value;

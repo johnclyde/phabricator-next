@@ -51,7 +51,7 @@ For hosted access, complete the authentication and object-policy requirements in
 | ID | Work | Acceptance criterion |
 | --- | --- | --- |
 | P301 | Users, projects, policies, Spaces and agent principals | Object access enforced consistently in reads, edits, search, model context and exports |
-| P302 | Tasks/workboards/custom fields and transactions | Partial: task detail pages, version-checked fields, immutable comments/transactions, directed dependencies, cycle prevention and parent status history. Assignment, subscriptions, configurable fields/forms, duplicates, workboards and batching remain open. See [task contracts](tasks.md). |
+| P302 | Tasks/workboards/custom fields and transactions | Partial: task detail pages, version-checked fields, ownership/authorship, upstream owner access, subscription preferences, immutable comments/transactions, directed dependencies, cycle prevention and parent status history. Notification delivery, configurable fields/forms, duplicates, workboards and batching remain open. See [task contracts](tasks.md). |
 | P303 | Git observation, browsing and Arcanist-compatible flow | Local Git fixtures prove revision ranges, patch application, rebases and safe land behavior |
 | P304 | Herald and build/review workers | Typed events, scoped actions, durable jobs, test evidence and configurable approval policies |
 | P305 | Conduit/import/export compatibility | Historical fixtures migrate without losing identities, versions, policies or discussion context |

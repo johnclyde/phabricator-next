@@ -482,3 +482,56 @@ test('discarding a task recovery record preserves a different draft subsequently
     assert.equal(client.quarantinedDrafts().length, 0);
   } finally { storage.close(); }
 });
+
+test('a committed owner handoff remains a success after known access loss, removes content and preserves unrelated recovery drafts', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity()));
+    client.reconcileAccess({ T1: access('T1'), T2: access('T2') }, 1, ['S1']);
+    client.writeStored('task:T1', { task: { title: 'Private task' }, accessEpoch: 1 });
+    client.writeStored('task:T1:subscriptions', { subscribers: ['Secret follower'], accessEpoch: 1 });
+    client.writeStored('task-draft:T1', { title: 'Unsaved title', expectedVersion: 1 });
+    client.writeStored('task-comment:T1', { body: 'Independent comment' });
+    client.writeStored('task-comment:T2', { body: 'Unrelated comment' });
+    let release!: (response: Response) => void;
+    globalThis.fetch = async (_path, options) => new Promise<Response>((resolve, reject) => { release = resolve; options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }); });
+    const pending = client.request('/api/tasks/T1', { method: 'PATCH', body: { ownerId: 'bob', expectedVersion: 1 } });
+    client.reconcileAccess({ T2: access('T2') }, 2, ['S1']);
+    release(Response.json({ id: 'T1', saved: true, accessLost: true, accessEpoch: 2, unexpectedContent: 'must not return' }));
+    assert.deepEqual(await pending, { id: 'T1', saved: true, accessLost: true, accessEpoch: 2 });
+    assert.equal(client.readStored('task:T1', null), null);
+    assert.equal(client.readStored('task:T1:subscriptions', null), null);
+    assert.deepEqual(new Set(client.quarantinedDrafts().map(item => item.key)), new Set(['task-draft:T1', 'task-comment:T1']));
+    assert.deepEqual(client.readStored('task-comment:T2', null), { body: 'Unrelated comment' });
+  } finally { globalThis.fetch = fetch; lockSession(); }
+});
+
+test('following permits a read-only viewer to change their own membership, with separate gates for other members', async () => {
+  const fetch = globalThis.fetch;
+  try {
+    const client = createWorkspaceClient(activateSession(identity()));
+    let sent = 0; globalThis.fetch = async () => { sent++; return Response.json({ accessEpoch: 1 }); };
+    client.reconcileAccess({ T1: access('T1', false, false) }, 1, ['S1']);
+    await client.request('/api/tasks/T1/subscriptions', { method: 'POST', body: { principalId: 'alice', action: 'subscribe', expectedMembershipVersion: 0 } });
+    await assert.rejects(client.request('/api/tasks/T1/subscriptions', { method: 'POST', body: { principalId: 'bob', action: 'subscribe', expectedMembershipVersion: 0 } }), withCode('ACTION_FORBIDDEN'));
+    client.reconcileAccess({ T1: access('T1', false, true) }, 1, ['S1']);
+    await client.request('/api/tasks/T1/subscriptions', { method: 'POST', body: { principalId: 'bob', action: 'subscribe', expectedMembershipVersion: 0 } });
+    await assert.rejects(client.request('/api/tasks/T1/subscriptions', { method: 'POST', body: { principalId: 'bob', action: 'unsubscribe', expectedMembershipVersion: 1 } }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(sent, 2);
+  } finally { globalThis.fetch = fetch; lockSession(); }
+});
+
+test('saved ownership operations are durably held instead of replaying access changes after reconnect', async () => {
+  const storage = localStorageFixture(); const fetch = globalThis.fetch;
+  try {
+    const client = storage.reopen();
+    const assignment = { ...queuedTask('T1'), body: { ownerId: null, expectedVersion: 1 } };
+    const creation: PendingMutation = { id: 'assigned-create', path: '/api/tasks', method: 'POST', body: { title: 'Assigned offline', ownerId: 'alice' }, label: 'Task', createdAt: '2026-10-10' };
+    client.writeStored('outbox', [assignment, creation, queuedTask('T2')]);
+    assert.deepEqual(client.readStored<PendingMutation[]>('outbox', []).map(item => item.id), ['T2']);
+    assert.equal(client.quarantinedDrafts().length, 2);
+    const reopened = storage.reopen(); let sent = 0; globalThis.fetch = async () => { sent++; return Response.json({}); };
+    await assert.rejects(reopened.request(assignment.path, { method: assignment.method, body: assignment.body, id: assignment.id, queued: true }), withCode('ACTION_FORBIDDEN'));
+    assert.equal(sent, 0); assert.equal(reopened.quarantinedDrafts().length, 2);
+  } finally { globalThis.fetch = fetch; storage.close(); }
+});

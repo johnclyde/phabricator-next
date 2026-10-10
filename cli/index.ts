@@ -14,7 +14,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- diff --title "Title" --kind paper FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
-  npm run arc -- tasks [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
+  npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- show P2|T1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
@@ -24,7 +24,9 @@ of text files as a complete snapshot; omitted files are removed in that version.
 export writes a JSON snapshot to stdout. --server defaults to
 http://127.0.0.1:4310 (or PHABRICATOR_URL); include any application path prefix.
 Hosted review is always explicit.
-tasks lists visible tasks (open by default); assignment filters are not yet supported.
+tasks lists your assigned open tasks by default. --owner all includes all visible
+owners; --unassigned selects unowned tasks. --subscribed selects tasks you follow.
+Use a principal ID or user:USERNAME to disambiguate reserved owner filter names.
 show T1 includes the current task, visible dependencies, and the first history page.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
@@ -40,6 +42,7 @@ async function main() {
       server: { type: 'string', default: process.env.PHABRICATOR_URL || 'http://127.0.0.1:4310' },
       version: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
       status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' },
+      owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -110,8 +113,21 @@ async function main() {
     const limit = values.limit === undefined ? undefined : Number(values.limit);
     if (limit !== undefined && (!/^[1-9]\d*$/.test(values.limit!) || !Number.isSafeInteger(limit))) throw new Error('--limit must be a positive integer.');
     const state = await request<AppState>('/api/state');
+    if (values.unassigned && values.owner) throw new Error('Use --unassigned or --owner, not both.');
+    const owner = values.unassigned ? 'unassigned' : values.owner || 'me';
+    let ownerId: string | null | undefined;
+    if (owner === 'me') ownerId = state.currentPrincipalId;
+    else if (owner === 'unassigned') ownerId = null;
+    else if (owner !== 'all') {
+      const username = owner.startsWith('user:') ? owner.slice(5) : owner;
+      ownerId = state.principals.find(account => account.username.toLowerCase() === username.toLowerCase() || account.id === owner)?.id;
+      if (!ownerId && state.tasks.some(task => task.ownerId === owner)) ownerId = owner;
+      if (!ownerId) throw new Error('Owner is not an available workspace account. Use a username, principal ID, me, all or unassigned.');
+    }
     const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
     const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? task.status === 'resolved' : task.status !== 'resolved'))
+      .filter(task => owner === 'all' || task.ownerId === ownerId)
+      .filter(task => !values.subscribed || state.followingTaskIds.includes(task.id))
       .sort((left, right) => (order === 'priority' ? ranks[right.priority] - ranks[left.priority] : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))
       .slice(0, limit);
     if (values.json) console.log(JSON.stringify(tasks, null, 2));

@@ -74,6 +74,31 @@ test('Space view is an outer boundary and Space editors have no object edit or c
   } finally { db.close(); }
 });
 
+test('task owners receive all object capabilities within their Space, while creators and other objects do not', () => {
+  const { db, policies } = database();
+  try {
+    db.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify({ ownerId: 'bob', authorId: 'carol' }), 'T1');
+    policies.setPolicy('T1', policyInput(1, 'S1', selected(), selected(), selected()), 'bob');
+    assert.deepEqual(policies.access('T1', 'bob'), { view: true, edit: true, interact: true, managePolicy: true });
+    assert.deepEqual(policies.describe('T1', 'bob').automatic, { kind: 'task-owner', principalId: 'bob' });
+    assert.match(policies.describe('T1', 'bob').interactLabel, /task owner/);
+    assert.equal(policies.access('T1', 'carol').view, false, 'creation does not grant permanent access');
+    db.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify({ ownerId: 'bob' }), 'W1');
+    policies.setPolicy('W1', policyInput(1, 'S1', selected('alice'), selected('alice'), selected('alice')), 'alice');
+    assert.equal(policies.access('W1', 'bob').view, false, 'owner behavior is specific to tasks');
+    const space = policies.createSpace({ name: 'Owner boundary', view: selected('alice', 'bob'), edit: selected('alice') }, 'alice');
+    policies.setPolicy('T1', policyInput(2, space.id, selected(), selected(), selected()), 'bob');
+    policies.updateSpace(space.id, { expectedVersion: 1, view: selected('alice') }, 'alice');
+    assert.equal(policies.access('T1', 'bob').view, false, 'ownership does not bypass the Space');
+    assert.throws(() => policies.describe('T1', 'bob'), { status: 404, code: 'OBJECT_UNAVAILABLE' });
+    policies.updateSpace(space.id, { expectedVersion: 2, view: selected('alice', 'bob') }, 'alice');
+    assert.equal(policies.access('T1', 'bob').edit, true);
+    db.prepare('UPDATE entities SET data = ? WHERE id = ?').run(JSON.stringify({ ownerId: 'carol' }), 'T1');
+    assert.equal(policies.access('T1', 'bob').view, false, 'ownership is read from the current task, not cached policy metadata');
+    assert.equal(policies.access('T1', 'carol').view, false, 'new owner remains outside the Space');
+  } finally { db.close(); }
+});
+
 test('view, edit and interact grants are distinct, with view required for every operation', () => {
   const { db, policies } = database();
   try {

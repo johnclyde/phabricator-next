@@ -70,8 +70,8 @@ test('task details retain structured edits, comments and attribution with optimi
   try {
     const task = await app.task('Initial task'); const path = `/api/tasks/${task.id}`;
     const initial = await app.detail(task.id);
-    assert.equal(task.version, 1); assert.equal(initial.history.transactions[0]!.kind, 'create');
-    assert.equal(initial.history.transactions[0]!.attribution?.principalId, app.alice.id);
+    assert.equal(task.version, 1); assert.equal(initial.history.transactions.filter(item => item.kind === 'create').length, 1);
+    assert.equal(initial.history.transactions.find(item => item.kind === 'create')!.attribution?.principalId, app.alice.id);
     assert.equal(initial.history.accessEpoch, initial.accessEpoch);
     const input = { expectedVersion: 1, title: 'Updated task', description: 'Preserve this exact text.\r\n😀', priority: 'high' };
     const changed = await app.request<Task>('bob', path, 'PATCH', input, 'edit-once');
@@ -208,11 +208,12 @@ test('historical task pagination uses only surviving stored transactions after a
   const app = await start();
   try {
     const source = await app.task('Paged source'); const hidden = await app.task('Old dependency'); const visible = await app.task('Visible dependency');
-    await app.depend(source.id, hidden.id);
+    const first = await app.depend(source.id, hidden.id);
+    const hiddenSequence = first.result.body.history.transactions.find(item => item.dependency?.taskId === hidden.id)!.sequence;
     for (let index = 0; index < 48; index++) await app.create('alice', `/api/tasks/${source.id}/comments`, { body: `Historical note ${index}.` });
     const saved = await app.depend(source.id, visible.id, 'bob', 'add', 'paged-dependency');
     const original = saved.result.body.history;
-    assert.equal(original.transactions.length, 50); assert.equal(original.nextBefore, 2);
+    assert.equal(original.transactions.length, 50); assert.equal(original.nextBefore, hiddenSequence);
     assert.equal(original.transactions.at(-1)?.dependency?.taskId, hidden.id);
     const stored = (app.store.database.prepare('SELECT body FROM idempotency WHERE key LIKE ?').get('%:paged-dependency') as { body: string }).body;
     await app.policy(hidden.id, { view: members(app.alice.id), edit: members(app.alice.id), interact: members(app.alice.id) });
@@ -220,10 +221,10 @@ test('historical task pagination uses only surviving stored transactions after a
     const replay = await app.request<TaskDetail>('bob', `/api/tasks/${source.id}/dependencies`, 'POST', saved.input, 'paged-dependency');
     assert.equal(replay.status, 200);
     assert.deepEqual(replay.body.history.transactions, original.transactions.filter(transaction => transaction.dependency?.taskId !== hidden.id));
-    assert.equal(replay.body.history.nextBefore, 3);
+    assert.equal(replay.body.history.nextBefore, hiddenSequence + 1);
     assert.equal(replay.body.history.transactions.at(-1)?.sequence, replay.body.history.nextBefore);
     const older = await app.request<TaskHistory>('bob', `/api/tasks/${source.id}/history?before=${replay.body.history.nextBefore}`);
-    assert.equal(older.status, 200); assert.deepEqual(older.body.transactions.map(transaction => transaction.sequence), [1]);
+    assert.equal(older.status, 200); assert.deepEqual(older.body.transactions.map(transaction => transaction.sequence), first.result.body.history.transactions.filter(transaction => transaction.sequence < hiddenSequence).map(transaction => transaction.sequence));
     assert.equal((app.store.database.prepare('SELECT body FROM idempotency WHERE key LIKE ?').get('%:paged-dependency') as { body: string }).body, stored);
   } finally { await app.close(); }
 });
