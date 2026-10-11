@@ -14,6 +14,7 @@ import type { WorkboardCardPage, WorkboardDetail } from '../shared/workboards';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories';
 import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, GitVersionImportInput, RepositoryDetail } from '../shared/repositories';
 import { paperCommand } from './paper-builds';
+import { fileCommand } from './files';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -39,6 +40,15 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- cancel-build P2 BUILD_ID [--request-id KEY] [--json]
   npm run arc -- retry-build P2 BUILD_ID [--request-id KEY] [--json]
   npm run arc -- download-build P2 BUILD_ID --artifact pdf|log|manifest|synctex|mapping --output NEW_FILE [--json]
+  npm run arc -- files [--name TEXT] [--author ID] [--status active|archived|all] [--before N] [--limit N] [--json]
+  npm run arc -- file F1 [--json]
+  npm run arc -- file-history F1 [--before N] [--limit N]
+  npm run arc -- upload-file PATH [--name NAME] [--alt-text TEXT] [--request-id KEY] [--json]
+  npm run arc -- upload-receipt REQUEST_ID [--json]
+  npm run arc -- edit-file F1 --version N [--name NAME] [--alt-text TEXT] [--status active|archived] [--request-id KEY]
+  npm run arc -- attach-file F1 --object P2 --mode attach|reference|detach --version N [--access-epoch N] [--request-id KEY]
+  npm run arc -- download-file F1 --output NEW_FILE
+  npm run arc -- set-figures P2 --assets-manifest FILE.json --version N --version-id ID --content-hash SHA256 --access-epoch N --message TEXT [--share-assets] [--request-id KEY]
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -80,6 +90,14 @@ is compiled on this computer by arc. The job continues after the command exits;
 build reads its status. retry-build creates a new job for the original exact
 source and toolchain; repeating its request ID recovers the same saved receipt.
 download-build verifies the artifact size and SHA-256 and never overwrites files.
+Files are immutable bytes with editable metadata. Uploads begin private; attach
+explicitly shares with the target object's readers within the File Space. Merely
+referencing a File grants no access. File uploads and downloads are bounded to
+16 MiB and verified by SHA-256. An upload receipt can recover a lost response.
+set-figures replaces the complete figure manifest on the exact selected source;
+each JSON entry pins path, fileId, sha256, bytes, mediaType. --share-assets explicitly
+shares new figures. Ordinary text diff preserves the selected version's figures.
+Removing figures does not detach earlier versions' grants or delete their bytes.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -131,6 +149,9 @@ async function main() {
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
+      name: { type: 'string' }, author: { type: 'string' }, 'alt-text': { type: 'string' },
+      object: { type: 'string' }, mode: { type: 'string' }, 'access-epoch': { type: 'string' },
+      'assets-manifest': { type: 'string' }, 'share-assets': { type: 'boolean' },
     },
   });
   const [command, ...args] = positionals;
@@ -174,6 +195,7 @@ async function main() {
     return Buffer.concat(chunks, size);
   };
   if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

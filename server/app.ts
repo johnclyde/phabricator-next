@@ -14,7 +14,8 @@ import { createStore, gitImportInput, gitVersionImportInput, type MutationRespon
 import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
-import { PolicyStore } from './policy.ts';
+import { PolicyStore, registerFilePolicy } from './policy.ts';
+import type { FileListQuery } from '../shared/files.ts';
 import { AccessLayer } from './access.ts';
 import { createGitObserver, type GitObserver } from './git.ts';
 import { PaperBuildService, type PaperRunner } from './paper-builds.ts';
@@ -56,15 +57,15 @@ function security(req: IncomingMessage, res: ServerResponse, configuredPort: num
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
 }
 
-async function body(req: IncomingMessage): Promise<unknown> {
+async function body(req: IncomingMessage, maximum = MAX_BODY): Promise<unknown> {
   if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) throw new HttpError(400, 'Mutation requests require Content-Type: application/json.');
   const length = req.headers['content-length'];
-  if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > MAX_BODY)) throw new HttpError(413, 'Request body exceeds 2 MB.');
+  if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > maximum)) throw new HttpError(413, 'Request body exceeds the route limit.');
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
     size += buffer.length;
-    if (size > MAX_BODY) throw new HttpError(413, 'Request body exceeds 2 MB.');
+    if (size > maximum) throw new HttpError(413, 'Request body exceeds the route limit.');
     chunks.push(buffer);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; }
@@ -120,7 +121,7 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
   const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
   res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
   res.setHeader('Cache-Control', pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
   res.statusCode = 200;
   if (req.method === 'HEAD') res.end(); else res.end(html ?? await readFile(file));
 }
@@ -212,6 +213,7 @@ export function createApp(options: AppOptions = {}): App {
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
     const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
     if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
+    if (path.startsWith('/api/files') && !rawKey) throw new HttpError(400, 'File mutations require an Idempotency-Key.');
     let versionImportRepository: string | undefined;
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
@@ -298,6 +300,25 @@ export function createApp(options: AppOptions = {}): App {
         return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis, attribution) }), authorize, present);
       }
       return store.mutate(key, fingerprint, () => {
+        const assetWrite = method === 'POST' && (path === '/api/revisions' || /^\/api\/revisions\/[DPL]\d+\/versions$/.test(path)) && input !== null && typeof input === 'object' && 'assets' in input;
+        const attachment = method === 'POST' ? /^\/api\/files\/(F\d+)\/attachments$/.exec(path) : null;
+        if (assetWrite || (attachment && input !== null && typeof input === 'object' && 'mode' in input && input.mode === 'attach')) {
+          if (!input || typeof input !== 'object' || !('expectedAccessEpoch' in input) || input.expectedAccessEpoch !== policies.epoch()) throw new HttpError(409, 'Access changed since this sharing preview. Reload and review the audience before saving.', 'ACCESS_EPOCH_CHANGED');
+        }
+        if (method === 'POST' && path === '/api/files') {
+          const file = store.files.upload(input, attribution);
+          registerFilePolicy(store.database, file.id, context.principalId);
+          store.database.prepare('INSERT INTO file_upload_receipts(principal_id, request_key, file_id) VALUES (?, ?, ?)').run(context.principalId, rawKey!, file.id);
+          store.event(file.id, 'uploaded', `Uploaded ${file.name}.`, attribution);
+          return { status: 201, body: file };
+        }
+        const file = /^\/api\/files\/(F\d+)$/.exec(path);
+        if (method === 'PATCH' && file) return { status: 200, body: store.files.update(file[1]!, input, attribution) };
+        if (attachment) {
+          const binding = store.files.setAttachment(attachment[1]!, input, attribution);
+          store.database.prepare("UPDATE policy_meta SET value = value + 1 WHERE name = 'epoch'").run();
+          return { status: 200, body: binding };
+        }
         if (method === 'POST' && ['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions'].includes(path)) {
           const { content } = access.creationInput(input);
           const created = path === '/api/projects' ? store.createProject(content, attribution)
@@ -317,7 +338,7 @@ export function createApp(options: AppOptions = {}): App {
           store.event(updated.id, 'updated', 'Updated Space settings and access rules.', attribution);
           return { status: 200, body: updated };
         }
-        const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
+        const policy = /^\/api\/policies\/((?:PROJ|R|T|W|F|[DPL])\d+)$/.exec(path);
         if (method === 'PUT' && policy) {
           const updated = policies.setPolicy(policy[1]!, input, context.principalId);
           store.event(updated.objectId, 'policy_updated', 'Updated access rules.', attribution);
@@ -438,6 +459,42 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const uploadReceipt = /^\/api\/files\/uploads\/([A-Za-z0-9._:-]{1,200})$/.exec(path);
+          if (uploadReceipt) {
+            if (url.search) throw new HttpError(400, 'Upload receipts do not accept query parameters.');
+            const row = store.database.prepare('SELECT file_id FROM file_upload_receipts WHERE principal_id = ? AND request_key = ?').get(context.principalId, uploadReceipt[1]!) as { file_id: string } | undefined;
+            if (!row) throw new HttpError(404, 'This upload has no committed receipt.', 'UPLOAD_RECEIPT_UNAVAILABLE');
+            access.require(row.file_id); send(res, 200, store.files.get(row.file_id)); return;
+          }
+          const attachmentRead = /^\/api\/files\/(F\d+)\/attachments\/((?:PROJ|R|T|W|[DPL])[1-9]\d{0,14})$/.exec(path);
+          if (attachmentRead) {
+            if (url.search) throw new HttpError(400, 'An attachment lookup does not accept query parameters.');
+            const fileId = attachmentRead[1]!; const targetId = attachmentRead[2]!; access.require(fileId);
+            if (!access.canView(targetId)) throw new HttpError(400, 'This attachment target is unavailable.');
+            send(res, 200, { attachment: store.files.attachment(fileId, targetId), accessEpoch: policies.epoch() }); return;
+          }
+          const file = /^\/api\/files(?:\/(F\d+)(?:\/(data|history|attachments))?)?$/.exec(path);
+          if (file) {
+            const names = !file[1] ? ['before', 'limit', 'name', 'authorId', 'status'] : file[2] === 'history' || file[2] === 'attachments' ? ['before', 'limit'] : [];
+            if ([...url.searchParams.keys()].some(name => !names.includes(name) || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Invalid file query.');
+            const number = (name: string) => { const value = url.searchParams.get(name); if (value !== null && !/^[1-9]\d*$/.test(value)) throw new HttpError(400, 'Invalid file page.'); return value === null ? undefined : Number(value); };
+            if (!file[1]) {
+              const query: FileListQuery = { before: number('before'), limit: number('limit') };
+              for (const name of ['name', 'authorId', 'status'] as const) if (url.searchParams.has(name)) Object.assign(query, { [name]: url.searchParams.get(name) });
+              send(res, 200, access.files(query)); return;
+            }
+            const id = file[1]; access.require(id);
+            if (file[2] === 'data') {
+              const metadata = store.files.get(id); const bytes = store.files.readBytes(id);
+              res.setHeader('Content-Type', metadata.mediaType); res.setHeader('Content-Length', bytes.byteLength);
+              res.setHeader('Content-Disposition', `attachment; filename="${id}"; filename*=UTF-8''${encodeURIComponent(metadata.originalName).replace(/['()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`);
+              res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox"); res.setHeader('Cache-Control', 'private, no-store');
+              res.setHeader('X-Content-SHA256', metadata.sha256); res.setHeader('X-Access-Epoch', policies.epoch()); res.end(bytes); return;
+            }
+            if (file[2] === 'history') { send(res, 200, { ...store.files.history(id, number('before'), number('limit'), objectId => access.canView(objectId)), accessEpoch: policies.epoch() }); return; }
+            if (file[2] === 'attachments') { send(res, 200, { ...store.files.attachments(id, { before: number('before'), limit: number('limit') }, objectId => access.canView(objectId)), accessEpoch: policies.epoch() }); return; }
+            send(res, 200, access.file(id)); return;
+          }
           const paper = /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)(?:\/(synctex)|\/artifacts\/([^/]+))?)?$/.exec(path);
           if (paper) {
             const id = paper[1]!; access.require(id);
@@ -532,7 +589,7 @@ export function createApp(options: AppOptions = {}): App {
           if (path === '/api/spaces') { send(res, 200, policies.spaces(context.principalId).map(space => access.space(space))); return; }
           const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
           if (space) { send(res, 200, access.space(policies.getSpace(space[1]!, context.principalId))); return; }
-          const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
+          const policy = /^\/api\/policies\/((?:PROJ|R|T|W|F|[DPL])\d+)$/.exec(path);
           if (policy) { send(res, 200, access.describe(policy[1]!)); return; }
           const subscriptions = /^\/api\/tasks\/(T\d+)\/subscriptions(?:\/([^/]+))?$/.exec(path);
           if (subscriptions) {
@@ -605,7 +662,7 @@ export function createApp(options: AppOptions = {}): App {
       const key = req.headers['idempotency-key'];
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
-      const input = await body(req);
+      const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : MAX_BODY);
       if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };

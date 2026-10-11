@@ -43,7 +43,9 @@ Successful runs publish a PDF, bounded compiler log, original compressed SyncTeX
 
 The mapping uses PDF points from the top-left of each page. It includes only paths and valid line numbers present in that exact source snapshot. Coordinates and page dimensions must be finite and bounded; compressed SyncTeX is limited to 16 MiB after decompression. At most 1,000 pages and 100,000 source positions are published. The first implementation rejects PDF rotation, non-default page crops and nonstandard UserUnit values instead of displaying incorrect source targets. Landscape pages with their actual width and height remain supported. Source positions describe TeX layout nodes, so a source line may map to several boxes; they are navigation aids rather than semantic sentence annotations.
 
-The current source model contains UTF-8 files. It supports multi-file TeX and BibTeX text, but does not yet provide immutable binary figure/font assets or arbitrary external tools. Those remain explicit parity gaps.
+The source model contains UTF-8 files and up to 100 immutable PNG/JPEG/PDF figure bindings from the Files library, limited to 16 MiB per asset and 64 MiB total. Text and figures share one portable namespace. The runner verifies actual byte lengths, SHA-256 and header-recognized media types before placing them in the read-only source mount; binary timestamps are fixed too. Figure builds use a schema-2 manifest with exact File identities; text-only builds retain schema 1. Font assets and arbitrary external tools remain gaps.
+
+Media recognition bounds image dimensions and avoids host-side decoding. It is not a complete codec validator: Tectonic can embed some malformed JPEGs without reporting an error. A successful compile proves that the pinned compiler produced the checked PDF, not that every embedded figure will decode in every viewer. Valid figure fixtures are decoded and checked in integration tests; malformed source still executes only inside the same resource-limited container.
 
 ## Verify a real runtime
 

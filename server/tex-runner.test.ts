@@ -5,14 +5,38 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { gzipSync } from 'node:zlib';
+import { deflateSync, gzipSync } from 'node:zlib';
 import type { SourceFile } from '../shared/types.ts';
+import type { RevisionAsset } from '../shared/files.ts';
+import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
 import { createTexRunner, normalizeTexLog, parseTexArchive, parseTexDiagnostics, parseTexMapping, parseTexPageGeometry, texRunnerFromEnvironment, validateTexInput, type TexRunnerInput } from './tex-runner.ts';
 
 const geometry = JSON.stringify({ pages: [{ object: '3 0 R' }], qpdf: [{}, { 'obj:3 0 R': { value: { '/Type': '/Page', '/MediaBox': [0, 0, 612, 792] } } }] });
 const files: SourceFile[] = [{ path: 'paper/main.tex', content: '\\documentclass{article}\n\\begin{document}Hello\\end{document}\n' }];
-function input(source: SourceFile[] = files, entrypoint = source[0]!.path): TexRunnerInput {
-  return { revisionId: 'R1', versionId: 'version-1', contentHash: createHash('sha256').update(JSON.stringify([...source].sort((a, b) => a.path < b.path ? -1 : 1).map(({ path, content }) => ({ path, content })))).digest('hex'), files: source, entrypoint };
+function input(source: SourceFile[] = files, entrypoint = source[0]!.path, assets: NonNullable<TexRunnerInput['assets']> = []): TexRunnerInput {
+  return { revisionId: 'R1', versionId: 'version-1', contentHash: createHash('sha256').update(sourceSnapshotCanonical(source, assets)).digest('hex'), files: source, ...(assets.length ? { assets } : {}), entrypoint };
+}
+const digest = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex');
+function binary(path: string, data: Buffer, mediaType: RevisionAsset['mediaType'], fileId = 'F1'): NonNullable<TexRunnerInput['assets']>[number] { return { path, fileId, sha256: digest(data), bytes: data.length, mediaType, data }; }
+function png(red = 220): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type), data]); let crc = 0xffffffff;
+    for (const byte of body) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1; }
+    const head = Buffer.alloc(4), tail = Buffer.alloc(4); head.writeUInt32BE(data.length); tail.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+    return Buffer.concat([head, body, tail]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(2, 0); header.writeUInt32BE(2, 4); header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.from([0, red, 30, 30, red, 30, 30, 0, red, 30, 30, red, 30, 30]))), chunk('IEND', Buffer.alloc(0))]);
+}
+// A two-pixel green JPEG fixture, encoded once; runtime verification needs no image generator.
+const jpeg = Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDKooor80P5CP/Z', 'base64');
+function vectorPdf(): Buffer {
+  const drawing = '0 0 0.8 rg 0 0 100 40 re f\n1 1 1 rg BT /F1 10 Tf 4 15 Td (Pinned vector figure) Tj ET\n';
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 40] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>', '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', `<< /Length ${drawing.length} >>\nstream\n${drawing}endstream`];
+  let pdf = '%PDF-1.4\n'; const offsets = [0];
+  for (const [index, object] of objects.entries()) { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; }
+  const xref = Buffer.byteLength(pdf); pdf += `xref\n0 ${offsets.length}\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf);
 }
 function tar(name: string, contents: string, type = '0'): Buffer {
   const header = Buffer.alloc(512); header.write(name); header.write('0000644', 100); header.write('0000000', 108); header.write('0000000', 116);
@@ -34,6 +58,28 @@ test('TeX input validation verifies exact immutable UTF-8 files, paths and entry
   assert.throws(() => validateTexInput(input([{ path: 'a.tex', content: '\ud800' }])), /UTF-8/);
   assert.throws(() => validateTexInput(input([{ path: 'a.tex', content: '' }, { path: 'a.tex/b', content: '' }])), /directory/);
   assert.throws(() => validateTexInput(input(files, 'missing.tex')), /entrypoint/);
+});
+
+test('binary snapshot identity preserves old hashes and binds exact sorted figure identities', () => {
+  const source = [{ path: 'z.tex', content: 'last' }, { path: 'a.tex', content: 'first' }];
+  const legacy = JSON.stringify([{ path: 'a.tex', content: 'first' }, { path: 'z.tex', content: 'last' }]);
+  assert.equal(sourceSnapshotCanonical(source), legacy); assert.equal(sourceSnapshotCanonical(source, []), legacy);
+  const assets = [binary('z.png', png(), 'image/png'), binary('a.jpg', jpeg, 'image/jpeg', 'F2')];
+  assert.equal(sourceSnapshotCanonical(source, assets), sourceSnapshotCanonical([...source].reverse(), [...assets].reverse()));
+  const canonical = JSON.parse(sourceSnapshotCanonical(source, assets)) as { format: string; assets: RevisionAsset[] };
+  assert.equal(canonical.format, 'phabricator.source.v2'); assert.deepEqual(canonical.assets.map(asset => asset.path), ['a.jpg', 'z.png']); assert.ok(!('data' in canonical.assets[0]!));
+  for (const replacement of [{ ...assets[0]!, fileId: 'F3' }, binary('z.png', png(221), 'image/png')]) assert.notEqual(sourceSnapshotCanonical(source, assets), sourceSnapshotCanonical(source, [replacement, assets[1]!]));
+});
+
+test('text and binary assets share a safe namespace and independently bounded immutable bytes', () => {
+  const good = binary('paper/figures/chart.png', png(), 'image/png'); validateTexInput(input(files, files[0]!.path, [good]));
+  for (const path of ['paper/main.tex', 'paper', 'paper/main.tex/figure.png', 'Paper/figure.png', '../figure.png', 'paper/../figure.png', 'paper/figures\\chart.png']) assert.throws(() => validateSourceSnapshot(files, [{ ...good, path }]), /paths|directory|collide/);
+  for (const [left, right] of [['é.png', 'e\u0301.png'], ['Chart.png', 'chart.png'], ['figures/one.png', 'Figures/two.png'], ['straße.png', 'strasse.png']]) assert.throws(() => validateSourceSnapshot(files, [{ ...good, path: left! }, { ...good, path: right! }]), /collide/);
+  for (const replacement of [{ ...good, data: png(221) }, { ...good, bytes: good.bytes + 1 }, { ...good, mediaType: 'image/jpeg' as const }, { ...good, sha256: '0'.repeat(64) }]) assert.throws(() => validateTexInput(input(files, files[0]!.path, [replacement])), /immutable identity/);
+  assert.throws(() => validateSourceSnapshot(files, [{ ...good, bytes: 16 * 1024 * 1024 + 1 }]), /identities/);
+  assert.throws(() => validateSourceSnapshot(files, Array.from({ length: 101 }, (_, index) => ({ ...good, path: `${index}.png` }))), /count/);
+  assert.throws(() => validateSourceSnapshot(files, Array.from({ length: 5 }, (_, index) => ({ ...good, path: `${index}.png`, bytes: 16 * 1024 * 1024 }))), /byte limit/);
+  assert.throws(() => validateTexInput({ ...input(files, files[0]!.path, [good]), contentHash: input().contentHash }), /digest/);
 });
 
 test('compiler archive cannot extract symlinks, traversal, duplicates or truncated data', () => {
@@ -77,6 +123,59 @@ test('structured page geometry rejects metadata spoofing, rotation, crop and non
 });
 
 const enabled = Boolean(process.env.PHABRICATOR_TEX_INTEGRATION);
+test('real isolated compiler embeds exact PNG, JPEG and PDF figures with reproducible asset manifests', { skip: !enabled, timeout: 240_000 }, async context => {
+  const runner = texRunnerFromEnvironment(); assert.ok(runner);
+  const source = [{ path: 'paper/main.tex', content: '\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\nPinned PNG: \\includegraphics[width=30pt]{figures/chart.png}\nPinned JPEG: \\includegraphics[width=30pt]{figures/photo.jpg}\n\\includegraphics[width=150pt]{figures/vector.pdf}\nFigure date: \\filemoddate{figures/chart.png}.\n\\end{document}\n' }];
+  const assets = [binary('paper/figures/chart.png', png(), 'image/png'), binary('paper/figures/photo.jpg', jpeg, 'image/jpeg', 'F2'), binary('paper/figures/vector.pdf', vectorPdf(), 'application/pdf', 'F3')];
+  const request = input(source, 'paper/main.tex', assets);
+  const first = await runner.run(request, context.signal); assert.equal(first.success, true, JSON.stringify({ error: first.error, diagnostics: first.diagnostics, log: Buffer.from(first.artifacts.find(a => a.kind === 'log')?.data ?? []).toString() }));
+  const second = await runner.run(request, context.signal); assert.equal(second.success, true, second.error ?? '');
+  for (const kind of ['pdf', 'mapping', 'manifest'] as const) assert.equal(digest(first.artifacts.find(a => a.kind === kind)!.data), digest(second.artifacts.find(a => a.kind === kind)!.data), `${kind} must reproduce with identical binary assets`);
+  const manifest = JSON.parse(Buffer.from(first.artifacts.find(a => a.kind === 'manifest')!.data).toString()) as { schema: number; assets: RevisionAsset[] };
+  assert.equal(manifest.schema, 2); assert.deepEqual(manifest.assets, assets.map(({ data: _data, ...asset }) => asset));
+  const { getDocument, OPS } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const task = getDocument({ data: Uint8Array.from(first.artifacts.find(a => a.kind === 'pdf')!.data), useWorkerFetch: false, useWasm: false });
+  try {
+    const document = await task.promise, page = await document.getPage(1), operators = await page.getOperatorList(), text = await page.getTextContent();
+    const images = operators.fnArray.flatMap((operation, index) => operation === OPS.paintImageXObject ? [page.objs.get(operators.argsArray[index][0]) as { width: number; height: number; data: Uint8Array }] : []);
+    assert.equal(images.length, 2, 'The PDF contains both raster figures as image painting operations.');
+    assert.deepEqual(images.map(image => [image.width, image.height]), [[2, 2], [2, 2]]);
+    assert.deepEqual(Array.from(images[0]!.data), Array.from({ length: 4 }, () => [220, 30, 30]).flat(), 'Decoded PNG pixels match the pinned input.');
+    assert.ok(images[1]!.data.every((value, index) => Math.abs(value - [20, 180, 70][index % 3]!) <= 2), 'Decoded JPEG pixels match the pinned input within JPEG rounding.');
+    assert.ok(text.items.some(item => 'str' in item && item.str.includes('Pinned vector figure')), 'The included PDF contributes its actual vector text.');
+    assert.ok(text.items.some(item => 'str' in item && item.str.includes('20000101000000')), 'Binary source file dates are fixed.');
+  } finally { await task.destroy(); }
+  const changed = await runner.run(input(source, 'paper/main.tex', [binary(assets[0]!.path, png(221), 'image/png'), ...assets.slice(1)]), context.signal);
+  assert.equal(changed.success, true, changed.error ?? ''); assert.notEqual(digest(first.artifacts.find(a => a.kind === 'pdf')!.data), digest(changed.artifacts.find(a => a.kind === 'pdf')!.data));
+  if (process.env.PHABRICATOR_TEX_FIXTURE_DIR) {
+    const directory = resolve(process.env.PHABRICATOR_TEX_FIXTURE_DIR, 'figures'); await mkdir(directory, { recursive: true });
+    for (const artifact of first.artifacts) await writeFile(resolve(directory, artifact.name), artifact.data);
+  }
+});
+
+test('real isolated compiler rejects corrupt PNG and PDF bodies without publishing a partial PDF', { skip: !enabled, timeout: 100_000 }, async context => {
+  const runner = texRunnerFromEnvironment(); assert.ok(runner);
+  for (const asset of [binary('broken.png', png().subarray(0, 33), 'image/png'), binary('broken.pdf', vectorPdf().subarray(0, 40), 'application/pdf')]) {
+    const source = [{ path: 'main.tex', content: `\\documentclass{article}\\usepackage{graphicx}\\begin{document}\\includegraphics{${asset.path}}\\end{document}` }];
+    const request = input(source, 'main.tex', [asset]);
+    validateTexInput(request); // Header recognition is intentionally not an image decoder.
+    const result = await runner.run(request, context.signal); assert.equal(result.success, false, asset.path); assert.match(result.error ?? '', /TeX compilation failed/); assert.ok(!result.artifacts.some(artifact => ['pdf', 'mapping'].includes(artifact.kind)));
+  }
+});
+
+test('real Tectonic may embed a header-valid damaged JPEG without certifying its raster decodability', { skip: !enabled, timeout: 100_000 }, async context => {
+  const runner = texRunnerFromEnvironment(); assert.ok(runner);
+  const source = [{ path: 'main.tex', content: '\\documentclass{article}\\usepackage{graphicx}\\begin{document}\\includegraphics{damaged.jpg}\\end{document}' }];
+  const asset = binary('damaged.jpg', jpeg.subarray(0, 200), 'image/jpeg');
+  const result = await runner.run(input(source, 'main.tex', [asset]), context.signal);
+  // Tectonic copies JPEG compressed bytes without decoding them. This is a known
+  // limitation, not a test that the damaged image renders or has been repaired.
+  assert.equal(result.success, true, result.error ?? '');
+  assert.ok(result.artifacts.reduce((total, item) => total + item.data.length, 0) < 24 * 1024 * 1024);
+  const manifest = JSON.parse(Buffer.from(result.artifacts.find(item => item.kind === 'manifest')!.data).toString()) as { assets: RevisionAsset[] };
+  assert.equal(manifest.assets[0]!.sha256, asset.sha256, 'The output still reports the exact supplied damaged input.');
+});
+
 test('real isolated compiler handles nested files, bibliography, deterministic PDF/map and diagnostics', { skip: !enabled, timeout: 240_000 }, async () => {
   const runner = texRunnerFromEnvironment(); assert.ok(runner);
   const fixture: SourceFile[] = [

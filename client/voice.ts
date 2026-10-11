@@ -7,21 +7,21 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
   return project.id.toLowerCase() === exact || project.name.toLowerCase() === exact || projectDisplayName(project).toLowerCase() === exact || Boolean(slug && (project.primarySlug === slug || (project.aliases || []).includes(slug)));
 }
 
-export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces';
+export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
 export type VoiceCommand = { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
-  const aliases: Record<string, WorkspaceView> = { home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces' };
+  const aliases: Record<string, WorkspaceView> = { home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files' };
   const destination = text.replace(/^(open|show|go to)\s+(the\s+)?/, '');
   if (aliases[destination]) return { type: 'navigate', view: aliases[destination] };
-  const object = text.match(/^(?:open|show|go to)\s+(?:the\s+)?([dplwtr])\s*([1-9]\d*)$/);
+  const object = text.match(/^(?:open|show|go to)\s+(?:the\s+)?([dplwtrf])\s*([1-9]\d*)$/);
   if (object && Number.isSafeInteger(Number(object[2]))) return { type: 'openObject', id: `${object[1].toUpperCase()}${object[2]}` };
-  const namedObject = text.match(/^(?:open|show|go to)\s+(?:the\s+)?(wiki(?: page)?|paper|draft|code revision|task|repository)\s*([1-9]\d*)$/);
+  const namedObject = text.match(/^(?:open|show|go to)\s+(?:the\s+)?(wiki(?: page)?|paper|draft|code revision|task|repository|file)\s*([1-9]\d*)$/);
   if (namedObject && Number.isSafeInteger(Number(namedObject[2]))) {
-    const prefix = namedObject[1].startsWith('wiki') ? 'W' : namedObject[1] === 'paper' ? 'P' : namedObject[1] === 'draft' ? 'L' : namedObject[1] === 'task' ? 'T' : namedObject[1] === 'repository' ? 'R' : 'D';
+    const prefix = namedObject[1].startsWith('wiki') ? 'W' : namedObject[1] === 'paper' ? 'P' : namedObject[1] === 'draft' ? 'L' : namedObject[1] === 'task' ? 'T' : namedObject[1] === 'repository' ? 'R' : namedObject[1] === 'file' ? 'F' : 'D';
     return { type: 'openObject', id: `${prefix}${namedObject[2]}` };
   }
   const project = original.match(/^(?:show|open) tasks (?:in|tagged with) project (.+)$/i);

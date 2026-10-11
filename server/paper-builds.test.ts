@@ -9,6 +9,9 @@ import type { AddressInfo } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { IncomingMessage } from 'node:http';
 import type { PaperBuild, PaperBuildDetail, PaperBuildInput, PaperBuildPage } from '../shared/paper-builds.ts';
+import type { FileRecord, RevisionAsset } from '../shared/files.ts';
+import type { RevisionDetail } from '../shared/types.ts';
+import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
 import { createApp } from './app.ts';
 import { createAuth } from './auth.ts';
 import { Store } from './store.ts';
@@ -29,8 +32,14 @@ function success(): Awaited<ReturnType<PaperRunner['run']>> {
 }
 function controlled(abortable=true) {
   const calls: {input:Parameters<PaperRunner['run']>[0];signal:AbortSignal;finish:(value:Awaited<ReturnType<PaperRunner['run']>>)=>void}[]=[];
-  const runner:PaperRunner={toolchain,run(input,signal){const result=deferred<Awaited<ReturnType<PaperRunner['run']>>>();calls.push({input,signal,finish:value=>{const manifest=value.artifacts.find(item=>item.kind==='manifest');if(manifest && Buffer.from(manifest.data).toString('utf8')===JSON.stringify({testDouble:true}))manifest.data=Buffer.from(JSON.stringify({schema:1,revisionId:input.revisionId,versionId:input.versionId,contentHash:input.contentHash,entrypoint:input.entrypoint,toolchain,files:[...input.files].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0).map(file=>({path:file.path,sha256:createHash('sha256').update(file.content).digest('hex'),bytes:Buffer.byteLength(file.content)})),artifacts:value.artifacts.filter(item=>item.kind!=='manifest').map(item=>({kind:item.kind,sha256:createHash('sha256').update(item.data).digest('hex'),bytes:item.data.byteLength})).sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:0)}));result.resolve(value);}});if(abortable)signal.addEventListener('abort',()=>result.resolve({success:false,artifacts:[],diagnostics:[],error:'Test runner aborted.'}),{once:true});return result.promise;}};
+  const runner:PaperRunner={toolchain,run(input,signal){const result=deferred<Awaited<ReturnType<PaperRunner['run']>>>();calls.push({input,signal,finish:value=>{const manifest=value.artifacts.find(item=>item.kind==='manifest');if(manifest && Buffer.from(manifest.data).toString('utf8')===JSON.stringify({testDouble:true}))manifest.data=Buffer.from(JSON.stringify(compilerManifest(input,value)));result.resolve(value);}});if(abortable)signal.addEventListener('abort',()=>result.resolve({success:false,artifacts:[],diagnostics:[],error:'Test runner aborted.'}),{once:true});return result.promise;}};
   return{runner,calls};
+}
+function compilerManifest(input:Parameters<PaperRunner['run']>[0],result:Awaited<ReturnType<PaperRunner['run']>>) {
+  return {schema:input.assets?.length?2:1,revisionId:input.revisionId,versionId:input.versionId,contentHash:input.contentHash,entrypoint:input.entrypoint,toolchain,
+    files:[...input.files].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0).map(file=>({path:file.path,sha256:createHash('sha256').update(file.content).digest('hex'),bytes:Buffer.byteLength(file.content)})),
+    ...(input.assets?.length?{assets:[...input.assets].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0).map(({path,fileId,sha256,bytes,mediaType})=>({path,fileId,sha256,bytes,mediaType}))}:{}),
+    artifacts:result.artifacts.filter(item=>item.kind!=='manifest').map(item=>({kind:item.kind,sha256:createHash('sha256').update(item.data).digest('hex'),bytes:item.data.byteLength})).sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:0)};
 }
 async function until(predicate:()=>boolean) {for(let i=0;i<200;i++){if(predicate())return;await delay(10);}assert.fail('Timed out waiting for paper build state.');}
 async function start(runner:PaperRunner|null=controlled().runner) {
@@ -133,7 +142,7 @@ test('invalid compiler artifacts roll back publication as one transaction, and g
 
 /** Historical fixture uses only the schema14 table definitions, never relabels a current Store. */
 function oldSchema(path:string) {
-  const db=new DatabaseSync(path);db.exec(`CREATE TABLE entities(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL);CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL);CREATE TABLE thread_preferences(thread_id TEXT NOT NULL,principal_id TEXT NOT NULL,collapsed INTEGER NOT NULL,version INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(thread_id,principal_id));PRAGMA user_version=14;`);
+  const db=new DatabaseSync(path);db.exec(`CREATE TABLE sequences(name TEXT PRIMARY KEY,value INTEGER NOT NULL);CREATE TABLE entities(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL);CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL);CREATE TABLE thread_preferences(thread_id TEXT NOT NULL,principal_id TEXT NOT NULL,collapsed INTEGER NOT NULL,version INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(thread_id,principal_id));PRAGMA user_version=14;`);
   db.prepare('INSERT INTO entities VALUES(?,?,?)').run('P1','revision','{ "old" : "preserve raw bytes" }');db.prepare('INSERT INTO versions VALUES(?,?,?,?)').run('v1','P1',1,'{ "immutable" : true }');db.prepare('INSERT INTO thread_preferences VALUES(?,?,?,?,?)').run('thread','alice',1,2,'2024-01-01');const rows=['entities','versions','thread_preferences'].map(table=>db.prepare(`SELECT * FROM ${table}`).all());db.close();return rows;
 }
 test('schema15 adds empty job/artifact storage without rewriting schema14 evidence and rolls failed migrations back',()=>{
@@ -141,7 +150,7 @@ test('schema15 adds empty job/artifact storage without rewriting schema14 eviden
   try{
     const exec=DatabaseSync.prototype.exec;try{DatabaseSync.prototype.exec=function(sql:string){if(sql==='PRAGMA user_version = 15')throw new Error('Injected migration failure');return exec.call(this,sql);};assert.throws(()=>new Store({path}),/Injected migration failure/);}finally{DatabaseSync.prototype.exec=exec;}
     const db=new DatabaseSync(path);assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,14);assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='paper_builds'").get(),undefined);db.close();
-    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,15);assert.deepEqual(['entities','versions','thread_preferences'].map(table=>store!.database.prepare(`SELECT * FROM ${table}`).all()),old);assert.deepEqual(store.database.prepare('SELECT * FROM paper_builds').all(),[]);assert.deepEqual(store.database.prepare('SELECT * FROM paper_build_artifacts').all(),[]);
+    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,16);assert.deepEqual(['entities','versions','thread_preferences'].map(table=>store!.database.prepare(`SELECT * FROM ${table}`).all()),old);assert.deepEqual(store.database.prepare('SELECT * FROM paper_builds').all(),[]);assert.deepEqual(store.database.prepare('SELECT * FROM paper_build_artifacts').all(),[]);
   }finally{store?.close();rmSync(directory,{recursive:true,force:true});}
 });
 
@@ -187,4 +196,45 @@ test('large bounded source maps validate against a precomputed source-line index
       const build=store.transaction(()=>service.submit(detail.revision.id,input,context));service.tick();const result=success();if(!valid)points[points.length-1]!.line=10_001;result.artifacts.find(item=>item.kind==='mapping')!.data=Buffer.from(JSON.stringify({origin:'top-left',units:'pt',pages:[{page:1,width:612,height:792}],points}));fake.calls.at(-1)!.finish(result);await until(()=>service.get(detail.revision.id,build.id,context).finishedAt!==null);const saved=service.get(detail.revision.id,build.id,context);assert.equal(saved.status,valid?'succeeded':'failed');assert.equal(saved.artifacts.length,valid?5:0);
     }
   }finally{await service.close();store.close();}
+});
+
+async function addFigure(app:Awaited<ReturnType<typeof start>>, marker:string) {
+  const bytes=Buffer.from(`%PDF-1.4\n${marker}\n`); // A storage fixture, never passed to a real compiler.
+  const uploaded=await app.request<FileRecord>('/api/files','POST',{name:'figure.pdf',bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),dataBase64:bytes.toString('base64')},'alice',`upload-${marker}`);
+  assert.equal(uploaded.status,201,JSON.stringify(uploaded.body));const file=uploaded.body;
+  const before=app.store.detail(app.id),current=before.versions.at(-1)!;
+  const asset:RevisionAsset={path:'figures/figure.pdf',fileId:file.id,sha256:file.sha256,bytes:file.bytes,mediaType:'application/pdf'};
+  const updated=await app.request<RevisionDetail>(`/api/revisions/${app.id}/versions`,'POST',{files:current.files,assets:[asset],expectedVersion:current.number,expectedVersionId:current.id,expectedContentHash:current.contentHash,expectedAccessEpoch:app.policies.epoch(),shareAssets:true,message:'Pin the exact figure'},'alice',`attach-${marker}`);
+  assert.equal(updated.status,201,JSON.stringify(updated.body));const version=updated.body.versions.at(-1)!;
+  return {file,asset,bytes,version,input:{...app.input,versionId:version.id,contentHash:version.contentHash}};
+}
+
+test('binary build snapshots resolve exact historical bytes and publish schema2 manifests after later figure replacement',async()=>{
+  const fake=controlled();const app=await start(fake.runner);
+  try {
+    const first=await addFigure(app,'original');
+    assert.equal(first.version.contentHash,createHash('sha256').update(sourceSnapshotCanonical(first.version.files,[first.asset])).digest('hex'));
+    const made=await app.request<PaperBuild>(app.route,'POST',first.input,'bob','first-figure-build');assert.equal(made.status,201);await until(()=>fake.calls.length===1);
+    assert.deepEqual(fake.calls[0]!.input.assets?.map(({data,...asset})=>asset),[first.asset]);assert.deepEqual(Buffer.from(fake.calls[0]!.input.assets![0]!.data),first.bytes);
+    const second=await addFigure(app,'replacement');assert.notEqual(second.version.contentHash,first.version.contentHash);
+    fake.calls[0]!.finish(success());await until(()=>app.get(made.body.id).status==='succeeded');
+    const manifest=await app.request<{schema:number;assets:RevisionAsset[]}>(`${app.route}/${made.body.id}/artifacts/manifest`);assert.equal(manifest.body.schema,2);assert.deepEqual(manifest.body.assets,[first.asset]);
+    const retry=await app.request<PaperBuild>(`${app.route}/${made.body.id}/retry`,'POST',{},'bob','old-figure-retry');assert.equal(retry.status,201);await until(()=>fake.calls.length===2);assert.deepEqual(Buffer.from(fake.calls[1]!.input.assets![0]!.data),first.bytes);fake.calls[1]!.finish(success());await until(()=>app.get(retry.body.id).status==='succeeded');
+    const forged=await app.request<PaperBuild>(app.route,'POST',second.input,'bob','forged-figure-manifest');await until(()=>fake.calls.length===3);const result=success();const wrong=compilerManifest(fake.calls[2]!.input,result);wrong.assets![0]!.sha256=first.asset.sha256;result.artifacts.find(item=>item.kind==='manifest')!.data=Buffer.from(JSON.stringify(wrong));fake.calls[2]!.finish(result);await until(()=>app.get(forged.body.id).status==='failed');assert.deepEqual(app.get(forged.body.id).artifacts,[]);
+  } finally {await app.close();}
+});
+
+test('figure Space revocation fences running and queued builds and hides already published historical artifacts',async()=>{
+  const fake=controlled(false);const app=await start(fake.runner);
+  try {
+    const figure=await addFigure(app,'permission-figure');
+    const done=await app.request<PaperBuild>(app.route,'POST',figure.input,'bob','published-figure');await until(()=>fake.calls.length===1);fake.calls[0]!.finish(success());await until(()=>app.get(done.body.id).status==='succeeded');
+    const running=await app.request<PaperBuild>(app.route,'POST',figure.input,'bob','running-figure');const other=await app.request<PaperBuild>(app.route,'POST',figure.input,'bob','other-figure');await until(()=>fake.calls.length===3);
+    const queued=await app.request<PaperBuild>(app.route,'POST',figure.input,'bob','queued-figure');assert.equal(app.get(queued.body.id).status,'queued');
+    const space=app.policies.createSpace({name:'Private figure source',view:members(app.alice.id),edit:members(app.alice.id)},app.alice.id);app.policy(figure.file.id,{spaceId:space.id},app.alice.id);
+    fake.calls[1]!.finish(success());fake.calls[2]!.finish(success());await until(()=>[running,other,queued].every(item=>app.get(item.body.id).status==='failed'));assert.equal(fake.calls.length,3,'Hidden queued figures never reach the worker');
+    for(const item of [running,other,queued])assert.deepEqual(app.get(item.body.id).artifacts,[]);
+    for(const suffix of ['',`/${done.body.id}`,`/${done.body.id}/synctex`,...['pdf','manifest','log','mapping','synctex'].map(kind=>`/${done.body.id}/artifacts/${kind}`)])assert.equal((await app.request(app.route+suffix,'GET',undefined,'bob')).status,404,suffix);
+    assert.equal((await app.request(app.route,'POST',figure.input,'bob','published-figure')).status,404,'Replay must still reauthorize all historical figures');
+  } finally {for(const call of fake.calls)call.finish({success:false,artifacts:[],diagnostics:[],error:'test cleanup'});await app.close();}
 });

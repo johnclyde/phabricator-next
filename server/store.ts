@@ -1,5 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { initializePaperBuilds } from './paper-builds.ts';
+import { FileStore } from './files.ts';
+import { migrateFiles } from './files-migration.ts';
+import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
+import type { FileRecord, RevisionAsset } from '../shared/files.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -17,8 +21,8 @@ import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from '
 import type { TaskColumnMove, WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardBulkMoveReceipt, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
 import type { DiscussionPreferences, SetThreadPreferenceInput, ThreadPreference } from '../shared/discussion.ts';
 
-type Entity = Project | Repository | Revision | Task | WikiDocument;
-type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
+type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord;
+type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file';
 export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
 export interface StoreOptions { path?: string }
@@ -47,14 +51,14 @@ export function gitVersionImportInput(input: unknown): GitVersionImportInput {
   return { commitId: data.commitId, expectedVersion: integer(data.expectedVersion, 'expectedVersion'), expectedVersionId: string(data.expectedVersionId, 'Expected version ID', 100), expectedContentHash, message: string(data.message, 'Message', 10_000) };
 }
 
-export function contentHash(sourceFiles: SourceFile[]): string {
-  const canonical = [...sourceFiles].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map(({ path, content }) => ({ path, content }));
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] = []): string {
+  return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets)).digest('hex');
 }
 
 export class Store {
   readonly database: DatabaseSync;
   readonly fresh: boolean;
+  readonly files: FileStore;
   private taskProjectsReady = false;
   private projects: ProjectStore;
   private workboards?: WorkboardStore;
@@ -64,7 +68,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 15) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 16) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -249,6 +253,11 @@ export class Store {
       try { this.transaction(() => { initializePaperBuilds(this.database); this.database.exec('PRAGMA user_version = 15'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 16) {
+      try { migrateFiles(this.database); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.files = new FileStore(this.database);
     this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
     this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id), changed: (project, created, attribution) => this.workboards!.projectChanged(project, created, attribution) });
   }
@@ -338,7 +347,7 @@ export class Store {
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
+    return { files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
     return this.projects.create(input, attribution);
@@ -786,7 +795,7 @@ export class Store {
     return { document: this.get<WikiDocument>('document', id), history: this.documentHistory(id), activity: this.activities(id) };
   }
   createRevision(input: unknown, attribution?: ActorAttribution): RevisionDetail {
-    return this.createRevisionRecord(input, attribution);
+    return this.discussionMutation(() => this.createRevisionRecord(input, attribution));
   }
   /** Only the verified server collector may supply Git provenance. */
   createRevisionFromGit(repositoryId: string, input: unknown, snapshot: GitImportSnapshot, attribution?: ActorAttribution): RevisionDetail {
@@ -817,8 +826,9 @@ export class Store {
     const data = gitVersionImportInput(input); const detail = this.requireVersion(id, data.expectedVersion);
     if (!detail.revision.repositoryId) throw new HttpError(400, 'This revision is not linked to a repository.', 'GIT_IMPORT_UNLINKED');
     const current = detail.versions.find(version => version.number === detail.revision.currentVersion);
-    const actualHash = current ? contentHash(current.files) : null;
+    const actualHash = current ? contentHash(current.files, current.assets) : null;
     if (!current || current.revisionId !== id || current.id !== data.expectedVersionId || actualHash !== data.expectedContentHash || actualHash !== current.contentHash) throw new HttpError(409, 'The selected current source does not match this revision. Reload before importing.');
+    if (current.assets?.length) throw new HttpError(409, 'A Git text-tree import cannot replace a version containing figures. Explicitly remove the figures in a new version before importing.', 'GIT_IMPORT_ASSETS');
     if (!Number.isSafeInteger(detail.revision.currentVersion + 1)) throw new HttpError(409, 'This revision has reached the supported version limit.');
     return detail;
   }
@@ -834,15 +844,38 @@ export class Store {
     });
   }
   private createRevisionRecord(input: unknown, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionDetail {
-    const data = object(input, ['title', 'summary', 'kind', 'files', 'repositoryId', 'projectId']);
+    const data = object(input, ['title', 'summary', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId']);
     const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
     const source = files(data.files);
+    const assets = this.sourceAssets(source, data.assets ?? [], []);
     const now = new Date().toISOString();
     const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
-    this.save('revision', revision); this.saveVersion(revision, source, 'Initial version', attribution, gitSource); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
+    this.save('revision', revision); this.shareSourceAssets(revision.id, assets, [], data.shareAssets, attribution);
+    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
   }
-  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionVersion {
-    const version: RevisionVersion = { ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source), createdAt: new Date().toISOString() };
+  private sourceAssets(source: SourceFile[], input: unknown, previous: RevisionAsset[]): RevisionAsset[] {
+    const resolved = this.files.resolveAssets(input);
+    const assets = resolved.map(({ data: _bytes, ...asset }) => asset);
+    const known = new Set(previous.map(asset => asset.fileId));
+    for (const asset of assets) if (!known.has(asset.fileId) && this.files.get(asset.fileId).status === 'archived') throw new HttpError(409, 'Archived files cannot be added to a new figure binding.');
+    // Preserve legacy text-only namespaces. Combined source must be portable
+    // across the browser, CLI, and isolated compiler filesystem.
+    if (assets.length) try { validateSourceSnapshot(source, assets); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid source paths.'); }
+    return assets;
+  }
+  private shareSourceAssets(id: string, assets: RevisionAsset[], previous: RevisionAsset[], share: unknown, attribution?: ActorAttribution): void {
+    const known = new Set(previous.map(asset => asset.fileId));
+    for (const fileId of new Set(assets.map(asset => asset.fileId))) {
+      if (known.has(fileId) && share !== true) continue;
+      const binding = this.files.attachment(fileId, id);
+      if (binding?.mode === 'attach') continue;
+      if (share !== true || !attribution) throw new HttpError(400, 'Explicitly share new figures with this revision before saving.');
+      this.files.setAttachment(fileId, { objectId: id, mode: 'attach', expectedVersion: binding?.version ?? 0 }, attribution);
+      this.database.prepare("UPDATE policy_meta SET value = value + 1 WHERE name = 'epoch'").run();
+    }
+  }
+  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance, assets: RevisionAsset[] = []): RevisionVersion {
+    const version: RevisionVersion = { ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), ...(assets.length ? { assets } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source, assets), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version)); return version;
   }
   requireVersion(id: string, expected: unknown): RevisionDetail {
@@ -851,11 +884,18 @@ export class Store {
     return detail;
   }
   createVersion(id: string, input: unknown, attribution?: ActorAttribution): RevisionDetail {
-    const data = object(input, ['files', 'message', 'expectedVersion']);
-    const { revision } = this.requireVersion(id, data.expectedVersion);
-    const source = files(data.files); const message = string(data.message, 'Message', 10_000);
-    revision.currentVersion += 1; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
-    this.save('revision', revision); this.saveVersion(revision, source, message, attribution); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); return this.detail(id);
+    return this.discussionMutation(() => {
+      const data = object(input, ['files', 'assets', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch', 'shareAssets']);
+      const { revision, versions } = this.requireVersion(id, data.expectedVersion);
+      const current = versions.find(version => version.number === revision.currentVersion)!;
+      const source = files(data.files); const message = string(data.message, 'Message', 10_000);
+      const assets = this.sourceAssets(source, data.assets === undefined ? current.assets ?? [] : data.assets, current.assets ?? []);
+      if (data.assets !== undefined && (data.expectedVersionId !== current.id || data.expectedContentHash !== current.contentHash || contentHash(current.files, current.assets) !== current.contentHash)) throw new HttpError(409, 'Figure changes require the exact reviewed source version. Reload before continuing.');
+      this.shareSourceAssets(id, assets, current.assets ?? [], data.shareAssets, attribution);
+      if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'This revision has reached the supported version limit.');
+      revision.currentVersion += 1; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      this.save('revision', revision); this.saveVersion(revision, source, message, attribution, undefined, assets); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); return this.detail(id);
+    });
   }
   updateRevision(id: string, input: unknown, attribution?: ActorAttribution): Revision {
     const data = object(input, ['status', 'expectedVersion']);
@@ -1014,7 +1054,7 @@ export class Store {
       if (!/^[a-f0-9]{64}$/.test(expectedContentHash)) throw new HttpError(400, 'Expected content hash must be a SHA-256 digest.');
       if (integer(data.expectedThreadVersion, 'expectedThreadVersion') !== thread.version) throw new HttpError(409, 'This discussion changed. Reload its replies before applying the suggestion.');
       const from = detail.versions.find(version => version.number === detail.revision.currentVersion)!;
-      const actualHash = contentHash(from.files);
+      const actualHash = contentHash(from.files, from.assets);
       if (from.id !== expectedVersionId || actualHash !== expectedContentHash || actualHash !== from.contentHash
         || comment.versionId !== from.id || comment.anchor.versionId !== from.id || comment.anchor.contentHash !== actualHash
         || comment.filePath !== comment.anchor.filePath) throw new HttpError(409, 'The suggestion must match the exact current source version and content. Review the current source before proposing another replacement.');
@@ -1041,7 +1081,8 @@ export class Store {
   }
   saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis, attribution?: ActorAttribution): ReviewRun {
     const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
-    const review: ReviewRun = { ...analysis, ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
+    const summary = version.assets?.length ? `${analysis.summary}\nReview covered text files only; ${version.assets.length} binary figure(s) were not inspected.` : analysis.summary;
+    const review: ReviewRun = { ...analysis, summary, ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO reviews (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(review.id, id, version.id, JSON.stringify(review));
     if (detail.revision.status === 'accepted' && analysis.findings.some(finding => finding.severity === 'error')) {
       this.save('revision', { ...detail.revision, status: 'changes_requested', updatedAt: new Date().toISOString() });

@@ -7,13 +7,20 @@ import { ancestorIds, effectiveMember, hierarchy } from './project-graph.ts';
 type JsonRow = { data: string };
 type PolicyRow = { data: string; space_data: string; owner_id: string | null; entity_kind: string; entity_data: string };
 type ResolvedPolicy = { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null; repositoryId?: string; parentId?: string; inheritedFrom?: { projectId: string; policyVersion: number } };
+type Traversal = { remaining: number };
+/** Per decision: policy nodes, active attachment edges and distinct source File checks. */
+export const POLICY_TRAVERSAL_MAX_WORK = 1024;
+const traversalExhausted = Symbol('permission traversal exhausted');
+function consume(traversal: Traversal): void {
+  if (traversal.remaining-- <= 0) throw traversalExhausted;
+}
 export interface PolicyStoreOptions { principalExists: (id: string) => boolean }
 const workspace = (): Audience => ({ kind: 'workspace' });
 const sharedRules = (): PolicyRules => ({ view: workspace(), edit: workspace(), interact: workspace() });
 const denied = (): EffectiveAccess => ({ view: false, edit: false, interact: false, managePolicy: false });
 const notFound = () => new HttpError(404, 'Object was not found.', 'OBJECT_UNAVAILABLE');
 const isSpaceId = (id: string) => /^S[1-9]\d{0,14}$/.test(id);
-const isObjectId = (id: string) => /^(?:PROJ|R|D|P|L|T|W)[1-9]\d{0,14}$/.test(id);
+const isObjectId = (id: string) => /^(?:PROJ|R|D|P|L|T|W|F)[1-9]\d{0,14}$/.test(id);
 let savepointNumber = 0;
 
 function transaction<T>(database: DatabaseSync, work: () => T, lock = true): T {
@@ -50,6 +57,14 @@ export function registerDefaultPolicy(database: DatabaseSync, id: string): void 
   database.prepare('INSERT INTO object_policies (object_id, space_id, data) VALUES (?, ?, ?)').run(id, 'S1', JSON.stringify(policy));
 }
 
+/** Uploads begin private. Automatic author access remains bounded by Space. */
+export function registerFilePolicy(database: DatabaseSync, id: string, authorId: string): void {
+  const audience: Audience = { kind: 'principals', principalIds: [authorId] };
+  const policy: ObjectPolicy = { objectId: id, spaceId: 'S1', version: 1, rules: { view: audience, edit: audience, interact: audience } };
+  database.prepare('INSERT INTO object_policies(object_id, space_id, data) VALUES (?, ?, ?)').run(id, 'S1', JSON.stringify(policy));
+  database.prepare("UPDATE policy_meta SET value = value + 1 WHERE name = 'epoch'").run();
+}
+
 /** Schema 11 migration: enrich current project rules, never historical evidence. */
 export function upgradeProjectPolicies(database: DatabaseSync): void {
   for (const row of database.prepare("SELECT p.object_id, p.data FROM object_policies p JOIN entities e ON e.id = p.object_id WHERE e.kind = 'project'").all() as { object_id: string; data: string }[]) {
@@ -70,8 +85,8 @@ export class PolicyStore {
     return row ? JSON.parse(row.data) as Space : undefined;
   }
   private owner(id: string): string | null {
-    if (!/^T[1-9]\d*$/.test(id)) return null;
-    const row = this.database.prepare("SELECT json_extract(data, '$.ownerId') AS owner_id FROM entities WHERE id = ?").get(id) as { owner_id: unknown } | undefined;
+    if (!/^[TF][1-9]\d*$/.test(id)) return null;
+    const row = this.database.prepare("SELECT CASE WHEN kind = 'file' THEN json_extract(data, '$.authorId') ELSE json_extract(data, '$.ownerId') END AS owner_id FROM entities WHERE id = ?").get(id) as { owner_id: unknown } | undefined;
     return typeof row?.owner_id === 'string' ? row.owner_id : null;
   }
   private projectMember(id: string, principalId: string): boolean {
@@ -85,11 +100,38 @@ export class PolicyStore {
     const graph = hierarchy(this.database, id); if (!graph) throw notFound();
     ancestorIds(this.database, id); return graph;
   }
-  private resolved(id: string, principalId: string, seen = new Set<string>()): ResolvedPolicy | undefined {
+  /** Exhaustion invalidates the whole decision, including otherwise successful sibling branches. */
+  private resolve(id: string, principalId: string): ResolvedPolicy | undefined {
+    try { return this.resolved(id, principalId, new Set(), { remaining: POLICY_TRAVERSAL_MAX_WORK }); }
+    catch (error) { if (error === traversalExhausted) return undefined; throw error; }
+  }
+  private *fileCandidates(id: string, traversal: Traversal): Generator<string> {
+    let after = '';
+    for (;;) {
+      const rows = this.database.prepare("SELECT object_id FROM file_attachments WHERE file_id = ? AND mode = 'attach' AND object_id > ? ORDER BY object_id LIMIT ?").all(id, after, Math.min(32, traversal.remaining + 1)) as { object_id: string }[];
+      for (const row of rows) { consume(traversal); after = row.object_id; yield row.object_id; }
+      if (rows.length < 32) return;
+    }
+  }
+  private figureDependencies(id: string, traversal: Traversal): { file_id: unknown }[] {
+    // History scanning is linear; only distinct dependencies consume graph work.
+    // LIMIT also bounds materialized output, without loading text snapshots into JS.
+    // Invalid non-array manifests/entries yield NULL and fail closed below.
+    return this.database.prepare(`
+      SELECT DISTINCT CASE WHEN json_type(v.data, '$.assets') = 'array' AND a.type = 'object'
+        THEN json_extract(a.value, '$.fileId') END AS file_id
+      FROM versions v LEFT JOIN json_each(v.data, '$.assets') a
+      WHERE v.revision_id = ? AND json_type(v.data, '$.assets') IS NOT NULL
+        AND json_extract(v.data, '$.assets') <> '[]'
+      LIMIT ?
+    `).all(id, traversal.remaining + 1) as { file_id: unknown }[];
+  }
+  private resolved(id: string, principalId: string, seen: Set<string>, traversal: Traversal): ResolvedPolicy | undefined {
+    consume(traversal);
     if (!isObjectId(id) || !this.member(principalId)) return undefined;
     if (seen.has(id) || seen.size >= 16) return undefined;
     seen.add(id);
-    const row = this.database.prepare("SELECT p.data, s.data AS space_data, e.kind AS entity_kind, e.data AS entity_data, CASE WHEN substr(e.id, 1, 1) = 'T' THEN json_extract(e.data, '$.ownerId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
+    const row = this.database.prepare("SELECT p.data, s.data AS space_data, e.kind AS entity_kind, e.data AS entity_data, CASE WHEN e.kind = 'task' THEN json_extract(e.data, '$.ownerId') WHEN e.kind = 'file' THEN json_extract(e.data, '$.authorId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
     if (!row) return undefined;
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
     const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
@@ -102,22 +144,48 @@ export class PolicyStore {
         if (dependency !== null) {
           if (typeof dependency !== 'string' || !/^R[1-9]\d{0,14}$/.test(dependency)
             || !this.database.prepare("SELECT 1 FROM entities WHERE id = ? AND kind = 'repository'").get(dependency)
-            || !this.resolved(dependency, principalId, seen)?.capabilities.view) return undefined;
+            || !this.resolved(dependency, principalId, new Set(seen), traversal)?.capabilities.view) return undefined;
           repositoryId = dependency;
         }
       }
       const graph = this.projectGraph(id);
-      const parent = graph?.parentId ? this.resolved(graph.parentId, principalId, seen) : undefined;
+      const parent = graph?.parentId ? this.resolved(graph.parentId, principalId, new Set(seen), traversal) : undefined;
       if (graph?.parentId && !parent) return undefined;
       if (graph?.kind === 'milestone') {
         if (!parent || parent.policy.kind !== 'project' || !graph.parentId) return undefined;
         return { policy: { ...parent.policy, objectId: id }, space: parent.space, capabilities: { ...parent.capabilities, managePolicy: false }, ownerId: null, parentId: graph.parentId, inheritedFrom: { projectId: graph.parentId, policyVersion: parent.policy.version } };
       }
-      return { policy, space, capabilities: effectiveAccess(policy, space, principalId, ownerId === principalId, this.projectMember(id, principalId), parent?.capabilities), ownerId, ...(repositoryId ? { repositoryId } : {}), ...(graph?.parentId ? { parentId: graph.parentId } : {}) };
+      let capabilities = effectiveAccess(policy, space, principalId, ownerId === principalId, this.projectMember(id, principalId), parent?.capabilities);
+      if (row.entity_kind === 'file' && !capabilities.view && spaceAccess(space, principalId).view) {
+        for (const objectId of this.fileCandidates(id, traversal)) {
+          if (this.resolved(objectId, principalId, new Set(seen), traversal)?.capabilities.view) { capabilities = { ...capabilities, view: true }; break; }
+        }
+      }
+      if (row.entity_kind === 'revision' && capabilities.view) {
+        // Detail/export contain historical versions, so each immutable source
+        // dependency must still be visible, not only the current manifest.
+        for (const { file_id: fileId } of this.figureDependencies(id, traversal)) {
+          if (typeof fileId !== 'string' || !this.sourceFileVisible(fileId, id, principalId, seen, traversal)) return undefined;
+        }
+      }
+      return { policy, space, capabilities, ownerId, ...(repositoryId ? { repositoryId } : {}), ...(graph?.parentId ? { parentId: graph.parentId } : {}) };
     } catch (error) {
       if (error instanceof HttpError) return undefined;
       throw error;
     }
+  }
+  private sourceFileVisible(fileId: string, revisionId: string, principalId: string, seen: Set<string>, traversal: Traversal): boolean {
+    consume(traversal);
+    if (!/^F[1-9]\d{0,14}$/.test(fileId)) return false;
+    const row = this.database.prepare("SELECT p.data, s.data AS space_data, json_extract(e.data, '$.authorId') AS author_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id AND e.kind = 'file' WHERE p.object_id = ?").get(fileId) as { data: string; space_data: string; author_id: string } | undefined;
+    if (!row) return false;
+    const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
+    if (!spaceAccess(space, principalId).view) return false;
+    if (effectiveAccess(policy, space, principalId, row.author_id === principalId).view) return true;
+    // The revision's own rules and other dependencies are checked by resolved.
+    // A reviewed direct attachment supplies the grant without recursing P→F→P.
+    if (this.database.prepare("SELECT 1 FROM file_attachments WHERE file_id = ? AND object_id = ? AND mode = 'attach'").get(fileId, revisionId)) return true;
+    return this.resolved(fileId, principalId, new Set(seen), traversal)?.capabilities.view ?? false;
   }
   spaces(principalId: string): Space[] {
     if (!this.member(principalId)) return [];
@@ -134,7 +202,7 @@ export class PolicyStore {
       const space = this.member(principalId) ? this.space(id) : undefined;
       return space ? spaceAccess(space, principalId) : denied();
     }
-    return this.resolved(id, principalId)?.capabilities ?? denied();
+    return this.resolve(id, principalId)?.capabilities ?? denied();
   }
   require(id: string, principalId: string, capability: ProjectCapability): void {
     const access = this.access(id, principalId);
@@ -142,16 +210,16 @@ export class PolicyStore {
     if (!access[capability]) throw new HttpError(403, `This object does not allow ${capability} access.`, 'ACTION_FORBIDDEN');
   }
   policy(id: string, principalId: string): ObjectPolicy {
-    const result = this.resolved(id, principalId);
+    const result = this.resolve(id, principalId);
     if (!result?.capabilities.view) throw notFound();
     return result.policy;
   }
   describe(id: string, principalId: string): ObjectAccess {
-    const result = this.resolved(id, principalId);
+    const result = this.resolve(id, principalId);
     if (!result?.capabilities.view) throw notFound();
     const { policy, space, capabilities, ownerId, repositoryId, parentId, inheritedFrom } = result;
-    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? '; task owner also has access' : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${repositoryId ? '; requires linked repository view access' : ''}${inheritedFrom ? '; inherited from parent project' : ''}`;
-    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: 'task-owner' as const, principalId: ownerId } } : {}) };
+    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? (id.startsWith('F') ? '; file author also has access' : '; task owner also has access') : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${repositoryId ? '; requires linked repository view access' : ''}${id.startsWith('F') && capability === 'view' ? '; viewers of explicitly attached objects also have access, within the File Space' : ''}${inheritedFrom ? '; inherited from parent project' : ''}`;
+    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: id.startsWith('F') ? 'file-author' as const : 'task-owner' as const, principalId: ownerId } } : {}) };
   }
   private audience(input: unknown): Audience {
     const data = object(input, ['kind', 'principalIds']);
@@ -238,7 +306,7 @@ export class PolicyStore {
       if (current.version !== 1) throw new HttpError(409, 'Initial access can only be configured for a new object.');
       const project = current.kind === 'project';
       const graph = this.projectGraph(id);
-      const parent = graph?.parentId ? this.resolved(graph.parentId, principalId) : undefined;
+      const parent = graph?.parentId ? this.resolve(graph.parentId, principalId) : undefined;
       if (graph?.parentId && (!parent || !parent.capabilities.view || !parent.capabilities.edit)) throw notFound();
       if (graph?.kind === 'milestone') {
         if (input !== undefined || !parent) throw new HttpError(400, 'Milestones inherit access rules and Space from their parent.');

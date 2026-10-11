@@ -4,11 +4,14 @@ import { chmod, lstat, mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'n
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import type { SourceFile } from '../shared/types.ts';
+import type { RevisionAsset } from '../shared/files.ts';
+import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
+import { inspectFileMedia } from './files.ts';
 
 export const TEX_RUNNER_POLICY_VERSION = 'tex-container-v1';
 export const TEX_BUNDLE_SHA256 = 'b99f6292ac4ac5ef74566f7ba044491adbf67096f4b020855a6de0ad192d32f8';
 export interface TexToolchain { engine: string; image: string; bundle: string }
-export interface TexRunnerInput { revisionId: string; versionId: string; contentHash: string; files: SourceFile[]; entrypoint: string }
+export interface TexRunnerInput { revisionId: string; versionId: string; contentHash: string; files: SourceFile[]; assets?: (RevisionAsset & { data: Uint8Array })[]; entrypoint: string }
 export interface TexDiagnostic { severity: 'error' | 'warning' | 'info'; message: string; path?: string; line?: number }
 export interface TexArtifact { kind: 'pdf' | 'log' | 'manifest' | 'synctex' | 'mapping'; name: string; mediaType: string; data: Uint8Array }
 export interface TexRunnerResult { success: boolean; artifacts: TexArtifact[]; diagnostics: TexDiagnostic[]; error: string | null }
@@ -35,6 +38,9 @@ export function createTexRunner(config: TexRunnerConfig): TexRunner {
   const toolchain = Object.freeze({ engine: 'Tectonic 0.17.0', image: config.image, bundle: `sha256:${TEX_BUNDLE_SHA256}` });
   const docker = (args: string[], limit: number, signal?: AbortSignal, timeout = 15_000) => executeDocker(config.dockerSocket, args, limit, signal, timeout);
   return { toolchain, async run(input, signal) {
+    validateTexInput(input);
+    // Retain an owned snapshot across asynchronous runtime checks and filesystem writes.
+    input = { ...input, files: input.files.map(file => ({ ...file })), ...(input.assets ? { assets: input.assets.map(asset => ({ ...asset, data: Uint8Array.from(asset.data) })) } : {}) };
     validateTexInput(input);
     if (signal.aborted) throw abortError();
     let directory: string | undefined;
@@ -63,8 +69,13 @@ export function createTexRunner(config: TexRunnerConfig): TexRunner {
         await writeFile(join(source, file.path), file.content, { encoding: 'utf8', mode: 0o444, flag: 'wx' });
         await utimes(join(source, file.path), 946684800, 946684800);
       }
+      for (const asset of input.assets ?? []) {
+        await mkdir(dirname(join(source, asset.path)), { recursive: true, mode: 0o755 });
+        await writeFile(join(source, asset.path), asset.data, { mode: 0o444, flag: 'wx' });
+        await utimes(join(source, asset.path), 946684800, 946684800);
+      }
       const sourceDirectories = new Set([source]);
-      for (const file of input.files) { let parent = dirname(join(source, file.path)); while (parent.startsWith(`${source}/`)) { sourceDirectories.add(parent); parent = dirname(parent); } }
+      for (const file of [...input.files, ...(input.assets ?? [])]) { let parent = dirname(join(source, file.path)); while (parent.startsWith(`${source}/`)) { sourceDirectories.add(parent); parent = dirname(parent); } }
       for (const path of sourceDirectories) await utimes(path, 946684800, 946684800);
       // The mount is read-only in the container; the enclosing temporary directory remains private on the host.
       await chmod(directory, 0o755);
@@ -93,8 +104,9 @@ export function createTexRunner(config: TexRunnerConfig): TexRunner {
         { kind: 'mapping', name: 'source-map.json', mediaType: 'application/json', data: Buffer.from(JSON.stringify(mapping)) },
         { kind: 'log', name: 'compiler.log', mediaType: 'text/plain; charset=utf-8', data: Buffer.from(log) },
       ];
-      const manifest = { schema: 1, revisionId: input.revisionId, versionId: input.versionId, contentHash: input.contentHash, entrypoint: input.entrypoint, toolchain,
+      const manifest = { schema: input.assets?.length ? 2 : 1, revisionId: input.revisionId, versionId: input.versionId, contentHash: input.contentHash, entrypoint: input.entrypoint, toolchain,
         files: [...input.files].sort((a, b) => a.path < b.path ? -1 : 1).map(file => ({ path: file.path, sha256: digest(file.content), bytes: Buffer.byteLength(file.content) })),
+        ...(input.assets?.length ? { assets: [...input.assets].sort((a, b) => a.path < b.path ? -1 : 1).map(({ path, fileId, sha256, bytes, mediaType }) => ({ path, fileId, sha256, bytes, mediaType })) } : {}),
         artifacts: [...artifacts].sort((a, b) => a.kind < b.kind ? -1 : 1).map(artifact => ({ kind: artifact.kind, sha256: digest(artifact.data), bytes: artifact.data.length })) };
       artifacts.push({ kind: 'manifest', name: 'manifest.json', mediaType: 'application/json', data: Buffer.from(JSON.stringify(manifest)) });
       return { success: true, artifacts, diagnostics, error: null };
@@ -118,17 +130,19 @@ function failed(error: string, log: string, diagnostics: TexDiagnostic[]): TexRu
 export function validateTexInput(input: TexRunnerInput): void {
   if (!input.revisionId || !input.versionId || input.revisionId.length > 240 || input.versionId.length > 240 || !/^[a-f0-9]{64}$/.test(input.contentHash)) throw new Error('An exact immutable source version is required.');
   if (input.files.length < 1 || input.files.length > 100) throw new Error('Provide between 1 and 100 source files.');
+  validateSourceSnapshot(input.files, input.assets);
   const names = new Set<string>();
   let bytes = 0;
   for (const file of input.files) {
-    if (!file.path || file.path.length > 240 || /[\x00-\x1f\x7f:\\]/.test(file.path) || file.path.startsWith('/') || file.path.split('/').some(part => !part || part === '.' || part === '..') || names.has(file.path)) throw new Error('Source paths must be unique safe relative paths.');
     if (file.content.includes('\0') || file.content.length > 500_000 || Buffer.from(file.content).toString('utf8') !== file.content) throw new Error('Source files must contain bounded valid UTF-8 text.');
     names.add(file.path); bytes += Buffer.byteLength(file.content);
   }
   if (bytes > 1_500_000 || !names.has(input.entrypoint) || !input.entrypoint.endsWith('.tex')) throw new Error('Select an existing .tex entrypoint within the bounded source snapshot.');
-  for (const name of names) for (const other of names) if (other.startsWith(`${name}/`)) throw new Error('A source file cannot also be a directory.');
-  const canonical = [...input.files].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map(({ path, content }) => ({ path, content }));
-  if (digest(JSON.stringify(canonical)) !== input.contentHash) throw new Error('Source content does not match the immutable version digest.');
+  for (const asset of input.assets ?? []) {
+    if (!(asset.data instanceof Uint8Array) || asset.data.byteLength !== asset.bytes || digest(asset.data) !== asset.sha256
+      || inspectFileMedia(asset.data).mediaType !== asset.mediaType) throw new Error('Binary asset bytes do not match their immutable identity and media type.');
+  }
+  if (digest(sourceSnapshotCanonical(input.files, input.assets)) !== input.contentHash) throw new Error('Source content does not match the immutable version digest.');
 }
 
 function executeDocker(socket: string, args: string[], maxBytes: number, signal?: AbortSignal, timeoutMs = 15_000): Promise<{ stdout: Buffer; stderr: Buffer; code: number | null }> {

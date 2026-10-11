@@ -51,7 +51,7 @@ The server intentionally binds to loopback. Password sign-in is available with `
 - Password accounts, expiring browser sessions, CSRF protection, terminal account management and revocable scoped CLI tokens. New writes retain account and credential attribution. View/edit/interact policies and restrictive Spaces apply to existing objects, history, exports, activity, search inputs and review calls. Mobile access controls expose actual rules and preserve unsaved drafts when access changes.
 - An initial CLI for offline checks, explicit-file snapshot submission, review, export, visible task/project queries, paged workboard reads and exact Git source/history reads; authenticated workspaces use `PHABRICATOR_TOKEN`.
 
-Saving or reviewing a document never executes it. TeX runs only through an explicit paper-build request in the configured isolated worker; it is unavailable until the operator sets up that worker. Binary figures and versioned attachments, rendered PDF comparisons and DOCX round-tripping remain planned. See [the paper-build contract and limits](docs/paper-builds.md).
+Saving or reviewing a document never executes it. TeX runs only through an explicit paper-build request in the configured isolated worker; it is unavailable until the operator sets up that worker. The [Files application](docs/files.md) stores immutable uploads and versioned PNG/JPEG/PDF figures with explicit sharing; rendered PDF comparisons and DOCX round-tripping remain planned. See [the paper-build contract and limits](docs/paper-builds.md).
 
 ## AI configuration
 

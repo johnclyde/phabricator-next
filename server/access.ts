@@ -9,8 +9,9 @@ import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import { gitImportInput, gitVersionImportInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
+import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
 
-const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions']);
+const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/files']);
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
 /** One request's immutable principal. No process-global current user or policy bypass. */
@@ -28,9 +29,10 @@ export class AccessLayer {
     state.tasks = state.tasks.filter(item => this.canView(item.id));
     state.documents = state.documents.filter(item => this.canView(item.id));
     state.revisions = state.revisions.filter(item => this.canView(item.id));
+    state.files = (state.files ?? []).filter(item => this.canView(item.id));
     state.activity = this.store.activities(undefined, id => this.canView(id));
     state.spaces = this.policies.spaces(this.principal).map(space => this.space(space));
-    state.access = Object.fromEntries([...state.projects, ...state.repositories, ...state.tasks, ...state.documents, ...state.revisions].map(item => [item.id, this.describe(item.id)]));
+    state.access = Object.fromEntries([...state.projects, ...state.repositories, ...state.tasks, ...state.documents, ...state.revisions, ...state.files].map(item => [item.id, this.describe(item.id)]));
     state.accessEpoch = this.policies.epoch();
     state.canCreate = this.context.scopes.includes('write');
     state.currentPrincipalId = this.principal;
@@ -45,6 +47,11 @@ export class AccessLayer {
   revision(id: string): RevisionDetail {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  files(query: FileListQuery): FilePage { return { ...this.store.files.list(query, id => this.canView(id)), accessEpoch: this.policies.epoch() }; }
+  file(id: string): FileDetail {
+    this.require(id);
+    return { file: this.store.files.get(id), history: { ...this.store.files.history(id, undefined, undefined, objectId => this.canView(objectId)), accessEpoch: this.policies.epoch() }, attachments: { ...this.store.files.attachments(id, {}, objectId => this.canView(objectId)), accessEpoch: this.policies.epoch() }, access: this.describe(id), accessEpoch: this.policies.epoch() };
   }
   document(id: string): WikiDetail {
     this.require(id);
@@ -235,11 +242,11 @@ export class AccessLayer {
     return this.principalReference(value, active);
   }
   private target(method: string, path: string): { id: string; capability: ProjectCapability } | null {
-    const policy = /^\/api\/policies\/((?:PROJ|R|T|W|[DPL])\d+)$/.exec(path);
+    const policy = /^\/api\/policies\/((?:PROJ|R|T|W|F|[DPL])\d+)$/.exec(path);
     if (policy) return { id: policy[1]!, capability: method === 'GET' ? 'view' : 'edit' };
     const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
     if (space) return { id: space[1]!, capability: method === 'GET' ? 'view' : 'edit' };
-    const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions)\/((?:PROJ|R|T|W|[DPL])\d+)(?:\/(.*))?$/.exec(path);
+    const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions|files)\/((?:PROJ|R|T|W|F|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
     const personalDiscussion = method === 'PATCH' && /^threads\/[^/]+\/preference$/.test(object[2] ?? '');
@@ -250,6 +257,32 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && /^\/api\/files\/F\d+\/attachments$/.test(path)) {
+      const data = object(input, ['objectId', 'mode', 'expectedVersion', 'expectedAccessEpoch']);
+      if (typeof data.objectId !== 'string' || !/^(?:PROJ|R|T|W|[DPL])[1-9]\d{0,14}$/.test(data.objectId)) throw new HttpError(400, 'Choose an available object to attach.');
+      this.require(data.objectId, 'edit');
+      if (data.mode === 'attach') integer(data.expectedAccessEpoch, 'expectedAccessEpoch');
+    }
+    const assetWrite = method === 'POST' && (path === '/api/revisions' || /^\/api\/revisions\/[DPL]\d+\/versions$/.test(path));
+    const assetData = assetWrite ? record(input) : null;
+    if (assetData?.assets !== undefined) {
+      if (!Array.isArray(assetData.assets) || assetData.assets.length > 100) throw new HttpError(400, 'Choose at most 100 versioned figures.');
+      integer(assetData.expectedAccessEpoch, 'expectedAccessEpoch');
+      const original = target ? this.store.detail(target.id).versions.find(version => version.number === assetData.expectedVersion) : undefined;
+      const originalFiles = new Set(original?.assets?.map(asset => asset.fileId));
+      for (const asset of assetData.assets) {
+        const fileId = record(asset)?.fileId;
+        if (typeof fileId !== 'string' || !/^F[1-9]\d{0,14}$/.test(fileId)) throw new HttpError(400, 'Choose an available File.');
+        this.require(fileId);
+        if (!originalFiles.has(fileId)) this.require(fileId, 'edit');
+        // An existing direct grant needs no audience expansion. New grants
+        // require the file editor's authority before any idempotent replay.
+        if (!target || this.store.files.attachment(fileId, target.id)?.mode !== 'attach') {
+          this.require(fileId, 'edit');
+          if (assetData.shareAssets !== true) throw new HttpError(400, 'Explicitly share figures with the revision audience.');
+        }
+      }
+    }
     const preference = method === 'PATCH' ? /^\/api\/revisions\/([DPL]\d+)\/threads\/([^/]+)\/preference$/.exec(path) : null;
     if (preference) {
       threadPreferenceInput(input);

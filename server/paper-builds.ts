@@ -4,6 +4,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AuthContext } from '../shared/auth.ts';
 import type { PaperArtifactKind, PaperBuild, PaperBuildArtifact, PaperBuildConfiguration, PaperBuildDiagnostic, PaperBuildInput, PaperBuildPage, PaperSyncTeX, PaperSyncTeXMap, PaperToolchain } from '../shared/paper-builds.ts';
 import type { SourceFile } from '../shared/types.ts';
+import type { RevisionAsset } from '../shared/files.ts';
+import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import type { Store } from './store.ts';
@@ -12,7 +14,7 @@ import { HttpError, object, string } from './validation.ts';
 /** Runner boundary is deliberately independent of HTTP and durable job storage. */
 export interface PaperRunner {
   toolchain: PaperToolchain;
-  run(input: { revisionId: string; versionId: string; contentHash: string; files: SourceFile[]; entrypoint: string }, signal: AbortSignal): Promise<{
+  run(input: { revisionId: string; versionId: string; contentHash: string; files: SourceFile[]; assets?: (RevisionAsset & { data: Uint8Array })[]; entrypoint: string }, signal: AbortSignal): Promise<{
     success: boolean; artifacts: { kind: PaperArtifactKind; name: string; mediaType: string; data: Uint8Array }[];
     diagnostics: PaperBuildDiagnostic[]; error: string | null;
   }>;
@@ -74,7 +76,9 @@ export class PaperBuildService {
     if (detail.revision.kind !== 'paper') throw new HttpError(400, 'Paper compilation requires a paper revision.');
     const version = detail.versions.find(item => item.id === input.versionId);
     if (!version || version.contentHash !== input.contentHash) throw new HttpError(409, 'The selected immutable source version does not match.', 'PAPER_SOURCE_MISMATCH');
-    const actual = hash(JSON.stringify([...version.files].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map(({path, content}) => ({path,content}))));
+    try { validateSourceSnapshot(version.files, version.assets); }
+    catch { throw new HttpError(409, 'The selected source namespace or asset identity is invalid.', 'PAPER_SOURCE_MISMATCH'); }
+    const actual = hash(sourceSnapshotCanonical(version.files, version.assets));
     if (actual !== input.contentHash) throw new HttpError(409, 'The selected source integrity check failed.', 'PAPER_SOURCE_MISMATCH');
     if (!version.files.some(file => file.path === input.entrypoint)) throw new HttpError(400, 'The selected .tex entrypoint is absent from this source version.');
     return version;
@@ -179,15 +183,19 @@ export class PaperBuildService {
       catch { controller.abort(); }
     },5_000); heartbeat.unref();
     try {
-      const version=this.store.read(() => this.source(build.revisionId,build));
-      const result=await this.runner!.run({revisionId:build.revisionId,versionId:build.versionId,contentHash:build.contentHash,files:version.files,entrypoint:build.entrypoint},controller.signal);
+      const { version, assets }=this.store.read(() => {
+        const row=this.row(build.id); this.authorize(JSON.parse(row.context) as AuthContext,row.revision_id,true);
+        const version=this.source(build.revisionId,build);
+        return { version, assets:this.store.files.resolveAssets(version.assets ?? []) };
+      });
+      const result=await this.runner!.run({revisionId:build.revisionId,versionId:build.versionId,contentHash:build.contentHash,files:version.files,...(assets.length?{assets}:{}),entrypoint:build.entrypoint},controller.signal);
       this.store.transaction(() => {
         const row=this.row(build.id); if(row.lease_token!==token || (row.lease_until ?? 0)<=this.now()) return;
         const current=JSON.parse(row.data) as PaperBuild; if(current.status!=='running') return;
         try { this.authorize(JSON.parse(row.context) as AuthContext,row.revision_id,true); this.source(build.revisionId,build); this.toolchain(build); }
         catch { this.terminal(current,'The submitting credential or source permission is no longer available.'); return; }
         if (this.stopping || controller.signal.aborted) { this.interrupted(current); return; }
-        const artifacts=this.validateArtifacts(result.artifacts,result.success,version.files,build);
+        const artifacts=this.validateArtifacts(result.artifacts,result.success,version.files,version.assets ?? [],build);
         current.diagnostics=result.diagnostics.slice(0,200).map(item => ({severity:['info','warning','error'].includes(item.severity)?item.severity:'error',message:item.message.slice(0,2_000),...(item.path && version.files.some(file=>file.path===item.path)?{path:item.path,...(Number.isSafeInteger(item.line) && item.line!>0 ? {line:item.line}: {})}:{})}));
         for(const item of artifacts) this.store.database.prepare('INSERT INTO paper_build_artifacts(build_id,attempt,kind,metadata,data) VALUES(?,?,?,?,?)').run(build.id,build.attempt,item.metadata.kind,JSON.stringify(item.metadata),item.data);
         current.artifacts=artifacts.map(item=>item.metadata); current.status=result.success?'succeeded':'failed'; current.finishedAt=new Date(this.now()).toISOString(); current.error=result.success?null:(result.error??'Compilation failed.').slice(0,2_000);
@@ -201,7 +209,7 @@ export class PaperBuildService {
     const error='The server stopped before this attempt could publish.'; const attempt=build.attempts.at(-1)!; Object.assign(attempt,{status:'failed',finishedAt:new Date(this.now()).toISOString(),error});
     if(build.attempt>=MAX_ATTEMPTS) {this.terminal(build,error);return;} build.status='queued';build.startedAt=null;build.error=null;this.save(build,null,null);
   }
-  private validateArtifacts(artifacts: Awaited<ReturnType<PaperRunner['run']>>['artifacts'],success:boolean,files:SourceFile[],build:PaperBuild): {metadata:PaperBuildArtifact;data:Uint8Array}[] {
+  private validateArtifacts(artifacts: Awaited<ReturnType<PaperRunner['run']>>['artifacts'],success:boolean,files:SourceFile[],assets:RevisionAsset[],build:PaperBuild): {metadata:PaperBuildArtifact;data:Uint8Array}[] {
     if(artifacts.length>5) throw new Error('Too many compiler artifacts.'); let total=0; const seen=new Set<string>();
     const sourceLines=new Map(files.map(file=>[file.path,file.content.split('\n').length]));
     const result=artifacts.map(item=>{
@@ -222,8 +230,9 @@ export class PaperBuildService {
     const manifest=result.find(item=>item.metadata.kind==='manifest');
     if(manifest) {
       const actual=JSON.parse(Buffer.from(manifest.data).toString('utf8')) as unknown;
-      const expected={schema:1,revisionId:build.revisionId,versionId:build.versionId,contentHash:build.contentHash,entrypoint:build.entrypoint,toolchain:build.toolchain,
+      const expected={schema:assets.length?2:1,revisionId:build.revisionId,versionId:build.versionId,contentHash:build.contentHash,entrypoint:build.entrypoint,toolchain:build.toolchain,
         files:[...files].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0).map(file=>({path:file.path,sha256:hash(file.content),bytes:Buffer.byteLength(file.content)})),
+        ...(assets.length?{assets:[...assets].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0).map(({path,fileId,sha256,bytes,mediaType})=>({path,fileId,sha256,bytes,mediaType}))}:{}),
         artifacts:result.filter(item=>item.metadata.kind!=='manifest').map(item=>({kind:item.metadata.kind,sha256:item.metadata.sha256,bytes:item.metadata.bytes})).sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:0)};
       if(!isDeepStrictEqual(actual,expected)) throw new Error('Compiler manifest does not match the immutable source and artifacts.');
     }

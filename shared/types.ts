@@ -3,6 +3,8 @@ import type { PublicAccount } from './auth';
 import type { Project } from './projects';
 import type { TaskColumnMove } from './workboards';
 import type { GitSourceProvenance } from './repositories';
+import type { FileRecord, RevisionAsset } from './files';
+export type { FileRecord, RevisionAsset } from './files';
 export { WORKBOARD_BULK_MOVE_LIMIT } from './workboards';
 export type { WorkboardBulkMoveQuery, WorkboardBulkMoveTask, WorkboardBulkMovePreview, BulkMoveWorkboardCardsInput, WorkboardBulkMoveReceipt } from './workboards';
 export type { Workboard, WorkboardColumn, WorkboardColumnSnapshot, WorkboardCard, WorkboardCardPage, WorkboardColumnView, WorkboardFilter, WorkboardQuery, WorkboardCardsQuery, WorkboardDetail, WorkboardReceipt, ConfigureWorkboardInput, CreateWorkboardColumnInput, UpdateWorkboardColumnInput, WorkboardColumnPosition, ReorderWorkboardColumnInput, WorkboardCardPosition, MoveWorkboardCardInput, WorkboardImportColumn, WorkboardImportPreview, ImportWorkboardColumnsInput, TaskColumnMove, WorkboardFieldChange, WorkboardTransaction, WorkboardHistory } from './workboards';
@@ -35,7 +37,7 @@ export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
 export interface WikiHistory { versions: WikiVersionSummary[]; nextBefore: number | null; firstAvailableVersion: number }
 export interface WikiDetail { document: WikiDocument; history: WikiHistory; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface Revision { id: string; title: string; summary: string; kind: RevisionKind; status: RevisionStatus; repositoryId: string | null; projectId: string | null; currentVersion: number; createdAt: string; updatedAt: string }
-export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: GitSourceProvenance; id: string; revisionId: string; number: number; files: SourceFile[]; message: string; contentHash: string; createdAt: string }
+export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: GitSourceProvenance; id: string; revisionId: string; number: number; files: SourceFile[]; assets?: RevisionAsset[]; message: string; contentHash: string; createdAt: string }
 /** Source offsets are UTF-16 code units, start inclusive and end exclusive. */
 export interface PassageAnchor { versionId: string; contentHash: string; filePath: string; start: number; end: number; quote: string; prefix: string; suffix: string }
 export interface PassageInput { start: number; end: number; quote: string }
@@ -49,10 +51,10 @@ export interface ReviewAnalysis { summary: string; findings: Finding[]; provider
 export interface ReviewRun extends ReviewAnalysis { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; contentHash: string; createdAt: string }
 export interface Activity { attribution?: ActorAttribution; id: string; objectId: string; actor: string; action: string; detail: string; createdAt: string }
 export type SpaceSummary = Space & { capabilities: EffectiveAccess };
-export interface AppState { projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
+export interface AppState { files?: FileRecord[]; projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
 export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; threads: ReviewThread[]; threadEvents: ReviewThreadEvent[]; suggestionApplications: SuggestionApplication[]; reviews: ReviewRun[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
-export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; repositoryId?: string | null; projectId?: string | null }
-export interface CreateVersionInput { files: SourceFile[]; message: string; expectedVersion: number }
+export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; assets?: RevisionAsset[]; shareAssets?: boolean; expectedAccessEpoch?: number; repositoryId?: string | null; projectId?: string | null }
+export interface CreateVersionInput { files: SourceFile[]; assets?: RevisionAsset[]; message: string; expectedVersion: number; expectedVersionId?: string; expectedContentHash?: string; shareAssets?: boolean; expectedAccessEpoch?: number }
 export interface ReviewInput { provider: 'local' | 'openai' | 'ollama'; expectedVersion: number }
 export interface CreateCommentInput { body: string; versionId: string; filePath?: string | null; line?: number | null; passage?: PassageInput; suggestion?: SuggestedReplacement }
 export interface CreateReplyInput { body: string; viewedVersionId: string }

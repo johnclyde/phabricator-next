@@ -10,6 +10,7 @@ export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
 export interface SubmittedBulkMove { projectId: string; sourceProxyId: string | null; requestId: string; input: BulkMoveWorkboardCardsInput }
 export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
 export function canQueue(path: string, method: MutationMethod, body?: unknown): boolean {
+  if (/^\/api\/revisions\/[^/]+\/versions$/.test(path) && body && typeof body === 'object' && ['assets', 'shareAssets', 'expectedAccessEpoch'].some(key => key in body)) return false;
   if (path === '/api/projects' && method === 'POST') {
     if (!body || typeof body !== 'object') return false;
     const input = body as { memberIds?: unknown; access?: unknown; parentId?: unknown; kind?: unknown };
@@ -21,7 +22,7 @@ export function canQueue(path: string, method: MutationMethod, body?: unknown): 
   return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+\/(comments|projects)$/.test(path) && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
 }
 export function isNetworkError(error: unknown): boolean { return error instanceof TypeError; }
-function objectFromPath(path: string): string | null { return /^\/api\/(?:revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
+function objectFromPath(path: string): string | null { return /^\/api\/(?:files|revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
 function queuedObject(item: PendingMutation): string | null {
   const id = objectFromPath(item.path); if (id) return id;
   if (item.method !== 'POST' || !['/api/tasks', '/api/documents', '/api/projects'].includes(item.path)) return null;
@@ -29,10 +30,10 @@ function queuedObject(item: PendingMutation): string | null {
   if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function objectFromKey(key: string): string | null { return /^(?:file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 // Personal presentation choices retain quota-failed memory, but are purged on view loss rather than treated as content drafts.
-function isRetainedDraftKey(key: string): boolean { return key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -109,6 +110,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (key.startsWith('revision-git-import:')) {
       try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { repositoryId?: unknown } | null; return [primary, typeof draft?.repositoryId === 'string' && /^R\d+$/.test(draft.repositoryId) ? draft.repositoryId : null].filter((id): id is string => typeof id === 'string'); } catch { return primary ? [primary] : []; }
     }
+    if (key.startsWith('version-draft:')) {
+      const draft = value as { assets?: { fileId?: unknown }[] } | undefined;
+      return [...(primary ? [primary] : []), ...(Array.isArray(draft?.assets) ? draft.assets.flatMap(asset => typeof asset?.fileId === 'string' && /^F\d+$/.test(asset.fileId) ? [asset.fileId] : []) : [])];
+    }
     if (!key.startsWith('workboard-move:')) return primary ? [primary] : [];
     const task = /^workboard-move:PROJ\d+:(T\d+)/.exec(key)?.[1];
     try {
@@ -118,25 +123,30 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const rememberRevisionSources = (value: unknown): void => {
     if (!sessionIsActive(session) || !value || typeof value !== 'object') return;
-    const data = value as { revision?: unknown; revisions?: unknown[] };
+    const data = value as { revision?: { id?: unknown; repositoryId?: unknown }; revisions?: { id?: unknown; repositoryId?: unknown }[]; versions?: { assets?: { fileId?: unknown }[] }[] };
     const rows = Array.isArray(data.revisions) ? data.revisions : data.revision ? [data.revision] : [];
-    for (const row of rows) {
-      if (!row || typeof row !== 'object') continue;
-      const item = row as { id?: unknown; repositoryId?: unknown };
-      if (typeof item.id !== 'string' || !/^[DPL]\d+$/.test(item.id) || typeof item.repositoryId !== 'string' || !/^R\d+$/.test(item.repositoryId)) continue;
-      session.revisionRepositories.set(item.id, item.repositoryId);
-      // Source-free dependency metadata makes offline revocation independent of
-      // which immutable source snapshots happen to remain in the bounded cache.
-      rawWrite(`revision-source:${item.id}`, { repositoryId: item.repositoryId });
+    for (const item of rows) {
+      if (!item || typeof item.id !== 'string' || !/^[DPL]\d+$/.test(item.id)) continue;
+      if (typeof item.repositoryId === 'string' && /^R\d+$/.test(item.repositoryId)) session.revisionRepositories.set(item.id, item.repositoryId);
+      if (data.revision?.id === item.id && Array.isArray(data.versions)) {
+        const assets = new Set(session.revisionFiles.get(item.id) || []);
+        for (const version of data.versions) for (const asset of version.assets || []) if (typeof asset.fileId === 'string' && /^F\d+$/.test(asset.fileId)) assets.add(asset.fileId);
+        session.revisionFiles.set(item.id, assets);
+      }
+      try { const previous = JSON.parse(rawRead(`revision-source:${item.id}`) || 'null') as { fileIds?: unknown } | null; if (Array.isArray(previous?.fileIds)) session.revisionFiles.set(item.id, new Set([...(session.revisionFiles.get(item.id) || []), ...previous.fileIds.filter((id): id is string => typeof id === 'string' && /^F\d+$/.test(id))])); } catch { /* Historical dependencies already learned in this session stay retained. */ }
+      rawWrite(`revision-source:${item.id}`, { repositoryId: session.revisionRepositories.get(item.id) || null, fileIds: [...(session.revisionFiles.get(item.id) || [])] });
     }
   };
   const learnSavedRevisionSources = (): void => {
     if (!sessionIsActive(session)) return;
     for (const [key, json] of savedEntries()) {
       try {
-        const value = JSON.parse(json) as unknown;
-        if (key.startsWith('revision-source:') && value && typeof value === 'object' && 'repositoryId' in value && typeof value.repositoryId === 'string' && /^R\d+$/.test(value.repositoryId)) session.revisionRepositories.set(key.slice('revision-source:'.length), value.repositoryId);
-        else if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
+        const value = JSON.parse(json) as { repositoryId?: unknown; fileIds?: unknown };
+        if (key.startsWith('revision-source:') && value && typeof value === 'object') {
+          const id = key.slice('revision-source:'.length);
+          if (typeof value.repositoryId === 'string' && /^R\d+$/.test(value.repositoryId)) session.revisionRepositories.set(id, value.repositoryId);
+          if (Array.isArray(value.fileIds)) session.revisionFiles.set(id, new Set([...(session.revisionFiles.get(id) || []), ...value.fileIds.filter((file): file is string => typeof file === 'string' && /^F\d+$/.test(file))]));
+        } else if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
       } catch { /* Unreadable caches do not authorize source. */ }
     }
   };
@@ -249,12 +259,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const readStored = <T,>(key: string, fallback: T): T => {
     syncDurableQuarantine();
     if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
-    if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || blockedDraft(key) || hasDraftHold(key)) return fallback;
+    if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id)) || blockedDraft(key) || hasDraftHold(key)) return fallback;
     try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
-    if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '')) return false;
+    if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id))) return false;
     if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
     if (key.startsWith('revision-comparison:')) { if (!isComparisonSelection(value, objectFromKey(key) || '')) return false; value = comparisonMetadata(value); }
     if (/^repository:R\d+:selection$/.test(key)) { const selection = repositorySelection(value); if (!selection) return false; value = selection; }
@@ -310,6 +320,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session)) return;
     learnSavedRevisionSources();
     const linked = [...session.revisionRepositories].filter(([, repositoryId]) => ids.includes(repositoryId)).map(([id]) => id);
+    linked.push(...[...session.revisionFiles].filter(([, files]) => ids.some(id => files.has(id))).map(([id]) => id));
     const changed = [...new Set([...ids, ...linked])].filter(id => !session.unavailableObjects.has(id));
     if (!changed.length) return;
     session.accessGeneration += 1;
@@ -392,8 +403,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     const childParent = path === '/api/projects' && options?.method === 'POST' && options.body && typeof options.body === 'object' && 'parentId' in options.body && typeof options.body.parentId === 'string' ? options.body.parentId : null;
-    const taskRequest = Boolean(childParent) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
-    if (options && taskRequest && session.accessEpoch < 0) {
+    const taskRequest = Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
+    if ((options || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
       // its successful response. Later epoch changes still reject stale content.
@@ -402,8 +413,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       assertSession(session);
       if (session.accessEpoch < 0) throw new RequestError('Workspace access could not be verified. Reconnect before saving this object.', 409, 'ACCESS_CHANGED');
       syncDurableQuarantine();
-      if (options.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
-      if (options.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
+      if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
+      if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     }
     const objectId = childParent || objectFromPath(path);
     const sourceRepository = objectId ? session.revisionRepositories.get(objectId) : undefined;
@@ -438,10 +449,11 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (options && capabilities && !mutationAllowed) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
+      if (objectId && [...(session.revisionFiles.get(objectId) || [])].some(id => session.unavailableObjects.has(id))) { invalidateObjects([objectId]); throw unavailable(); }
       if (objectId && session.unavailableObjects.has(session.revisionRepositories.get(objectId) || '')) { invalidateObjects([objectId]); throw unavailable(); }
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
       if (relatedGenerations.some(({ id, generation }) => session.unavailableObjects.has(id) || (session.objectGenerations.get(id) || 0) !== generation)) throw referenceUnavailable();
-      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
+      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${path.startsWith('/api/files') ? 'File' : path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
     };
     const controller = new AbortController();
     session.controllers.add(controller);
@@ -536,7 +548,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory')).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
+      return key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };
@@ -546,7 +558,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     return keys.flatMap(key => { const value = readStored<unknown>(key, null); return value === null ? [] : [{ key, value }]; });
   };
   const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
-  return { session, durable, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, writeDiscussionChoice, clearDiscussionChoice, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  return { session, durable, retireUnavailableObject: (id: string) => { assertSession(session); invalidateObjects([id]); }, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, writeDiscussionChoice, clearDiscussionChoice, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.

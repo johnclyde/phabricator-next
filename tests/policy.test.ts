@@ -16,7 +16,7 @@ const status = (expected: number) => (error: unknown) => typeof error === 'objec
 const policyInput = (expectedVersion: number, spaceId = 'S1', view: Audience = shared, edit: Audience = shared, interact: Audience = shared) => ({ expectedVersion, spaceId, view, edit, interact });
 function database(path = ':memory:') {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON; CREATE TABLE entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL); INSERT INTO entities(id, kind, data) VALUES ('T1', 'task', '{}'), ('W1', 'document', '{}'); PRAGMA user_version = 3;");
+  db.exec("PRAGMA foreign_keys = ON; CREATE TABLE entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL); INSERT INTO entities(id, kind, data) VALUES ('T1', 'task', '{}'), ('W1', 'document', '{}'); PRAGMA user_version = 3;");
   initializePolicies(db);
   return { db, policies: new PolicyStore(db, options) };
 }
