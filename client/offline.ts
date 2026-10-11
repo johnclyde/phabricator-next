@@ -30,10 +30,10 @@ function queuedObject(item: PendingMutation): string | null {
   if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return /^(?:paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function objectFromKey(key: string): string | null { return /^(?:docx-draft|docx-request|docx-selection|paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return /^(?:docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 // Personal presentation choices retain quota-failed memory, but are purged on view loss rather than treated as content drafts.
-function isRetainedDraftKey(key: string): boolean { return /^(?:paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return /^(?:docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -52,6 +52,7 @@ function currentProjectCache(key: string, value: unknown): boolean {
   }
   return true;
 }
+function docxSnapshot(key: string, value: unknown): boolean { return key.startsWith('revision:') && Boolean(value && typeof value === 'object' && 'versions' in value && Array.isArray(value.versions) && value.versions.some((version: unknown) => version && typeof version === 'object' && 'docx' in version)); }
 function unavailable(): RequestError { return new RequestError('This object is unavailable or you no longer have access. Unsaved drafts have been set aside for export.', 404, 'OBJECT_UNAVAILABLE'); }
 
 
@@ -69,6 +70,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   }
   const contentKey = (key: string) => storageKey(prefix + key);
   const blockedDraft = (key: string, value?: unknown): boolean => {
+    if (/^docx-(?:draft|request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.edit === false); }
     if (key.startsWith('paste-create:')) { const space = objectFromKey(key); return Boolean(space && (session?.unavailableObjects.has(space) || (session?.visibleObjects && !session.visibleObjects.has(space)))); }
     if (key.startsWith('citation-draft:')) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.interact === false); }
     if (key.startsWith('revision-git-import:')) {
@@ -109,6 +111,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const draftObjects = (key: string, value?: unknown): string[] => {
     const primary = objectFromKey(key);
+    if (/^docx-(?:draft|request):/.test(key)) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { sourceFile?: { fileId?: unknown }; body?: { sourceFile?: { fileId?: unknown } } } | null; const file = draft?.sourceFile?.fileId ?? draft?.body?.sourceFile?.fileId; return [...(primary ? [primary] : []), ...(typeof file === 'string' && /^F\d+$/.test(file) ? [file] : [])]; } catch { return primary ? [primary] : []; } }
     if (key.startsWith('citation-draft:')) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { source?: { fileId?: unknown }; body?: { source?: { fileId?: unknown } } } | null; const source = draft?.source?.fileId ?? draft?.body?.source?.fileId; return [...(primary ? [primary] : []), ...(typeof source === 'string' && /^F\d+$/.test(source) ? [source] : [])]; } catch { return primary ? [primary] : []; } }
     if (key.startsWith('revision-git-import:')) {
       try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { repositoryId?: unknown } | null; return [primary, typeof draft?.repositoryId === 'string' && /^R\d+$/.test(draft.repositoryId) ? draft.repositoryId : null].filter((id): id is string => typeof id === 'string'); } catch { return primary ? [primary] : []; }
@@ -126,7 +129,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const rememberRevisionSources = (value: unknown): void => {
     if (!sessionIsActive(session) || !value || typeof value !== 'object') return;
-    const data = value as { revision?: { id?: unknown; repositoryId?: unknown }; revisions?: { id?: unknown; repositoryId?: unknown }[]; versions?: { assets?: { fileId?: unknown }[] }[] };
+    const data = value as { revision?: { id?: unknown; repositoryId?: unknown }; revisions?: { id?: unknown; repositoryId?: unknown }[]; versions?: { assets?: { fileId?: unknown }[]; docx?: { sourceFile?: { fileId?: unknown } } }[] };
     const rows = Array.isArray(data.revisions) ? data.revisions : data.revision ? [data.revision] : [];
     for (const item of rows) {
       if (!item || typeof item.id !== 'string' || !/^[DPL]\d+$/.test(item.id)) continue;
@@ -134,6 +137,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (data.revision?.id === item.id && Array.isArray(data.versions)) {
         const assets = new Set(session.revisionFiles.get(item.id) || []);
         for (const version of data.versions) for (const asset of version.assets || []) if (typeof asset.fileId === 'string' && /^F\d+$/.test(asset.fileId)) assets.add(asset.fileId);
+        for (const version of data.versions) if (typeof version.docx?.sourceFile?.fileId === 'string' && /^F\d+$/.test(version.docx.sourceFile.fileId)) assets.add(version.docx.sourceFile.fileId);
         session.revisionFiles.set(item.id, assets);
       }
       try { const previous = JSON.parse(rawRead(`revision-source:${item.id}`) || 'null') as { fileIds?: unknown } | null; if (Array.isArray(previous?.fileIds)) session.revisionFiles.set(item.id, new Set([...(session.revisionFiles.get(item.id) || []), ...previous.fileIds.filter((id): id is string => typeof id === 'string' && /^F\d+$/.test(id))])); } catch { /* Historical dependencies already learned in this session stay retained. */ }
@@ -216,7 +220,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session)) return;
     session.taskSnapshotGeneration += 1;
     for (const controller of session.taskReadControllers) if (controller !== except) controller.abort();
-    if (remove) for (const [key] of savedEntries()) if (key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) rawRemove(key);
+    if (remove) for (const [key, value] of savedEntries()) if ((key.startsWith('revision:') && (() => { try { return docxSnapshot(key, JSON.parse(value)); } catch { return false; } })()) || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) rawRemove(key);
     for (const listener of session.taskSnapshotListeners) listener();
   };
   let holdingLegacy = false;
@@ -246,7 +250,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const changed = (event: StorageEvent) => {
         if (!sessionIsActive(session)) return;
         if (event.key === null || event.key === contentKey('quarantine-ready') || event.key?.startsWith(contentKey('quarantined-drafts:'))) { syncDurableQuarantine(); quarantineChanged(); }
-        if (event.key === null || ((event.key?.startsWith(contentKey('paste:')) || event.key?.startsWith(contentKey('paste-version:')) || event.key?.startsWith(contentKey('paste-list:')) || event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:')) || event.key?.startsWith(contentKey('workboard:')) || event.key?.startsWith(contentKey('repository:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
+        if (event.key === null || ((event.key?.startsWith(contentKey('revision:')) || event.key?.startsWith(contentKey('paste:')) || event.key?.startsWith(contentKey('paste-version:')) || event.key?.startsWith(contentKey('paste-list:')) || event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:')) || event.key?.startsWith(contentKey('workboard:')) || event.key?.startsWith(contentKey('repository:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
       };
       window.addEventListener('storage', changed);
       session.cleanupCallbacks.add(() => window.removeEventListener('storage', changed));
@@ -263,7 +267,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id)) || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
@@ -271,7 +275,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
     if (key.startsWith('revision-comparison:')) { if (!isComparisonSelection(value, objectFromKey(key) || '')) return false; value = comparisonMetadata(value); }
     if (/^repository:R\d+:selection$/.test(key)) { const selection = repositorySelection(value); if (!selection) return false; value = selection; }
-    if ((key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
+    if ((docxSnapshot(key, value) || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
     if (key.startsWith('workboard-move:') && draftObjects(key, value).some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'A selected move reference is no longer available' });
     if (blockedDraft(key, value)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); }
     if (hasDraftHold(key)) return false;
@@ -407,9 +411,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     const childParent = path === '/api/projects' && options?.method === 'POST' && options.body && typeof options.body === 'object' && 'parentId' in options.body && typeof options.body.parentId === 'string' ? options.body.parentId : null;
     const citationRequest = /^\/api\/revisions\/[DPL]\d+\/(?:citations|citation-evidence)(?:[/?]|$)/.test(path);
+    const docxRequest = /^\/api\/revisions(?:\/[DPL]\d+)?\/docx(?:[/?]|$)/.test(path);
     const pasteRequest = /^\/api\/pastes(?:[/?]|$)/.test(path);
-    const taskRequest = pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
-    if ((options || pasteRequest || citationRequest || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
+    const taskRequest = /^\/api\/revisions\/L\d+$/.test(path) || docxRequest || pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
+    if ((options || docxRequest || pasteRequest || citationRequest || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
       // its successful response. Later epoch changes still reject stale content.
@@ -436,6 +441,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const relatedIds = [...new Set([...authorityIds, ...(bulkDestination ? [bulkDestination, ...bulkTaskIds] : importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [])])];
     const relatedGenerations = relatedIds.map(id => ({ id, generation: session.objectGenerations.get(id) || 0 }));
     const referenceUnavailable = () => {
+      if (docxRequest) return new RequestError('The original Word file is unavailable. Your unsaved work remains available for export.', 404, 'DOCX_SOURCE_UNAVAILABLE');
       if (citationRequest) return new RequestError('The supporting File is unavailable. Your evidence draft remains available for export.', 404, 'CITATION_SOURCE_UNAVAILABLE');
       if (/^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path)) return new RequestError('The source repository is unavailable. The original version import request is retained for export or explicit retry after access returns.', 404, 'REPOSITORY_REFERENCE_UNAVAILABLE');
       const changed = (id: string) => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)) || relatedGenerations.some(item => item.id === id && item.generation !== (session.objectGenerations.get(id) || 0));
@@ -504,6 +510,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (!response.ok) {
         const code = typeof data === 'object' && data !== null && 'code' in data ? String(data.code) : undefined;
         if (objectId && code === 'OBJECT_UNAVAILABLE') invalidateObjects([objectId]);
+        if (docxRequest && code === 'DOCX_SOURCE_UNAVAILABLE') { const body = options?.body as { sourceFile?: { fileId?: unknown } } | undefined; const fileIds = typeof body?.sourceFile?.fileId === 'string' ? [body.sourceFile.fileId] : authorityIds.filter(id => /^F\d+$/.test(id)); if (fileIds.length) invalidateObjects(fileIds); }
         if (citationRequest && code === 'CITATION_SOURCE_UNAVAILABLE') { const source = options?.body && typeof options.body === 'object' && 'source' in options.body ? options.body.source as { fileId?: unknown } | null : null; const fileIds = typeof source?.fileId === 'string' && /^F\d+$/.test(source.fileId) ? [source.fileId] : authorityIds.filter(id => /^F\d+$/.test(id)); if (fileIds.length) invalidateObjects([...fileIds]); }
         if ((importSource || bulkDestination) && code === 'PROJECT_REFERENCE_UNAVAILABLE') invalidateObjects([importSource || bulkDestination!]);
         throw new RequestError(typeof data === 'object' && data !== null && 'error' in data ? String(data.error) : `Request failed (${response.status})`, response.status, code);
@@ -555,7 +562,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory')).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return /^(?:paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
+      return /^(?:docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };

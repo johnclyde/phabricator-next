@@ -5,6 +5,7 @@ import type { TaskColumnMove } from './workboards';
 import type { GitSourceProvenance } from './repositories';
 import type { FileRecord, RevisionAsset } from './files';
 import type { PasteRecord } from './pastes';
+import type { DocxSource } from './docx';
 export type { FileRecord, RevisionAsset } from './files';
 export { WORKBOARD_BULK_MOVE_LIMIT } from './workboards';
 export type { WorkboardBulkMoveQuery, WorkboardBulkMoveTask, WorkboardBulkMovePreview, BulkMoveWorkboardCardsInput, WorkboardBulkMoveReceipt } from './workboards';
@@ -38,7 +39,7 @@ export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
 export interface WikiHistory { versions: WikiVersionSummary[]; nextBefore: number | null; firstAvailableVersion: number }
 export interface WikiDetail { document: WikiDocument; history: WikiHistory; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface Revision { id: string; title: string; summary: string; kind: RevisionKind; status: RevisionStatus; repositoryId: string | null; projectId: string | null; currentVersion: number; createdAt: string; updatedAt: string }
-export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: GitSourceProvenance; id: string; revisionId: string; number: number; files: SourceFile[]; assets?: RevisionAsset[]; message: string; contentHash: string; createdAt: string }
+export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: GitSourceProvenance; docx?: DocxSource; docxOperation?: { kind: 'import' | 'reimport' | 'replace'; inputSha256: string }; id: string; revisionId: string; number: number; files: SourceFile[]; assets?: RevisionAsset[]; message: string; contentHash: string; createdAt: string }
 /** Source offsets are UTF-16 code units, start inclusive and end exclusive. */
 export interface PassageAnchor { versionId: string; contentHash: string; filePath: string; start: number; end: number; quote: string; prefix: string; suffix: string }
 export interface PassageInput { start: number; end: number; quote: string }

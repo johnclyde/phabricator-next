@@ -1,0 +1,11 @@
+# DOCX roundtrip fixture
+
+`roundtrip.docx` is a synthetic document authored by `generate.py` using python-docx, then patched with explicit OOXML. It contains an inherited heading style, a bold editable run, a footnote and its reference, an imported comment with range anchors, existing tracked insertion/deletion metadata, an XML comment, opaque custom XML and binary parts. ZIP entry timestamps and permissions are fixed. No personal or third-party document content is included.
+
+The engine tests derive additional packages in memory for Strict namespaces, alternate namespace prefixes, UTF-16 byte orders, unknown markup, table and paragraph revisions, fields, whitespace, emoji, invalid packages and resource limits. These variants are deliberately small and do not claim exhaustive OOXML conformance.
+
+On 2026-10-11, both the original fixture and an engine-produced tracked replacement of “original” with “revised” were rendered using the bundled LibreOfficeDev 26.8.0.0.alpha0 (`2c87e51eeaa2b413ff4ae097b2705eea1995d8e5`). Every rendered page was inspected; each document occupied one page. Black headings, bold text, the footnote, existing revisions and the new tracked replacement rendered without clipping. The test suite separately verifies comment anchors and untouched package-part bytes, because PDF rendering does not reliably show comments.
+
+This evidence covers the bundled LibreOffice renderer and structural roundtrips. Microsoft Word opening and full OOXML schema validation have not been performed. The renderer's output is not the preservation oracle: the original package is authoritative, no-op export is byte-identical, and changed export must preserve every untouched part plus XML outside the edited run.
+
+Regenerating the fixture requires python-docx and a fresh visual/structural review. The product runtime uses the TypeScript DOCX engine and does not invoke Python or LibreOffice.

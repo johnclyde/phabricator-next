@@ -118,13 +118,19 @@ export class PolicyStore {
     // LIMIT also bounds materialized output, without loading text snapshots into JS.
     // Invalid non-array manifests/entries yield NULL and fail closed below.
     return this.database.prepare(`
-      SELECT DISTINCT CASE WHEN json_type(v.data, '$.assets') = 'array' AND a.type = 'object'
+      SELECT DISTINCT file_id FROM (
+      SELECT CASE WHEN json_type(v.data, '$.assets') = 'array' AND a.type = 'object'
         THEN json_extract(a.value, '$.fileId') END AS file_id
       FROM versions v LEFT JOIN json_each(v.data, '$.assets') a
       WHERE v.revision_id = ? AND json_type(v.data, '$.assets') IS NOT NULL
         AND json_extract(v.data, '$.assets') <> '[]'
+      UNION ALL
+      SELECT CASE WHEN json_type(v.data, '$.docx') = 'object' AND json_type(v.data, '$.docx.sourceFile') = 'object'
+        THEN json_extract(v.data, '$.docx.sourceFile.fileId') END AS file_id
+      FROM versions v WHERE v.revision_id = ? AND json_type(v.data, '$.docx') IS NOT NULL
+      )
       LIMIT ?
-    `).all(id, traversal.remaining + 1) as { file_id: unknown }[];
+    `).all(id, id, traversal.remaining + 1) as { file_id: unknown }[];
   }
   private resolved(id: string, principalId: string, seen: Set<string>, traversal: Traversal): ResolvedPolicy | undefined {
     consume(traversal);

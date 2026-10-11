@@ -754,3 +754,22 @@
   .paste-detail .page-heading { align-items: flex-start; }
   .paste-detail .page-heading h1 { font-size: 23px; }
 }
+
+/* Word's package remains authoritative; this view presents safe structural text. */
+.docx-reading { padding: 22px clamp(16px, 4vw, 56px); max-width: 920px; margin: auto; line-height: 1.75; overflow-wrap: anywhere; }
+.docx-block { margin: 0 0 14px; white-space: pre-wrap; }
+.docx-block.table-cell { padding: 10px 14px; border: 1px solid var(--border); background: #f8fafc; }
+.docx-heading { font-size: 1.2rem; font-weight: 700; margin-top: 22px; }
+.docx-block > .text-button { font-size: 11px; padding: 1px 0; color: var(--muted); }
+.docx-block ins { background: #e4f4e7; text-decoration: underline; }
+.docx-block del { background: #fbe8e7; }
+.docx-block sup { font-size: 10px; color: #6b7280; margin-left: 3px; }
+.docx-warnings { padding: 15px 20px; background: #fff8e5; border-bottom: 1px solid #e8d9ae; font-size: 13px; }
+.docx-warnings summary, .docx-imported summary { font-weight: 600; }
+.docx-imported { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.docx-imported pre { white-space: pre-wrap; font: inherit; }
+.docx-editor select, .docx-import select { max-width: 100%; }
+.docx-editor .field textarea { font-family: inherit; }
+.docx-inspection { margin: 18px 0; border: 1px solid var(--border); padding: 14px; }
+.docx-inspection .docx-reading { max-height: 320px; overflow: auto; padding: 14px; }
+@media (max-width: 600px) { .docx-reading { padding: 16px; font-size: 15px; } .docx-editor .file-actions, .docx-import .file-actions { align-items: stretch; } .docx-editor .file-actions .button, .docx-import .file-actions .button { flex: 1 1 150px; } }

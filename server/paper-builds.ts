@@ -73,9 +73,10 @@ export class PaperBuildService {
   private selected(revisionId: string, id: string): JobRow { const row = this.row(id); if (row.revision_id !== revisionId) throw new HttpError(404, 'Paper build was not found.', 'PAPER_BUILD_UNAVAILABLE'); return row; }
   private source(revisionId: string, input: PaperBuildInput) {
     const detail = this.store.detail(revisionId);
-    if (detail.revision.kind !== 'paper') throw new HttpError(400, 'Paper compilation requires a paper revision.');
     const version = detail.versions.find(item => item.id === input.versionId);
     if (!version || version.contentHash !== input.contentHash) throw new HttpError(409, 'The selected immutable source version does not match.', 'PAPER_SOURCE_MISMATCH');
+    if (version.docx) throw new HttpError(409, 'TeX compilation does not support DOCX versions.', 'DOCX_OPERATION_UNSUPPORTED');
+    if (detail.revision.kind !== 'paper') throw new HttpError(400, 'Paper compilation requires a paper revision.');
     try { validateSourceSnapshot(version.files, version.assets); }
     catch { throw new HttpError(409, 'The selected source namespace or asset identity is invalid.', 'PAPER_SOURCE_MISMATCH'); }
     const actual = hash(sourceSnapshotCanonical(version.files, version.assets));

@@ -17,6 +17,7 @@ import { paperCommand } from './paper-builds';
 import { fileCommand } from './files';
 import { citationCommand } from './citations';
 import { pasteCommand } from './pastes';
+import { docxCommand } from './docx';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -51,6 +52,11 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- attach-file F1 --object P2 --mode attach|reference|detach --version N [--access-epoch N] [--request-id KEY]
   npm run arc -- download-file F1 --output NEW_FILE
   npm run arc -- set-figures P2 --assets-manifest FILE.json --version N --version-id ID --content-hash SHA256 --access-epoch N --message TEXT [--share-assets] [--request-id KEY]
+  npm run arc -- inspect-docx F1
+  npm run arc -- import-docx REQUEST.json [--request-id KEY]
+  npm run arc -- reimport-docx L1 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- edit-docx L1 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- download-docx L1 --version N --version-id ID --content-hash SHA256 --output NEW_FILE
   npm run arc -- citations P2 --version N [--json]
   npm run arc -- citation-evidence P2 --version-id ID [--target-id ID] [--before N] [--limit N]
   npm run arc -- citation-record P2 RECORD_ID
@@ -115,6 +121,11 @@ set-figures replaces the complete figure manifest on the exact selected source;
 each JSON entry pins path, fileId, sha256, bytes, mediaType. --share-assets explicitly
 shares new figures. Ordinary text diff preserves the selected version's figures.
 Removing figures does not detach earlier versions' grants or delete their bytes.
+Word imports bind an inspected File and preserve its package. Word request JSON
+contains exact source/version/access pins and an explicit shareSource choice.
+edit-docx applies a supported exact text replacement as a tracked change.
+See docs/docx.md for request shapes and preservation limits. Word downloads verify
+the selected version's package hash; they never overwrite an existing file.
 citations inventories literal source in one saved version; check --kind paper
 also checks bibliography keys offline. Neither verifies cited claims.
 record-citation submits your explicit source-inspection attestation. Its JSON
@@ -175,6 +186,7 @@ async function main() {
       'show-hidden': { type: 'boolean' },
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
       'request-id': { type: 'string' },
+      intent: { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -227,6 +239,7 @@ async function main() {
   };
   if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await docxCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';

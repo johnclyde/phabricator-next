@@ -6,7 +6,8 @@ import { PasteStore } from './pastes.ts';
 import { migratePastes } from './pastes-migration.ts';
 import type { PasteRecord } from '../shared/pastes.ts';
 import { CitationEvidenceStore, initializeCitationEvidence } from './citation-evidence.ts';
-import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
+import { sourceSnapshotCanonical, validateSourceSnapshot, validateDocxSource } from '../shared/source-snapshot.ts';
+import { DOCX_LIMITS, type DocxSource, type DocxProjection, type DocxFileIdentity, type DocxImportInput, type DocxReimportInput, type DocxReplaceInput, type DocxVersionPins } from '../shared/docx.ts';
 import type { FileRecord, RevisionAsset } from '../shared/files.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -55,8 +56,47 @@ export function gitVersionImportInput(input: unknown): GitVersionImportInput {
   return { commitId: data.commitId, expectedVersion: integer(data.expectedVersion, 'expectedVersion'), expectedVersionId: string(data.expectedVersionId, 'Expected version ID', 100), expectedContentHash, message: string(data.message, 'Message', 10_000) };
 }
 
-export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] = []): string {
-  return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets)).digest('hex');
+const docxUnsupported = () => new HttpError(409, 'This operation does not support DOCX versions. Use the Word document workflow.', 'DOCX_OPERATION_UNSUPPORTED');
+const docxMismatch = () => new HttpError(409, 'The immutable Word document source does not match.', 'DOCX_SOURCE_MISMATCH');
+const docxPinKeys = ['expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch'];
+function docxIdentity(value: unknown): DocxFileIdentity {
+  const data = object(value, ['fileId', 'sha256', 'bytes']);
+  if (typeof data.fileId !== 'string' || !/^F[1-9]\d{0,14}$/.test(data.fileId) || typeof data.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(data.sha256)) throw new HttpError(400, 'Choose an exact uploaded File identity.');
+  const bytes = integer(data.bytes, 'Source byte size');
+  if (bytes > DOCX_LIMITS.compressedBytes) throw new HttpError(400, 'The DOCX package exceeds the supported byte limit.');
+  return { fileId: data.fileId, sha256: data.sha256, bytes };
+}
+function docxPins(data: Record<string, unknown>): DocxVersionPins {
+  const expectedContentHash = string(data.expectedContentHash, 'Expected content hash', 64);
+  if (!/^[a-f0-9]{64}$/.test(expectedContentHash)) throw new HttpError(400, 'Expected content hash must be a SHA-256 digest.');
+  return { expectedVersion: integer(data.expectedVersion, 'expectedVersion'), expectedVersionId: string(data.expectedVersionId, 'Expected version ID', 100), expectedContentHash, expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch') };
+}
+export function parseDocxVersionPins(input: unknown): DocxVersionPins { return docxPins(object(input, docxPinKeys)); }
+export function parseDocxImportInput(input: unknown): DocxImportInput {
+  const data = object(input, ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access']);
+  if (typeof data.shareSource !== 'boolean') throw new HttpError(400, 'shareSource must be an explicit boolean.');
+  return { title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }) };
+}
+export function parseDocxReimportInput(input: unknown): DocxReimportInput {
+  const data = object(input, [...docxPinKeys, 'sourceFile', 'shareSource', 'message']);
+  if (typeof data.shareSource !== 'boolean') throw new HttpError(400, 'shareSource must be an explicit boolean.');
+  return { ...docxPins(data), sourceFile: docxIdentity(data.sourceFile), shareSource: data.shareSource, message: string(data.message, 'Message', 10_000) };
+}
+export function parseDocxReplaceInput(input: unknown): DocxReplaceInput {
+  const data = object(input, [...docxPinKeys, 'rangeId', 'start', 'end', 'quote', 'replacement', 'message']);
+  const quote = string(data.quote, 'Exact quote', DOCX_LIMITS.replacementLength, true), replacement = string(data.replacement, 'Replacement', DOCX_LIMITS.replacementLength, true);
+  if (/[\uD800-\uDFFF]/u.test(quote) || /[\uD800-\uDFFF]/u.test(replacement)
+    || !Number.isSafeInteger(data.start) || !Number.isSafeInteger(data.end) || (data.start as number) < 0 || (data.end as number) < (data.start as number)
+    || (data.end as number) - (data.start as number) !== quote.length) throw new HttpError(400, 'Choose an exact UTF-16 range and replacement.');
+  return { ...docxPins(data), rangeId: string(data.rangeId, 'Range ID', 2000), start: data.start as number, end: data.end as number, quote, replacement, message: string(data.message, 'Message', 10_000) };
+}
+/** Immutable mutation provenance binds receipts to the complete normalized request. */
+export function docxOperationHash(input: DocxImportInput | DocxReimportInput | DocxReplaceInput): string {
+  const normalized = 'replacement' in input ? parseDocxReplaceInput(input) : 'expectedVersion' in input ? parseDocxReimportInput(input) : parseDocxImportInput(input);
+  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+}
+export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] = [], docx?: DocxSource): string {
+  return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets, docx)).digest('hex');
 }
 
 export class Store {
@@ -74,7 +114,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 18) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 19) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -270,6 +310,18 @@ export class Store {
     if (version < 18) {
       try { migratePastes(this.database); }
       catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 19) {
+      try { this.transaction(() => {
+        this.database.exec(`
+          CREATE TABLE revision_docx_packages (version_id TEXT PRIMARY KEY REFERENCES versions(id), sha256 TEXT NOT NULL CHECK(length(sha256)=64), byte_size INTEGER NOT NULL CHECK(byte_size>0 AND byte_size<=16777216), data BLOB NOT NULL CHECK(length(data)=byte_size));
+          CREATE TRIGGER revision_docx_packages_no_update BEFORE UPDATE ON revision_docx_packages BEGIN SELECT RAISE(ABORT, 'DOCX packages are immutable'); END;
+          CREATE TRIGGER revision_docx_packages_no_delete BEFORE DELETE ON revision_docx_packages BEGIN SELECT RAISE(ABORT, 'DOCX packages are immutable'); END;
+          CREATE TRIGGER docx_versions_no_update BEFORE UPDATE ON versions WHEN json_type(OLD.data,'$.docx') IS NOT NULL OR json_type(NEW.data,'$.docx') IS NOT NULL BEGIN SELECT RAISE(ABORT, 'DOCX versions are immutable'); END;
+          CREATE TRIGGER docx_versions_no_delete BEFORE DELETE ON versions WHEN json_type(OLD.data,'$.docx') IS NOT NULL BEGIN SELECT RAISE(ABORT, 'DOCX versions are immutable'); END;
+          PRAGMA user_version = 19;
+        `);
+      }); } catch (error) { this.database.close(); throw error; }
     }
     this.pastes = new PasteStore(this.database, { nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor) });
     this.files = new FileStore(this.database);
@@ -813,6 +865,115 @@ export class Store {
   createRevision(input: unknown, attribution?: ActorAttribution): RevisionDetail {
     return this.discussionMutation(() => this.createRevisionRecord(input, attribution));
   }
+  private docxActor(attribution: ActorAttribution): ActorAttribution {
+    if (!attribution || typeof attribution.principalId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(attribution.principalId)
+      || typeof attribution.displayName !== 'string' || !attribution.displayName.trim() || attribution.displayName.length > 240
+      || typeof attribution.requestId !== 'string' || !attribution.requestId || attribution.requestId.length > 240
+      || (attribution.credentialId !== null && typeof attribution.credentialId !== 'string')) throw new HttpError(400, 'DOCX writes require authenticated attribution.');
+    return { ...attribution };
+  }
+  private docxEpoch(expected: number): void {
+    if (expected !== (this.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get() as { value: number }).value) throw new HttpError(409, 'Access changed. Reload the document before continuing.', 'ACCESS_EPOCH_CHANGED');
+  }
+  private docxFile(source: DocxFileIdentity, active: boolean): FileRecord {
+    const file = this.files.get(source.fileId);
+    if (file.sha256 !== source.sha256 || file.bytes !== source.bytes) throw docxMismatch();
+    this.files.readBytes(file.id);
+    if (active && file.status !== 'active') throw new HttpError(409, 'Restore the source File before importing it.', 'DOCX_FILE_ARCHIVED');
+    return file;
+  }
+  private docxSource(bytes: Uint8Array, projection: DocxProjection, fileName: string, sourceFile: DocxFileIdentity): DocxSource {
+    if (!(bytes instanceof Uint8Array) || !bytes.byteLength || bytes.byteLength > DOCX_LIMITS.compressedBytes) throw docxMismatch();
+    const source: DocxSource = { format: 'docx', fileName, sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.byteLength, sourceFile: { ...sourceFile }, projection };
+    try { validateDocxSource(source); } catch { throw docxMismatch(); }
+    // Detach caller-owned projection objects before retaining authoritative data.
+    return JSON.parse(JSON.stringify(source)) as DocxSource;
+  }
+  private attachDocxSource(id: string, source: DocxFileIdentity, share: boolean, actor: ActorAttribution): void {
+    if (!share) return;
+    const current = this.files.attachment(source.fileId, id);
+    if (current?.mode === 'attach') return;
+    this.files.setAttachment(source.fileId, { objectId: id, mode: 'attach', expectedVersion: current?.version ?? 0 }, actor);
+    this.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run();
+  }
+  private saveDocxVersion(revision: Revision, source: DocxSource, bytes: Uint8Array, message: string, actor: ActorAttribution, operation: NonNullable<RevisionVersion['docxOperation']>): RevisionVersion {
+    const version: RevisionVersion = { id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: [], docx: source, docxOperation: operation, message, contentHash: contentHash([], [], source), createdAt: new Date().toISOString(), attribution: actor };
+    this.database.prepare('INSERT INTO versions(id,revision_id,number,data) VALUES(?,?,?,?)').run(version.id, revision.id, version.number, JSON.stringify(version));
+    this.database.prepare('INSERT INTO revision_docx_packages(version_id,sha256,byte_size,data) VALUES(?,?,?,?)').run(version.id, source.sha256, source.bytes, bytes);
+    return version;
+  }
+  /** Internal commit boundary: projection must come from the isolated DOCX parser, never HTTP input. */
+  createDocxRevision(input: DocxImportInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = parseDocxImportInput(input), actor = this.docxActor(attribution); this.docxEpoch(data.expectedAccessEpoch);
+      const file = this.docxFile(data.sourceFile, true), source = this.docxSource(bytes, projection, file.originalName, data.sourceFile);
+      if (source.sha256 !== file.sha256 || source.bytes !== file.bytes || !Buffer.from(bytes).equals(this.files.readBytes(file.id))) throw docxMismatch();
+      const now = new Date().toISOString();
+      const revision: Revision = { id: this.nextId('revision', 'L'), title: data.title, summary: data.summary ?? '', kind: 'document', status: 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: now, updatedAt: now };
+      this.save('revision', revision); this.attachDocxSource(revision.id, data.sourceFile, data.shareSource, actor);
+      this.saveDocxVersion(revision, source, bytes, 'Imported Word document', actor, { kind: 'import', inputSha256: docxOperationHash(data) });
+      this.event(revision.id, 'created', 'Imported Word document as version 1.', actor);
+      return this.detail(revision.id);
+    });
+  }
+  /** Fresh operations only. Idempotent saved receipts bypass current-head checks. */
+  requireDocxVersion(id: string, input: DocxVersionPins): RevisionVersion {
+    const pins = docxPins(input as unknown as Record<string, unknown>); this.docxEpoch(pins.expectedAccessEpoch);
+    const detail = this.requireVersion(id, pins.expectedVersion), version = detail.versions.find(item => item.number === pins.expectedVersion);
+    if (!version?.docx) throw docxUnsupported();
+    if (version.id !== pins.expectedVersionId || version.contentHash !== pins.expectedContentHash) throw docxMismatch();
+    this.docxBytes(id, version.id);
+    return version;
+  }
+  docxBytes(id: string, versionId: string): Uint8Array {
+    this.get<Revision>('revision', id);
+    const row = this.database.prepare('SELECT v.id,v.number,v.data,p.sha256,p.byte_size,p.data AS bytes FROM versions v JOIN revision_docx_packages p ON p.version_id=v.id WHERE v.revision_id=? AND v.id=?').get(id, versionId) as { id: string; number: number; data: string; sha256: string; byte_size: number; bytes: Uint8Array } | undefined;
+    if (!row) throw new HttpError(404, 'The selected Word document version is unavailable.', 'DOCX_VERSION_UNAVAILABLE');
+    const version = JSON.parse(row.data) as RevisionVersion;
+    try {
+      if (!version.docx || version.id !== row.id || version.revisionId !== id || version.number !== row.number || !Array.isArray(version.files) || version.files.length || version.assets !== undefined || version.gitSource !== undefined
+        || contentHash(version.files, version.assets, version.docx) !== version.contentHash || version.docx.sha256 !== row.sha256 || version.docx.bytes !== row.byte_size
+        || row.bytes.byteLength !== row.byte_size || createHash('sha256').update(row.bytes).digest('hex') !== row.sha256) throw docxMismatch();
+    } catch { throw docxMismatch(); }
+    return Uint8Array.from(row.bytes);
+  }
+  /** Internal commit boundary: projection is the parser's verified interpretation of bytes. */
+  createDocxVersion(id: string, input: DocxReimportInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = parseDocxReimportInput(input), actor = this.docxActor(attribution); this.requireDocxVersion(id, data);
+      const file = this.docxFile(data.sourceFile, true), source = this.docxSource(bytes, projection, file.originalName, data.sourceFile);
+      if (source.sha256 !== file.sha256 || source.bytes !== file.bytes || !Buffer.from(bytes).equals(this.files.readBytes(file.id))) throw docxMismatch();
+      const revision = this.get<Revision>('revision', id);
+      if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
+      revision.currentVersion++; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      this.save('revision', revision); this.attachDocxSource(id, data.sourceFile, data.shareSource, actor);
+      this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'reimport', inputSha256: docxOperationHash(data) });
+      this.event(id, 'version_created', `Imported Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
+      return this.detail(id);
+    });
+  }
+  /** Internal commit boundary: bytes/projection are returned together by the isolated replacement engine. */
+  replaceDocxVersion(id: string, input: DocxReplaceInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = parseDocxReplaceInput(input), actor = this.docxActor(attribution), current = this.requireDocxVersion(id, data), original = current.docx!;
+      this.docxFile(original.sourceFile, false);
+      const range = original.projection.editableRanges.find(item => item.id === data.rangeId);
+      const split = (offset: number) => { const previous = range?.text.charCodeAt(offset - 1), next = range?.text.charCodeAt(offset); return previous !== undefined && previous >= 0xd800 && previous <= 0xdbff && next !== undefined && next >= 0xdc00 && next <= 0xdfff; };
+      if (!range || data.end > range.text.length || split(data.start) || split(data.end) || range.text.slice(data.start, data.end) !== data.quote) throw new HttpError(409, 'The selected editable Word text no longer matches.', 'DOCX_RANGE_MISMATCH');
+      const source = this.docxSource(bytes, projection, original.fileName, original.sourceFile);
+      if (data.quote === data.replacement) {
+        if (contentHash([], [], source) !== current.contentHash || !Buffer.from(bytes).equals(this.docxBytes(id, current.id))) throw docxMismatch();
+        return this.detail(id);
+      }
+      if (source.sha256 === original.sha256) throw docxMismatch();
+      const revision = this.get<Revision>('revision', id);
+      if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
+      revision.currentVersion++; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'replace', inputSha256: docxOperationHash(data) });
+      this.event(id, 'version_created', `Edited Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
+      return this.detail(id);
+    });
+  }
   /** Only the verified server collector may supply Git provenance. */
   createRevisionFromGit(repositoryId: string, input: unknown, snapshot: GitImportSnapshot, attribution?: ActorAttribution): RevisionDetail {
     return this.discussionMutation(() => {
@@ -840,8 +1001,9 @@ export class Store {
   /** Fresh-operation pins only: saved retries must bypass these head checks. */
   requireGitImportVersion(id: string, input: unknown): RevisionDetail {
     const data = gitVersionImportInput(input); const detail = this.requireVersion(id, data.expectedVersion);
-    if (!detail.revision.repositoryId) throw new HttpError(400, 'This revision is not linked to a repository.', 'GIT_IMPORT_UNLINKED');
     const current = detail.versions.find(version => version.number === detail.revision.currentVersion);
+    if (current?.docx) throw docxUnsupported();
+    if (!detail.revision.repositoryId) throw new HttpError(400, 'This revision is not linked to a repository.', 'GIT_IMPORT_UNLINKED');
     const actualHash = current ? contentHash(current.files, current.assets) : null;
     if (!current || current.revisionId !== id || current.id !== data.expectedVersionId || actualHash !== data.expectedContentHash || actualHash !== current.contentHash) throw new HttpError(409, 'The selected current source does not match this revision. Reload before importing.');
     if (current.assets?.length) throw new HttpError(409, 'A Git text-tree import cannot replace a version containing figures. Explicitly remove the figures in a new version before importing.', 'GIT_IMPORT_ASSETS');
@@ -904,6 +1066,7 @@ export class Store {
       const data = object(input, ['files', 'assets', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch', 'shareAssets']);
       const { revision, versions } = this.requireVersion(id, data.expectedVersion);
       const current = versions.find(version => version.number === revision.currentVersion)!;
+      if (current.docx) throw docxUnsupported();
       const source = files(data.files); const message = string(data.message, 'Message', 10_000);
       const assets = this.sourceAssets(source, data.assets === undefined ? current.assets ?? [] : data.assets, current.assets ?? []);
       if (data.assets !== undefined && (data.expectedVersionId !== current.id || data.expectedContentHash !== current.contentHash || contentHash(current.files, current.assets) !== current.contentHash)) throw new HttpError(409, 'Figure changes require the exact reviewed source version. Reload before continuing.');
@@ -1070,6 +1233,7 @@ export class Store {
       if (!/^[a-f0-9]{64}$/.test(expectedContentHash)) throw new HttpError(400, 'Expected content hash must be a SHA-256 digest.');
       if (integer(data.expectedThreadVersion, 'expectedThreadVersion') !== thread.version) throw new HttpError(409, 'This discussion changed. Reload its replies before applying the suggestion.');
       const from = detail.versions.find(version => version.number === detail.revision.currentVersion)!;
+      if (from.docx) throw docxUnsupported();
       const actualHash = contentHash(from.files, from.assets);
       if (from.id !== expectedVersionId || actualHash !== expectedContentHash || actualHash !== from.contentHash
         || comment.versionId !== from.id || comment.anchor.versionId !== from.id || comment.anchor.contentHash !== actualHash
@@ -1097,6 +1261,7 @@ export class Store {
   }
   saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis, attribution?: ActorAttribution): ReviewRun {
     const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
+    if (version.docx) throw docxUnsupported();
     const summary = version.assets?.length ? `${analysis.summary}\nReview covered text files only; ${version.assets.length} binary figure(s) were not inspected.` : analysis.summary;
     const review: ReviewRun = { ...analysis, summary, ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO reviews (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(review.id, id, version.id, JSON.stringify(review));

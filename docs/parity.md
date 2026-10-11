@@ -64,7 +64,7 @@ These identifiers are internal tracking keys. The rows describe required accepta
 | POLICY-01 | Objects and Spaces | View/edit/interact, project membership and a restrictive Space are evaluated for both direct IDs and list/search. Inaccessible objects and counts cannot leak through activity, attachments or model context. |
 | POLICY-02 | Offline and automated identity | Offline drafts/outbox/cache are partitioned by authenticated identity and server. Logout/account switch cannot replay one user's writes as another. Agents have attributed, bounded authority. |
 | WIKI-01 | Durable content history | Every wiki edit creates immutable content with actor/time/edit summary; view any version and compare two versions. A restart preserves histories, and concurrent updates conflict rather than overwrite. |
-| WIKI-02 | Hierarchy and movement | Canonical slugs, root/parent/child navigation, missing ancestors, move destinations and redirects are defined. Moving a subtree preserves descendants and stable document IDs; collisions and cycles fail safely. |
+| WIKI-02 | Hierarchy and movement | Canonical slugs and root/parent/child navigation respect every existing ancestor's view policy. Creating a child requires its immediate parent's view/edit permission. Upstream moves one document's published content into a destination identity and leaves a moved marker plus history at the source; descendants retain their paths. Active destination collisions and inactive sources fail safely. Hierarchy, moved markers and these policy rules remain unimplemented. |
 | WIKI-03 | Delete, draft and publish | Soft deletion, restoration, draft versus published state and publishing an earlier version preserve historical content and policy checks. |
 | WIKI-04 | Wiki policy and interoperability | Parent/ancestor restrictions apply to view/edit/history/search/preview. Mentions and file references do not widen permissions. Import/export retains histories, hierarchy and authorship; Phriction APIs are mapped. |
 | TASK-01 | Attributed transactions | Owner, author, subscribers, multiple project tags, status, priority and comments have durable transaction history. Stale updates fail explicitly, and bulk edit results report each object. |
@@ -238,6 +238,15 @@ Do not claim a novel capability does not exist elsewhere; validate demand throug
 ## Legal motions and general document iteration
 
 Legal motions and academic arguments share a need for exact versions, stable references, structured changes and evidence. The document review model should also support non-LaTeX text and, later, loss-aware Word/PDF import and export. A file conversion must report unsupported constructs rather than silently dropping footnotes, numbering, tables or tracked changes.
+
+The initial [D105 Word workflow](docx.md) preserves authoritative DOCX packages,
+stores a version-bound structural reading view, and supports bounded tracked
+replacements followed by exact export/reimport. Source File policies continue
+to restrict all derived versions. Golden fixtures verify preserved headings,
+notes, comments, existing revisions and opaque parts; original and edited files
+also render in bundled LibreOffice. This is partial interchange support:
+general rich edits, Word comment export, semantic document comparisons,
+projection-aware automated review and broader independent validation remain open.
 
 | Workflow | Planned acceptance requirement |
 | --- | --- |

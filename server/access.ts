@@ -10,14 +10,14 @@ import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import { gitImportInput, gitVersionImportInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
+import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 import { validatePasteContent, type PasteDetail, type PasteListQuery, type PastePage } from '../shared/pastes.ts';
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
 import type { CitationEvidenceRecord } from '../shared/citation-evidence.ts';
 import { parseCitationEvidenceInput } from './citation-evidence.ts';
 
-const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/files', '/api/pastes']);
+const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/revisions/docx', '/api/files', '/api/pastes']);
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
 /** One request's immutable principal. No process-global current user or policy bypass. */
@@ -276,6 +276,15 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    const docxImport = method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/import$/.test(path));
+    if (docxImport) {
+      const data = path === '/api/revisions/docx' ? parseDocxImportInput(input) : parseDocxReimportInput(input);
+      if (!this.canView(data.sourceFile.fileId)) throw new HttpError(404, 'The original Word File is unavailable.', 'DOCX_SOURCE_UNAVAILABLE');
+      // Reading a File may be sufficient to review it privately. Widening its
+      // audience is always explicit and requires the File editor's authority.
+      if (data.shareSource) this.require(data.sourceFile.fileId, 'edit');
+    }
+    if (method === 'POST' && /^\/api\/revisions\/[DPL]\d+\/docx\/replace$/.test(path)) parseDocxReplaceInput(input);
     const citation = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+)\/retract)?$/.exec(path) : null;
     if (citation) {
       if (citation[2]) {
@@ -556,6 +565,40 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path))) {
+      const invalid = (): never => { throw new HttpError(409, 'This saved Word receipt does not match the original operation.', 'DOCX_RECEIPT_MISMATCH'); };
+      if (!target || !body || !record(body.revision) || !Array.isArray(body.versions)) return invalid();
+      const detail = body as unknown as RevisionDetail;
+      if (detail.revision.id !== target.id || detail.revision.kind !== 'document') return invalid();
+      const current = this.store.detail(target.id);
+      for (const version of detail.versions) {
+        const stored = current.versions.find(item => item.id === version.id);
+        if (!stored || !isDeepStrictEqual(version, stored)) return invalid();
+      }
+      const result = detail.versions.find(item => item.number === detail.revision.currentVersion);
+      if (!result?.docx) return invalid();
+      if (path === '/api/revisions/docx') {
+        const input = parseDocxImportInput(mutationInput);
+        if (result.number !== 1 || result.attribution?.principalId !== this.principal || !isDeepStrictEqual(result.docx.sourceFile, input.sourceFile)
+          || detail.revision.title !== input.title || detail.revision.summary !== (input.summary ?? '')
+          || result.docxOperation?.kind !== 'import' || result.docxOperation.inputSha256 !== docxOperationHash(input)) return invalid();
+      } else {
+        const replacing = path.endsWith('/replace');
+        const input = replacing ? parseDocxReplaceInput(mutationInput) : parseDocxReimportInput(mutationInput);
+        const original = detail.versions.find(item => item.id === input.expectedVersionId);
+        if (!original?.docx || original.number !== input.expectedVersion || original.contentHash !== input.expectedContentHash) return invalid();
+        const unchanged = replacing && 'quote' in input && input.quote === input.replacement;
+        if (result.number !== input.expectedVersion + (unchanged ? 0 : 1)) return invalid();
+        if (unchanged ? result.id !== original.id : result.attribution?.principalId !== this.principal || result.message !== input.message) return invalid();
+        if (!unchanged && (result.docxOperation?.kind !== (replacing ? 'replace' : 'reimport') || result.docxOperation.inputSha256 !== docxOperationHash(input))) return invalid();
+        if (!isDeepStrictEqual(result.docx.sourceFile, 'sourceFile' in input ? input.sourceFile : original.docx.sourceFile)) return invalid();
+        if ('rangeId' in input) {
+          const range = original.docx.projection.editableRanges.find(item => item.id === input.rangeId);
+          if (!range || range.text.slice(input.start, input.end) !== input.quote) return invalid();
+        }
+      }
+      // Package evidence is immutable; only authorization is refreshed on replay.
+    }
     if (/^\/api\/pastes(?:\/PA[1-9]\d{0,14}(?:\/comments)?)?$/.test(path)) {
       const invalid = () => new HttpError(409, 'This saved Paste receipt does not match the original request.');
       if (!target || !body) throw invalid();

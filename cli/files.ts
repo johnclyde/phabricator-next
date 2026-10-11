@@ -95,6 +95,7 @@ export async function fileCommand({ command, args, options, optionNames, request
     validateSourceSnapshot([], assets);
     const source = await request<{ revision: Revision; version: RevisionVersion }>(`/api/revisions/${id}/export?version=${version}`);
     if (source.revision.id !== id || source.version.revisionId !== id || source.version.number !== version || source.version.id !== versionId || source.version.contentHash !== contentHash) throw new Error('The exported source differs from the exact reviewed pins.');
+    if (source.version.docx) throw new Error('Word packages require the dedicated document import and edit commands.');
     if (createHash('sha256').update(sourceSnapshotCanonical(source.version.files, source.version.assets)).digest('hex') !== contentHash) throw new Error('The exported source bytes differ from the reviewed content hash.');
     validateSourceSnapshot(source.version.files, assets);
     input = { files: source.version.files, assets, message, expectedVersion: version, expectedVersionId: versionId, expectedContentHash: contentHash, expectedAccessEpoch: epoch, ...(options['share-assets'] ? { shareAssets: true } : {}) };

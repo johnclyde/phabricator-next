@@ -105,6 +105,7 @@ export class CitationEvidenceStore {
   }
   validateCreate(id: string, input: unknown): ValidatedCitationEvidence {
     const data = parseCitationEvidenceInput(input); const version = this.version(id, data.versionId);
+    if (version.docx) throw new HttpError(409, 'The TeX citation inventory does not support DOCX versions.', 'DOCX_OPERATION_UNSUPPORTED');
     try {
       if (!Array.isArray(version.files) || !version.files.length || version.files.some(file => !file || typeof file.path !== 'string' || typeof file.content !== 'string')) throw sourceMismatch();
       if (version.assets !== undefined && !Array.isArray(version.assets)) throw sourceMismatch();

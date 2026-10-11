@@ -12,7 +12,9 @@ import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
-import { createStore, gitImportInput, gitVersionImportInput, type MutationResponse, type Store } from './store.ts';
+import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, type MutationResponse, type Store } from './store.ts';
+import { inspectDocx, replaceDocx } from './docx-package.ts';
+import type { DocxFileIdentity } from '../shared/docx.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
@@ -34,6 +36,7 @@ export interface AppOptions {
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
+  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx };
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
@@ -146,6 +149,11 @@ export function createApp(options: AppOptions = {}): App {
   paperBuilds.start();
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
   const gitReads = new Set<AbortController>();
+  const docxWork = new Set<Promise<unknown>>();
+  async function trackDocxWork<T>(promise: Promise<T>): Promise<T> {
+    docxWork.add(promise);
+    try { return await promise; } finally { docxWork.delete(promise); }
+  }
 
   async function repositoryRead(req: IncomingMessage, res: ServerResponse, context: AuthContext, id: string, section: string | undefined, commitPath: string | undefined, url: URL): Promise<void> {
     const authorize = () => {
@@ -213,6 +221,10 @@ export function createApp(options: AppOptions = {}): App {
     const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
     const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
+    const docxCreate = method === 'POST' && path === '/api/revisions/docx';
+    const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace)$/.exec(path) : null;
+    if ((docxCreate || docxWrite) && closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
+    if ((docxCreate || docxWrite) && !rawKey) throw new HttpError(400, 'Word document mutations require an Idempotency-Key.');
     const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
     if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
     if (/^\/api\/pastes(?:\/|$)/.test(path) && !rawKey) throw new HttpError(400, 'Paste mutations require an Idempotency-Key.');
@@ -230,6 +242,7 @@ export function createApp(options: AppOptions = {}): App {
       if (versionImportRepository) access.require(versionImportRepository);
       if (paper?.[2]) paperBuilds.get(paper[1]!, paper[2], context);
       if ((importMatch || versionImportMatch) && signal?.aborted) throw new HttpError(499, 'Repository import was canceled.', 'GIT_ABORTED');
+      if ((docxCreate || docxWrite) && signal?.aborted) throw new HttpError(499, 'Word document processing was canceled.', 'DOCX_ABORTED');
     };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
     const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
@@ -252,6 +265,39 @@ export function createApp(options: AppOptions = {}): App {
       }
     }
     const execute = async (): Promise<MutationResponse> => {
+      if (docxCreate || docxWrite) {
+        const selectedFile = (identity: DocxFileIdentity) => {
+          const file = store.files.get(identity.fileId);
+          if (file.sha256 !== identity.sha256 || file.bytes !== identity.bytes) throw new HttpError(409, 'The selected File does not match the inspected Word package.', 'DOCX_SOURCE_CHANGED');
+          if (file.status !== 'active') throw new HttpError(409, 'Archived Files cannot be imported into a Word version.');
+          return store.files.readBytes(file.id);
+        };
+        const requireEpoch = (epoch: number) => {
+          if (epoch !== policies.epoch()) throw new HttpError(409, 'Access changed since this document inspection. Reload before saving.', 'ACCESS_EPOCH_CHANGED');
+        };
+        if (docxWrite?.[2] === 'replace') {
+          const id = docxWrite[1]!; const data = parseDocxReplaceInput(input);
+          const original = store.read(() => { authorize(); const version = store.requireDocxVersion(id, data); return store.docxBytes(id, version.id); });
+          let edited: Awaited<ReturnType<typeof replaceDocx>>;
+          try { edited = await (options.docxProcessor?.replace ?? replaceDocx)(original, data, { author: attribution.displayName, date: new Date().toISOString() }, signal); }
+          catch (error) { store.read(authorize); throw error; }
+          return store.mutate(key, fingerprint, () => ({ status: 201, body: store.replaceDocxVersion(id, data, edited.bytes, edited.projection, attribution) }), authorize, present);
+        }
+        const data = docxCreate ? parseDocxImportInput(input) : parseDocxReimportInput(input);
+        const bytes = store.read(() => {
+          authorize(); requireEpoch(data.expectedAccessEpoch);
+          if (docxWrite) store.requireDocxVersion(docxWrite[1]!, parseDocxReimportInput(input));
+          return selectedFile(data.sourceFile);
+        });
+        let projection: Awaited<ReturnType<typeof inspectDocx>>;
+        try { projection = await (options.docxProcessor?.inspect ?? inspectDocx)(bytes, signal); }
+        catch (error) { store.read(authorize); throw error; }
+        return store.mutate(key, fingerprint, () => {
+          requireEpoch(data.expectedAccessEpoch); selectedFile(data.sourceFile);
+          if (docxCreate) return access.configureCreated({ status: 201, body: store.createDocxRevision(parseDocxImportInput(input), bytes, projection, attribution) }, input);
+          return { status: 201, body: store.createDocxVersion(docxWrite![1]!, parseDocxReimportInput(input), bytes, projection, attribution) };
+        }, authorize, present);
+      }
       if (paper) return store.mutate(key, fingerprint, () => ({ status: paper[3] === 'cancel' ? 200 : 201, body: paper[3] === 'cancel' ? paperBuilds.cancel(paper[1]!, paper[2]!, input, context) : paper[3] === 'retry' ? paperBuilds.retry(paper[1]!, paper[2]!, input, context) : paperBuilds.submit(paper[1]!, input, context) }), authorize, present);
       if (versionImportMatch) {
         const id = versionImportMatch[1]!; const data = gitVersionImportInput(input);
@@ -292,6 +338,7 @@ export function createApp(options: AppOptions = {}): App {
         const expectedVersion = integer(data.expectedVersion, 'expectedVersion');
         const detail = store.read(() => { authorize(); return store.requireVersion(reviewMatch[1]!, expectedVersion); });
         const version = detail.versions.find(item => item.number === expectedVersion)!;
+        if (version.docx) throw new HttpError(409, 'Word package review requires a disclosed document projection. Automated Word review is not available yet.', 'DOCX_REVIEW_UNSUPPORTED');
         if (provider === 'openai' && !ai().configured) throw new HttpError(400, 'Hosted AI review is not configured by the server operator.');
         if (provider === 'ollama' && !ai().localConfigured) throw new HttpError(400, 'Offline AI review is not configured by the server operator.');
         let analysis: ReviewAnalysis;
@@ -419,7 +466,7 @@ export function createApp(options: AppOptions = {}): App {
         throw new HttpError(404, 'Route not found.');
       }, authorize, present);
     };
-    const promise = execute();
+    const promise = docxCreate || docxWrite ? trackDocxWork(execute()) : execute();
     if (key) pending.set(key, { fingerprint, promise });
     try { return await promise; } finally { if (key) pending.delete(key); }
   }
@@ -469,10 +516,48 @@ export function createApp(options: AppOptions = {}): App {
       if (req.method === 'GET') {
         const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|history)|\/(commits)\/([^/]+))?$/.exec(path);
         if (repository) { await repositoryRead(req, res, context, repository[1]!, repository[2] ?? repository[3], repository[4], url); return; }
+        const docxInspection = /^\/api\/files\/(F[1-9]\d{0,14})\/docx$/.exec(path);
+        if (docxInspection) {
+          if (closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
+          const controller = new AbortController(); const abort = () => controller.abort();
+          const close = () => { if (!res.writableEnded) abort(); };
+          const access = new AccessLayer(store, auth, policies, context); const fileId = docxInspection[1]!;
+          const authorize = () => { auth.revalidate(context, 'read'); access.require(fileId); };
+          const original = store.read(() => {
+            authorize(); if (url.search) throw new HttpError(400, 'Word inspections do not accept query parameters.');
+            return { file: store.files.get(fileId), bytes: store.files.readBytes(fileId) };
+          });
+          gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+          if (req.aborted || res.destroyed) abort();
+          await trackDocxWork((async () => {
+            try {
+              const projection = await (options.docxProcessor?.inspect ?? inspectDocx)(original.bytes, controller.signal);
+              store.read(() => {
+                authorize();
+                if (!res.destroyed) send(res, 200, { sourceFile: { fileId, sha256: original.file.sha256, bytes: original.file.bytes }, fileName: original.file.originalName, projection, accessEpoch: policies.epoch() });
+              });
+            } catch (error) { store.read(authorize); throw error; }
+            finally { gitReads.delete(controller); req.off('aborted', abort); res.off('close', close); }
+          })());
+          return;
+        }
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const docxDownload = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/([^/]+)\/download$/.exec(path);
+          if (docxDownload) {
+            const id = docxDownload[1]!; access.require(id);
+            if (url.search) throw new HttpError(400, 'Word downloads require an exact version and no query parameters.');
+            const version = store.detail(id).versions.find(item => item.id === docxDownload[2]);
+            if (!version?.docx) throw new HttpError(404, 'Word package version was not found.', 'DOCX_VERSION_UNAVAILABLE');
+            const bytes = store.docxBytes(id, version.id);
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'); res.setHeader('Content-Length', bytes.byteLength);
+            res.setHeader('Content-Disposition', `attachment; filename="${id}-v${version.number}.docx"; filename*=UTF-8''${encodeURIComponent(version.docx.fileName).replace(/['()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`);
+            res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox"); res.setHeader('Cache-Control', 'private, no-store');
+            res.setHeader('X-Content-SHA256', version.docx.sha256); res.setHeader('X-Content-Version', version.number); res.setHeader('X-Revision-Version-ID', version.id); res.setHeader('X-Access-Epoch', policies.epoch());
+            res.end(bytes); return;
+          }
           const paste = /^\/api\/pastes(?:\/(PA[1-9]\d{0,14})(?:\/(history|versions|raw)(?:\/([^/]+))?)?)?$/.exec(path);
           if (paste) {
             const id = paste[1], section = paste[2], selected = paste[3];
@@ -518,6 +603,7 @@ export function createApp(options: AppOptions = {}): App {
             const row = store.database.prepare('SELECT data FROM versions WHERE revision_id = ? AND number = ?').get(id, Number(rawVersion)) as { data: string } | undefined;
             if (!row) throw new HttpError(404, 'Citation source version was not found.', 'CITATION_VERSION_UNAVAILABLE');
             const version = JSON.parse(row.data) as RevisionVersion;
+            if (version.docx) throw new HttpError(409, 'Citation indexing for Word packages is not available yet.', 'DOCX_CITATIONS_UNSUPPORTED');
             send(res, 200, { revisionId: id, version: { id: version.id, number: version.number, contentHash: version.contentHash }, index: analyzeCitations(version.files), accessEpoch: policies.epoch() }); return;
           }
           const citationRecords = /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+))?$/.exec(path);
@@ -736,7 +822,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path))) {
+      if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
@@ -761,6 +847,7 @@ export function createApp(options: AppOptions = {}): App {
     for (const controller of gitReads) controller.abort();
     await paperBuilds.close();
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
+    await Promise.allSettled([...docxWork]);
     if (!options.store) store.close();
   })() };
 }
