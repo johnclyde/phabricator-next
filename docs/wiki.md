@@ -271,11 +271,75 @@ rather than assigning misleading identities. Native endpoints retain actual
 principal attribution and access descriptions. Project/subscriber constraints
 and attachments, arbitrary saved queries, hierarchy/relevance/custom ordering,
 Ferret syntax/indexing, old session/certificate/OAuth/SSH authentication,
-upstream imports, and the broader Conduit API remain gaps. Legacy
-`phriction.create` and `phriction.edit` are explicitly unsupported for now;
-upstream edit can publish over divergent saved drafts without concurrency pins.
-The native version-pinned creation/edit/publication APIs remain available while
-the write-compatibility contract is completed.
+upstream imports, and the broader Conduit API remain gaps.
+
+## Phriction Conduit write compatibility
+
+`phriction.create` and `phriction.edit` use the same POST transports and legacy
+dictionary as the read methods. They require current `write` scope, including
+for no-effect edits and retries. Creation requires a nonempty `slug`, `title`
+and `content`; edit requires a nonempty `slug`, with optional `title` and
+`content`. Both accept optional `description`. Text is preserved exactly:
+whitespace and the string `"0"` are valid creation content. Strings are bounded
+to 512 characters for input paths, 240 for titles, 500,000 for content, and
+10,000 for descriptions. New canonical paths are limited to 128 characters.
+Unknown fields, non-string values except optional nulls, NUL and incomplete
+Unicode characters fail explicitly. This strict contract avoids PHP coercion.
+
+The compatibility methods preserve upstream's unusual no-effect filtering:
+
+- Edit ignores omitted, null, empty and `"0"` title/content fields. Description
+  alone never creates a version; omitted/null descriptions become empty on a
+  changed version.
+- Title effects compare with the published title; content effects compare
+  with the newest saved content, including an unpublished draft. A changed
+  edit copies the published baseline, applies only the surviving effects,
+  creates one new content version and publishes it immediately. A title-only
+  edit therefore does not publish an existing draft body.
+- Required-content validation runs before filtering. A deleted or moved blank
+  marker needs a nonempty proposed body. The historical edge is preserved:
+  when that body equals a saved draft, filtering drops it, and a surviving
+  title change can publish a copy of the blank marker. Native authored saves
+  continue to reject blank content.
+- A successful no-effect edit leaves content, publication, status, edit
+  summary and activity unchanged and returns the existing published content.
+  Effective edits reactivate deleted, moved or stub paths; creation never
+  replaces an existing path of any status.
+
+Creation requires all ancestors to exist and be visible, plus immediate-parent
+edit permission; it inherits that parent's rules and Space. Editing an existing
+page requires its view/edit permissions and every ancestor's visibility.
+Changes execute under the database writer lock. These legacy methods have no
+concurrency pins and can publish over divergent drafts, matching upstream.
+The native editor retains explicit content/publication pins.
+
+An optional `Idempotency-Key` header (1–200 letters, numbers, `.`, `_`, `:`, `-`)
+adds exact retry recovery. Immutable receipts bind the principal, method,
+normalized input, retry-key digest, selected content and publication snapshot.
+Successful no-ops also retain a receipt. A retry returns the original content
+and status, even after later edits, without repeating the operation. Its URI
+uses the current request origin and mount. Current token, page, ancestor and
+Space permissions are checked again; create retries also recheck parent edit
+permission. Changed input with the same key returns `ERR-CONFLICT`; unverifiable
+saved evidence returns `ERR-INVALID-RECEIPT`. Keys are principal-scoped and
+survive credential rotation. Without a key, repeating a call is a new operation.
+Missing, hidden and noneditable targets share `ERR-BAD-DOCUMENT`. Error codes
+are explicit privacy-preserving extensions to upstream's generic write errors.
+
+The CLI accepts `create-wiki REQUEST.json` and `edit-wiki REQUEST.json`, with
+optional `--request-id KEY`. Files contain only the fields above. Each command
+performs one POST, generates a retry ID if omitted, and prints the ID and exact
+wire-body digest before transmission. Keep the original file and ID for an
+uncertain retry. Output contains returned metadata and a content digest;
+`--json` does not print source. No implicit read, rebase or draft save occurs.
+These commands implement the two Phriction methods, not Arcanist working-copy
+or landing workflows.
+
+Schema 23 adds an immutable receipt sidecar; it preserves existing raw rows,
+rowids, schema objects, foreign keys and sequence values. Store/API tests cover
+draft filtering, inactive paths, no-effect receipts, permission revocation,
+concurrent retries and receipt substitution. CLI integration runs at both root
+and mounted paths.
 
 ## Upstream evidence and remaining work
 
@@ -296,6 +360,10 @@ The behavioral baseline is pinned Phabricator
   [content search](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/query/PhrictionContentSearchEngine.php),
   [content attachment](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/engineextension/PhrictionContentSearchEngineAttachment.php),
   and [legacy dictionary](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/conduit/PhrictionConduitAPIMethod.php)
+- [Legacy creation](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/conduit/PhrictionCreateConduitAPIMethod.php),
+  [legacy editing](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/conduit/PhrictionEditConduitAPIMethod.php),
+  [title effects](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/xaction/PhrictionDocumentTitleTransaction.php)
+  and [content effects](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/xaction/PhrictionDocumentContentTransaction.php)
 
 Full Phriction parity is not claimed. Upstream content/status import, full Conduit mappings,
 Remarkup rendering, subscriptions, mail, Herald, full-text indexing, and the

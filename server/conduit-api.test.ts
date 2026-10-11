@@ -135,11 +135,12 @@ test('Conduit query defaults, supported filters and both cursor directions exclu
   }finally{await app.close();}
 });
 
-test('Conduit rejects unsupported writes, constraints, malformed shapes and out-of-range limits explicitly',async()=>{
+test('Conduit rejects read-token writes, unsupported methods, constraints, malformed shapes and out-of-range limits explicitly',async()=>{
   const app=await startWikiApi();
   try{
     await app.document('/');
-    for(const method of ['phriction.create','phriction.edit','phriction.nonexistent']) conduitFailure(await app.conduit(method,{slug:'/',title:'Do not mutate',content:'No write'}),'ERR-UNKNOWN-METHOD');
+    for(const method of ['phriction.create','phriction.edit']) conduitFailure(await app.conduit(method,{slug:'/',title:'Do not mutate',content:'No write'}),'ERR-INVALID-AUTH');
+    conduitFailure(await app.conduit('phriction.nonexistent',{slug:'/',title:'Do not mutate',content:'No write'}),'ERR-UNKNOWN-METHOD');
     for(const input of [{limit:0},{limit:101},{limit:1.5},{queryKey:'invented'},{order:'hierarchy'},{order:['id']},{constraints:{projects:['PHID-PROJ-unknown']}},{constraints:{subscribers:[]}},{constraints:{spaces:[]}},{constraints:{unknown:'do-not-reflect'}},{attachments:{projects:true}},{constraints:[]},{attachments:[]},{unrecognized:'secret-parameter-value'}]){
       const response=await app.conduit('phriction.document.search',input);conduitFailure(response,'ERR-INVALID-PARAMETER');assert.equal(JSON.stringify(response.body).includes('secret-parameter-value'),false);assert.equal(JSON.stringify(response.body).includes('do-not-reflect'),false);
     }

@@ -19,6 +19,7 @@ import { citationCommand } from './citations';
 import { pasteCommand } from './pastes';
 import { docxCommand } from './docx';
 import { wikiCommand } from './wiki';
+import { wikiWriteCommand } from './wiki-write';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -78,6 +79,8 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- wiki-version W1 --version N
   npm run arc -- wiki-history W1 [--before N] [--limit N]
   npm run arc -- wiki-transactions W1 [--before N] [--limit N]
+  npm run arc -- create-wiki REQUEST.json [--request-id KEY] [--json]
+  npm run arc -- edit-wiki REQUEST.json [--request-id KEY] [--json]
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -144,6 +147,17 @@ Paste content comes from bounded regular UTF-8 files, preserving BOM, whitespace
 and newline bytes. Edit/archive --version is the metadata version; comment/read/
 download --version is the immutable content version. Downloads verify SHA-256
 and byte length and never overwrite a file. Empty --language selects plain text.
+create-wiki and edit-wiki explicitly submit a bounded UTF-8 JSON file to Conduit.
+Create requires slug, title and content; edit requires slug and accepts optional
+title/content. Both accept description. These legacy commands publish immediately,
+not as saved drafts, and do not fetch or pin the latest document automatically.
+Edit ignores empty, "0" and null title/content. A changed title is compared with
+published content; a changed body is compared with the latest saved content.
+Effective changes use the published baseline; earlier draft versions remain in
+history. A successful edit with no effect returns the prior published version. Keep the input
+file and request ID printed before submission; retry unchanged with that ID after
+an uncertain result. Output contains returned metadata and a content hash, never
+the raw source. A receipt may be historical and is not a fresh editing base.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -250,6 +264,7 @@ async function main() {
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await wikiWriteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

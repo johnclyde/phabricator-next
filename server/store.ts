@@ -1,4 +1,7 @@
 import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
+import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
+import type { WikiConduitMethod, WikiConduitReceipt } from '../shared/wiki-conduit.ts';
+import { isDeepStrictEqual } from 'node:util';
 import type { WikiDocumentSearchQuery, WikiContentSearchQuery, WikiDocumentSearchPage, WikiContentSearchPage, WikiDocumentIdentity, WikiContentIdentity } from '../shared/wiki-search.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { initializePaperBuilds } from './paper-builds.ts';
@@ -157,7 +160,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 22) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 23) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -397,6 +400,7 @@ export class Store {
       });}catch(error){this.database.close();throw error;}
     }
     if(version<22){try{this.transaction(()=>{initializeWikiSearch(this.database);this.database.exec('PRAGMA user_version = 22');});}catch(error){this.database.close();throw error;}}
+    if(version<23){try{this.transaction(()=>{initializeWikiConduit(this.database);this.database.exec('PRAGMA user_version = 23');});}catch(error){this.database.close();throw error;}}
     this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;
@@ -996,6 +1000,74 @@ export class Store {
     this.database.prepare('INSERT INTO wiki_locations(document_id,path,status,moved_to_id) VALUES (?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET path=excluded.path,status=excluded.status,moved_to_id=excluded.moved_to_id').run(id,location.path,location.status,location.movedToId);
   }
   private wikiChanged():void { this.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run(); }
+  private wikiConduitActor(attribution:ActorAttribution):ActorAttribution {
+    if(!attribution || typeof attribution.principalId!=='string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(attribution.principalId)
+      || typeof attribution.displayName!=='string' || !attribution.displayName.trim() || attribution.displayName.length>240
+      || typeof attribution.requestId!=='string' || !attribution.requestId || attribution.requestId.length>240
+      || (attribution.credentialId!==null && (typeof attribution.credentialId!=='string' || !attribution.credentialId || attribution.credentialId.length>240))) throw new HttpError(400,'Conduit writes require authenticated attribution.','WIKI_CONDUIT_ATTRIBUTION_INVALID');
+    return {principalId:attribution.principalId,displayName:attribution.displayName,credentialId:attribution.credentialId,requestId:attribution.requestId};
+  }
+  private wikiConduitRetryKey(value:string|null):string|null {if(value!==null && (typeof value!=='string' || !/^[a-f0-9]{64}$/.test(value)))throw new HttpError(400,'The Conduit retry identity is invalid.','WIKI_CONDUIT_INPUT_INVALID');return value;}
+  private saveWikiConduitReceipt(method:WikiConduitMethod,input:unknown,document:WikiDocument,attribution:ActorAttribution,transactionId:string|null,retryKeySha256:string|null):WikiConduitReceipt {
+    const receipt:WikiConduitReceipt={id:randomUUID(),method,inputSha256:wikiConduitInputHash(method,input),retryKeySha256,attribution,documentId:document.id,selectedVersionId:document.publication!.publishedVersionId,snapshot:this.wikiSnapshot(document),transactionId,createdAt:transactionId?document.updatedAt:new Date().toISOString()};
+    this.database.prepare('INSERT INTO wiki_conduit_receipts VALUES(?,?,?,?)').run(receipt.id,receipt.documentId,receipt.selectedVersionId,JSON.stringify(receipt));
+    return receipt;
+  }
+  /** Legacy Conduit writes observe current state under the writer lock; native CAS saves are separate. */
+  createConduitDocument(input:unknown,attribution:ActorAttribution,retryKeySha256:string|null=null):WikiConduitReceipt {
+    return this.documentMutation(()=>{
+      const data=parseWikiConduitCreateInput(input),actor=this.wikiConduitActor(attribution),path=data.slug;this.wikiConduitRetryKey(retryKeySha256);
+      if(!data.title.length || !data.content.length)throw new HttpError(400,'Documents must have a title and content.','WIKI_CONDUIT_REQUIRED');
+      if(path.length>WIKI_WRITE_PATH_MAX_LENGTH)throw new HttpError(400,'New wiki paths must be at most 128 characters.');
+      if(this.documentAtPath(path))throw new HttpError(409,'This wiki path is unavailable.','WIKI_PATH_CONFLICT');
+      this.requireWikiAncestors(path);
+      const now=new Date().toISOString(),document:WikiDocument={id:this.nextId('document','W'),title:data.title,slug:path,content:data.content,version:1,createdAt:now,updatedAt:now,location:{path,status:'active',movedToId:null}};
+      this.save('document',document);this.writeWikiLocation(document.id,document.location!);
+      const version=this.saveWikiVersion(document,{kind:'create',author:actor.displayName,attribution:actor,message:data.description,restoredFrom:null});
+      const transaction=this.publishWikiState(document,version,version,undefined,'create',wikiConduitInputHash('phriction.create',data),data.description,actor);
+      this.event(document.id,'created',`Saved document ${document.title}, version 1.`,actor);this.wikiChanged();
+      return this.saveWikiConduitReceipt('phriction.create',data,document,actor,transaction.id,retryKeySha256);
+    });
+  }
+  editConduitDocument(id:string,input:unknown,attribution:ActorAttribution,retryKeySha256:string|null=null):WikiConduitReceipt {
+    return this.documentMutation(()=>{
+      const data=parseWikiConduitEditInput(input),actor=this.wikiConduitActor(attribution),current=this.get<WikiDocument>('document',id),head=this.rawWikiVersion(current.publication!.headVersionId);this.wikiConduitRetryKey(retryKeySha256);
+      if(data.slug!==current.location!.path)throw new HttpError(409,'This wiki path does not match the selected document.','WIKI_PATH_CONFLICT');
+      const hasTitle=wikiConduitEffectiveText(data.title),hasContent=wikiConduitEffectiveText(data.content);
+      // Upstream validates proposed transactions against published content BEFORE
+      // filtering no-effect transactions against title (published) and body (head).
+      if(!(hasTitle?data.title!:current.title).length || !(hasContent?data.content!:current.content).length)throw new HttpError(400,'Documents must have a title and content.','WIKI_CONDUIT_REQUIRED');
+      const titleChanged=hasTitle&&data.title!==current.title,contentChanged=hasContent&&data.content!==head.content;
+      if(!titleChanged&&!contentChanged)return this.saveWikiConduitReceipt('phriction.edit',data,current,actor,null,retryKeySha256);
+      const document:WikiDocument={...current,title:titleChanged?data.title!:current.title,content:contentChanged?data.content!:current.content,version:current.version+1,updatedAt:new Date().toISOString(),location:{...current.location!,status:'active',movedToId:null}};
+      if(!Number.isSafeInteger(document.version))throw new HttpError(409,'This document has reached the supported version limit.');
+      // Deliberately preserve the narrow historical edge: a nonempty submitted
+      // body equal to a draft head is filtered, so a title effect can publish a
+      // copy of an empty published marker. Native authored saves still reject it.
+      const version=this.saveWikiVersion(document,{kind:'edit',author:actor.displayName,attribution:actor,message:data.description,restoredFrom:null});
+      this.writeWikiLocation(id,document.location!);
+      const transaction=this.publishWikiState(document,version,version,current,'edit',wikiConduitInputHash('phriction.edit',data),data.description,actor);
+      this.event(id,'updated',`Saved document ${document.title}, version ${document.version}.`,actor);
+      if(current.location!.status!==document.location!.status)this.wikiChanged();
+      return this.saveWikiConduitReceipt('phriction.edit',data,document,actor,transaction.id,retryKeySha256);
+    });
+  }
+  wikiConduitReceipt(id:string):WikiConduitReceipt {
+    const row=this.database.prepare('SELECT document_id,selected_version_id,data FROM wiki_conduit_receipts WHERE id=?').get(id) as {document_id:string;selected_version_id:string;data:string}|undefined;
+    if(!row)throw new HttpError(404,'The wiki Conduit receipt is unavailable.','WIKI_CONDUIT_RECEIPT_UNAVAILABLE');
+    try {
+      const receipt=JSON.parse(row.data) as WikiConduitReceipt;
+      this.wikiConduitRetryKey(receipt.retryKeySha256);
+      if(receipt.id!==id || receipt.documentId!==row.document_id || receipt.selectedVersionId!==row.selected_version_id || !['phriction.create','phriction.edit'].includes(receipt.method) || !/^[a-f0-9]{64}$/.test(receipt.inputSha256) || !Number.isFinite(Date.parse(receipt.createdAt)))throw new Error();
+      if(!isDeepStrictEqual(receipt.attribution,this.wikiConduitActor(receipt.attribution)))throw new Error();
+      const content=this.rawWikiVersion(receipt.selectedVersionId),publication=receipt.snapshot.publication,transaction=this.documentTransaction(receipt.documentId,publication.revision);
+      if(content.documentId!==receipt.documentId || content.id!==publication.publishedVersionId || content.number!==publication.publishedVersion || canonicalWikiPath(content.slug)!==receipt.snapshot.location.path || !isDeepStrictEqual(transaction.after,receipt.snapshot))throw new Error();
+      if(receipt.transactionId!==null && (receipt.transactionId!==transaction.id || transaction.kind!==(receipt.method==='phriction.create'?'create':'edit') || transaction.inputSha256!==receipt.inputSha256 || !isDeepStrictEqual(transaction.attribution,receipt.attribution) || transaction.newVersionId!==content.id || publication.headVersionId!==content.id || receipt.createdAt!==transaction.createdAt))throw new Error();
+      if(receipt.method==='phriction.create' && (receipt.transactionId===null || transaction.before!==null || content.number!==1))throw new Error();
+      return receipt;
+    }catch{throw new HttpError(409,'The wiki Conduit receipt does not match immutable content.','WIKI_CONDUIT_RECEIPT_MISMATCH');}
+  }
+  wikiConduitContent(receiptId:string):WikiVersion {return this.rawWikiVersion(this.wikiConduitReceipt(receiptId).selectedVersionId);}
   createDocument(input: unknown, attribution?: ActorAttribution): WikiDocument { return this.documentMutation(() => this.writeDocument(input, undefined, null, attribution)); }
   updateDocument(id: string, input: unknown, attribution?: ActorAttribution): WikiDocument { return this.documentMutation(() => this.writeDocument(input, this.get<WikiDocument>('document', id), null, attribution)); }
   restoreDocument(id:string,input:unknown,attribution?:ActorAttribution):WikiDocument {

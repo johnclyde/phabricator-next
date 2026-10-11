@@ -7,6 +7,7 @@ import { HttpError } from './validation.ts';
 import { canonicalWikiPath, type WikiStatus } from '../shared/wiki.ts';
 import type { WikiVersion } from '../shared/types.ts';
 import type { WikiContentSearchItem, WikiContentSearchQuery, WikiDocumentSearchQuery } from '../shared/wiki-search.ts';
+import { executeConduitWrite } from './conduit-writes.ts';
 
 const MAX_BODY = 2_000_000;
 const HISTORY_LIMIT = 1000;
@@ -50,7 +51,7 @@ function plainForm(form: URLSearchParams): Record<string, unknown> {
       }
       continue;
     }
-    if (!['slug', 'queryKey', 'order', 'before', 'after', 'limit', 'constraints', 'attachments', 'api.token', '__conduit__'].includes(name) || name in result) throw invalid('Unsupported or duplicate form field.');
+    if (!['slug', 'title', 'content', 'description', 'queryKey', 'order', 'before', 'after', 'limit', 'constraints', 'attachments', 'api.token', '__conduit__'].includes(name) || name in result) throw invalid('Unsupported or duplicate form field.');
     result[name] = value;
   }
   for (const name of ['constraints', 'attachments', '__conduit__']) if (typeof result[name] === 'string') result[name] = json(result[name] as string);
@@ -133,7 +134,7 @@ function searchParameters(params: Record<string, unknown>, content: boolean): { 
 const seconds = (date: string) => Math.floor(new Date(date).getTime() / 1000);
 const attachment = (content: WikiContentSearchItem) => ({ title: content.title, path: content.path, authorPHID: null, content: { raw: content.content } });
 function legacyDocument(store: Store, access: AccessLayer, slug: unknown): { id: string; status: WikiStatus; phid: string } {
-  if (typeof slug !== 'string' || !slug.trim()) throw invalid('Provide a nonempty slug.');
+  if (typeof slug !== 'string' || !slug.length) throw invalid('Provide a nonempty slug.');
   let path: string;
   try { path = canonicalWikiPath(slug); } catch { throw invalid('Provide a valid wiki slug.'); }
   const location = store.database.prepare('SELECT document_id AS id, status FROM wiki_locations WHERE path=?').get(path) as { id: string; status: WikiStatus } | undefined;
@@ -178,8 +179,13 @@ export async function conduitRequest(req: IncomingMessage, method: string, url: 
   try {
     if (req.method !== 'POST' || url.search) throw invalid('Conduit methods require POST without URL query parameters.');
     const { params, token } = await parameters(req);
+    const write = method === 'phriction.create' || method === 'phriction.edit';
     let context;
-    try { context = auth.authenticateConduit(req, token, 'read'); } catch { throw new ConduitError('ERR-INVALID-AUTH', 'A valid read credential is required. Browser sessions also require their current context and CSRF headers.'); }
+    try { context = auth.authenticateConduit(req, token, write ? 'write' : 'read'); } catch { throw new ConduitError('ERR-INVALID-AUTH', `A valid ${write ? 'write' : 'read'} credential is required. Browser sessions also require their current context and CSRF headers.`); }
+    if (write) {
+      const selected = executeConduitWrite(req, method, params, store, auth, policies, context);
+      return { result: legacyDictionary({ phid: selected.phid, status: selected.receipt.snapshot.location.status }, selected.content, `http://${req.headers.host}${basePath}`), error_code: null, error_info: null };
+    }
     const result = store.read(() => {
       auth.revalidate(context, 'read');
       return execute(method, params, store, new AccessLayer(store, auth, policies, context), `http://${req.headers.host}${basePath}`);
@@ -187,6 +193,10 @@ export async function conduitRequest(req: IncomingMessage, method: string, url: 
     return { result, error_code: null, error_info: null };
   } catch (error) {
     if (error instanceof ConduitError) return { result: null, error_code: error.code, error_info: error.message };
+    if (error instanceof HttpError) {
+      const mapped = { CONDUIT_BAD_DOCUMENT: ['ERR-BAD-DOCUMENT', 'The wiki destination is unavailable for this operation.'], CONDUIT_INVALID_RECEIPT: ['ERR-INVALID-RECEIPT', 'The saved write response cannot be verified.'], CONDUIT_CONFLICT: ['ERR-CONFLICT', 'This retry key belongs to a different request.'] }[error.code ?? ''];
+      if (mapped) return { result: null, error_code: mapped[0]!, error_info: mapped[1]! };
+    }
     if (error instanceof HttpError && error.status < 500) return { result: null, error_code: error.status === 401 || error.status === 403 ? 'ERR-INVALID-AUTH' : error.code?.includes('CURSOR') || error.code === 'ACCESS_EPOCH_CHANGED' ? 'ERR-CURSOR' : 'ERR-INVALID-PARAMETER', error_info: 'The request is invalid or its cursor is no longer valid. Reload with supported parameters and current credentials.' };
     return { result: null, error_code: 'ERR-INTERNAL', error_info: 'The request could not be completed.' };
   }
