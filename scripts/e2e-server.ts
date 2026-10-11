@@ -11,7 +11,7 @@ const directory = mkdtempSync(join(tmpdir(), 'phabricator-e2e-'));
 const gitFixture = await createGitFixture();
 const fixturePath = resolve('.data/e2e-repository-fixture.json');
 mkdirSync(resolve('.data'), { recursive: true });
-writeFileSync(fixturePath, JSON.stringify({ barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit }));
+writeFileSync(fixturePath, JSON.stringify({ barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit }));
 const app = createApp({ databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
 const passwordStore = createStore({ path: join(directory, 'password-workspace.sqlite') });
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });

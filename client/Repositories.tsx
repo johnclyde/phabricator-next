@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, FileCode2, Folder, FolderGit2, GitBranch, GitCommitHorizontal, History, RefreshCw } from 'lucide-react';
-import type { AppState } from '../shared/types';
+import RepositoryImport, { parseImportDraft } from './RepositoryImport';
+import type { AppState, RevisionDetail } from '../shared/types';
 import { isGitObjectId, type GitBlob, type GitCommitResult, type GitHistory, type GitRefs, type GitTree, type RepositoryDetail } from '../shared/repositories';
 import { AccessSummary } from './Access';
 import { useWorkspace } from './SessionGate';
@@ -11,8 +12,9 @@ const apiPath = (id: string, suffix: string) => `/api/repositories/${id}${suffix
 const query = (selection: RepositorySelection) => new URLSearchParams({ commit: selection.commitId, path: selection.path }).toString();
 const short = (id: string) => id.slice(0, 12);
 type Content = { key: string; data: GitTree | GitBlob | GitHistory; cached: boolean };
-export default function RepositoryPage({ id, state, online, manageAccess }: { id: string; state: AppState; online: boolean; manageAccess: () => void }) {
-  const { request, readStored, writeStored, isActive, unavailableObject, onAccessChange, onRepositorySnapshotChange, repositorySnapshotGeneration, durable } = useWorkspace();
+export default function RepositoryPage({ id, state, online, manageAccess, refreshWorkspace, opened }: { id: string; state: AppState; online: boolean; manageAccess: () => void; refreshWorkspace: () => Promise<void>; opened: (detail: RevisionDetail) => void }) {
+  const { request, readStored, writeStored, isActive, unavailableObject, onAccessChange, onRepositorySnapshotChange, repositorySnapshotGeneration, quarantinedDrafts, durable } = useWorkspace();
+  const [importing, setImporting] = useState<string | null>(null);
   const cache = useRef(repositoryCache(readStored(`repository:${id}:cache`, null)));
   const cached = <T,>(key: string): T | null => cache.current.entries.find(entry => entry.key === key)?.value as T ?? null;
   const [detail, setDetail] = useState<RepositoryDetail | null>(() => cached('detail'));
@@ -20,6 +22,7 @@ export default function RepositoryPage({ id, state, online, manageAccess }: { id
   const [selection, setSelection] = useState<RepositorySelection | null>(() => repositorySelection(readStored(`repository:${id}:selection`, null)));
   const selected = useRef(selection); selected.current = selection;
   const [commit, setCommit] = useState<GitCommitResult | null>(null); const [content, setContent] = useState<Content | null>(null);
+  const commitInputDirty = useRef(false);
   const [commitInput, setCommitInput] = useState(selection?.commitId || ''); const [refChoice, setRefChoice] = useState('');
   const [loading, setLoading] = useState(false); const [paging, setPaging] = useState(false); const [refLoading, setRefLoading] = useState(false);
   const [error, setError] = useState(''); const [refError, setRefError] = useState(''); const [warning, setWarning] = useState(''); const [profileCached, setProfileCached] = useState(true);
@@ -36,10 +39,13 @@ export default function RepositoryPage({ id, state, online, manageAccess }: { id
     else if (!writeStored(`repository:${id}:cache`, cache.current)) setWarning('This snapshot could not be saved in browser storage. Keep this tab open or reconnect to load it again.');
   };
   const dropCache = (key: string) => { if (!active()) return; cache.current = { ...cache.current, entries: cache.current.entries.filter(entry => entry.key !== key) }; writeStored(`repository:${id}:cache`, cache.current); };
-  const choose = (next: RepositorySelection) => {
+  const choose = (next: RepositorySelection, automatic = false) => {
     if (!active()) return;
     next = repositorySelection(next)!;
-    reads.current++; setLoading(false); setPaging(false); setError(''); selected.current = next; setSelection(next); setCommitInput(next.commitId);
+    // Reopening the same selection must not retire an in-flight read without
+    // changing the effect identity which starts its replacement.
+    if (selected.current?.commitId === next.commitId && selected.current.path === next.path && selected.current.view === next.view && selected.current.historyFrom === next.historyFrom) { if (!automatic || !commitInputDirty.current) { setCommitInput(next.commitId); commitInputDirty.current = false; } return; }
+    reads.current++; setLoading(false); setPaging(false); setError(''); selected.current = next; setSelection(next); if (!automatic || !commitInputDirty.current) { setCommitInput(next.commitId); commitInputDirty.current = false; }
     if (!writeStored(`repository:${id}:selection`, next)) setWarning('The selected commit could not be saved. It may need to be selected again after reloading.');
   };
   const loadRefs = useCallback(async () => {
@@ -52,7 +58,7 @@ export default function RepositoryPage({ id, state, online, manageAccess }: { id
       // Resolve the first displayed ref only once. Later refreshes never move an existing selection.
       if (!selected.current) {
         const initial = next.headCommit || next.refs.find(ref => ref.name === `refs/heads/${state.repositories.find(repo => repo.id === id)?.defaultBranch}`)?.commitId;
-        if (initial && isGitObjectId(initial, next.objectFormat)) choose({ commitId: initial, path: '', view: 'tree' });
+        if (initial && isGitObjectId(initial, next.objectFormat)) choose({ commitId: initial, path: '', view: 'tree' }, true);
       }
     } catch (failure) { if (active() && sequence === refReads.current) { setRefError(isNetworkError(failure) ? 'References could not be refreshed. Previously loaded references may be out of date.' : failure instanceof Error ? failure.message : 'Could not load repository references.'); if (!isNetworkError(failure)) { setRefs(null); dropCache('refs'); } } }
     finally { if (active() && sequence === refReads.current) setRefLoading(false); }
@@ -92,6 +98,7 @@ export default function RepositoryPage({ id, state, online, manageAccess }: { id
     } catch (failure) { if (active() && sequence === reads.current) setError(failure instanceof Error ? failure.message : 'Could not load older commits.'); }
     finally { if (active() && sequence === reads.current) setPaging(false); }
   };
+  const retainedImport = parseImportDraft(readStored(`repository-import:${id}`, null), id) || quarantinedDrafts().flatMap(item => item.key.replace(/:unsaved-memory$/, '') === `repository-import:${id}` ? [parseImportDraft(item.value, id)] : []).find(Boolean);
   const repository = detail?.repository || state.repositories.find(repo => repo.id === id);
   if (!repository) return <section className="panel card-body"><h1>{id}</h1><p>{refError || 'Loading repository…'}</p><button className="button" onClick={() => void loadProfile()}>Reload Repository</button></section>;
   const currentContent = selection && content?.key === `${selection.view}:${selection.commitId}:${selection.path}` ? content : null;
@@ -102,16 +109,18 @@ export default function RepositoryPage({ id, state, online, manageAccess }: { id
     <a className="back-link" href="#repositories"><ArrowLeft size={14}/>All repositories</a>
     <div className="object-heading"><div><span className="object-id">{id} · Diffusion</span><h1><FolderGit2 size={26}/>{repository.name}</h1><p>{repository.description}</p></div><button className="button" onClick={() => void loadProfile()}><RefreshCw size={15}/>Reload Repository</button></div>
     <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/>
+    {retainedImport && !importing && <section className="panel card-body"><h2>Retained Import Request</h2><p>An import request is saved for this repository. Retrying uses its original commit and input, even if the source is no longer available for browsing.</p><button className="button" disabled={!online || !access?.capabilities.edit} onClick={() => setImporting(retainedImport.input.commitId)}>Review Saved Import</button></section>}
+    {importing && <RepositoryImport repositoryId={id} commitId={selection?.commitId || importing} state={state} online={online} close={() => setImporting(null)} refreshWorkspace={refreshWorkspace} opened={opened}/>}
     <div className="repository-metadata"><span>Registered remote: <code>{repository.remoteUrl || 'None'}</code></span><span>Default branch: <code>{repository.defaultBranch}</code></span></div>
     {(!online || profileCached || currentContent?.cached) && <p className="info-strip">{durable ? 'Reading saved repository snapshots. Offline browsing includes only exact commits and paths already loaded on this device.' : 'Reading content retained in this signed-in tab. Reconnect to load other repository paths.'}</p>}
     {warning && <p className="banner warning" role="status">{warning}</p>}
     {detail && detail.observer.state !== 'ready' ? <section className="panel card-body"><h2>{detail.observer.state === 'unconfigured' ? 'Source browsing is not configured' : 'Repository source is unavailable'}</h2><p>{detail.observer.message}</p><p>Registering a remote URL does not clone it. A server operator must configure a local Git repository for browsing.</p></section> : <>
       <section className="panel"><div className="panel-heading"><h2><GitBranch size={17}/>Branches & tags</h2><button className="button" disabled={!online || refLoading} onClick={() => void loadRefs()}>{refLoading ? 'Refreshing…' : 'Refresh References'}</button></div><div className="repository-ref-controls">
         <label className="field"><span>Repository reference</span><select aria-label="Repository reference" value={refChoice} onChange={event => setRefChoice(event.target.value)}><option value="">Choose a branch or tag</option>{refs?.refs.map(ref => <option key={ref.name} value={ref.name} disabled={!ref.commitId}>{ref.name} {ref.commitId ? `· ${short(ref.commitId)}` : '· Does not point to a commit'}</option>)}</select></label><button className="button" disabled={!knownRef?.commitId} onClick={() => { if (knownRef?.commitId) choose({ commitId: knownRef.commitId, path: '', view: 'tree' }); }}>Open Selected Reference</button>
-        <form className="repository-commit-form" onSubmit={event => { event.preventDefault(); if (isGitObjectId(commitInput)) choose({ commitId: commitInput, path: '', view: 'tree' }); }}><label className="field"><span>Exact commit ID</span><input aria-label="Exact commit ID" value={commitInput} onChange={event => setCommitInput(event.target.value.trim())} spellCheck={false}/></label><button className="button" disabled={!isGitObjectId(commitInput)}>Open Commit</button></form>
+        <form className="repository-commit-form" onSubmit={event => { event.preventDefault(); if (isGitObjectId(commitInput)) choose({ commitId: commitInput, path: '', view: 'tree' }); }}><label className="field"><span>Exact commit ID</span><input aria-label="Exact commit ID" value={commitInput} onChange={event => { commitInputDirty.current = true; setCommitInput(event.target.value.trim()); }} spellCheck={false}/></label><button className="button" disabled={!isGitObjectId(commitInput)}>Open Commit</button></form>
       </div><p className="info-strip">Opening a reference pins its full commit ID. Refreshing references or later branch changes will not move your selected commit.{refs ? ` References observed ${new Date(refs.observedAt).toLocaleString()}.` : ''}</p>{refError && <p className="error-text card-body" role="alert">{refError}</p>}{refs && !refs.refs.length && !refs.headCommit && <p className="card-body">This repository has no commit references yet.</p>}</section>
       {selection && <>
-        <section className="panel repository-commit"><div className="panel-heading"><h2><GitCommitHorizontal size={17}/>Pinned commit</h2><button className="button" disabled={loading} onClick={() => void loadContent()}>Reload Exact Snapshot</button></div><div className="card-body"><code className="repository-commit-id">{selection.commitId}</code>{commit?.commit.id === selection.commitId && <><pre className="repository-message">{commit.commit.message}</pre>{commit.commit.messageTruncated && <p className="info-strip">This commit message exceeds the display limit and is truncated.</p>}<p className="muted small">Authored by {commit.commit.author.name} &lt;{commit.commit.author.email}&gt; · {new Date(commit.commit.author.timestamp).toLocaleString()}</p><div className="repository-parent-links">Parents: {commit.commit.parentIds.length ? commit.commit.parentIds.map(parent => <button className="text-button" key={parent} onClick={() => choose({ commitId: parent, path: '', view: 'tree' })}>{short(parent)}</button>) : 'Initial commit'}</div></>}</div></section>
+        <section className="panel repository-commit"><div className="panel-heading"><h2><GitCommitHorizontal size={17}/>Pinned commit</h2><button className="button" disabled={!online || !access?.capabilities.edit || !commit || commit.commit.id !== selection.commitId} onClick={() => setImporting(selection.commitId)}>Import as Review</button><button className="button" disabled={loading} onClick={() => void loadContent()}>Reload Exact Snapshot</button></div><div className="card-body"><code className="repository-commit-id">{selection.commitId}</code>{commit?.commit.id === selection.commitId && <><pre className="repository-message">{commit.commit.message}</pre>{commit.commit.messageTruncated && <p className="info-strip">This commit message exceeds the display limit and is truncated.</p>}<p className="muted small">Authored by {commit.commit.author.name} &lt;{commit.commit.author.email}&gt; · {new Date(commit.commit.author.timestamp).toLocaleString()}</p><div className="repository-parent-links">Parents: {commit.commit.parentIds.length ? commit.commit.parentIds.map(parent => <button className="text-button" key={parent} onClick={() => choose({ commitId: parent, path: '', view: 'tree' })}>{short(parent)}</button>) : 'Initial commit'}</div></>}</div></section>
         <section className="panel repository-source"><div className="panel-heading"><h2>{selection.view === 'history' ? <History size={17}/> : <FileCode2 size={17}/>}Committed source</h2><div className="segmented"><button className={selection.view !== 'history' ? 'selected' : ''} onClick={() => choose({ ...selection, path: viewPath, view: 'tree' })}>Browse Files</button><button className={selection.view === 'history' ? 'selected' : ''} onClick={() => choose({ ...selection, view: 'history', historyFrom: selection.view === 'history' ? selection.historyFrom : selection.view })}>Commit History</button></div></div>
           <nav className="repository-path" aria-label="Repository path"><button className="text-button" onClick={() => choose({ ...selection, path: '', view: 'tree' })}>Repository root</button>{selection.path.split('/').filter(Boolean).map((part, index, parts) => <span key={index}> / {index < parts.length - 1 ? <button className="text-button" onClick={() => choose({ ...selection, path: parts.slice(0, index + 1).join('/'), view: 'tree' })}>{part}</button> : <strong>{part}</strong>}</span>)}</nav>
           {loading && <p className="card-body" role="status">Loading the selected snapshot…</p>}{error && <p className="info-strip" role="alert">{error}</p>}

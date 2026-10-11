@@ -5,8 +5,8 @@ import { HttpError, integer, object, optionalString, string } from './validation
 import { ancestorIds, effectiveMember, hierarchy } from './project-graph.ts';
 
 type JsonRow = { data: string };
-type PolicyRow = { data: string; space_data: string; owner_id: string | null };
-type ResolvedPolicy = { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null; parentId?: string; inheritedFrom?: { projectId: string; policyVersion: number } };
+type PolicyRow = { data: string; space_data: string; owner_id: string | null; entity_kind: string; entity_data: string };
+type ResolvedPolicy = { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null; repositoryId?: string; parentId?: string; inheritedFrom?: { projectId: string; policyVersion: number } };
 export interface PolicyStoreOptions { principalExists: (id: string) => boolean }
 const workspace = (): Audience => ({ kind: 'workspace' });
 const sharedRules = (): PolicyRules => ({ view: workspace(), edit: workspace(), interact: workspace() });
@@ -89,11 +89,23 @@ export class PolicyStore {
     if (!isObjectId(id) || !this.member(principalId)) return undefined;
     if (seen.has(id) || seen.size >= 16) return undefined;
     seen.add(id);
-    const row = this.database.prepare("SELECT p.data, s.data AS space_data, CASE WHEN substr(e.id, 1, 1) = 'T' THEN json_extract(e.data, '$.ownerId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
+    const row = this.database.prepare("SELECT p.data, s.data AS space_data, e.kind AS entity_kind, e.data AS entity_data, CASE WHEN substr(e.id, 1, 1) = 'T' THEN json_extract(e.data, '$.ownerId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
     if (!row) return undefined;
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
     const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
     try {
+      let repositoryId: string | undefined;
+      if (row.entity_kind === 'revision') {
+        const entity: unknown = JSON.parse(row.entity_data);
+        if (!entity || typeof entity !== 'object' || Array.isArray(entity)) return undefined;
+        const dependency: unknown = (entity as { repositoryId?: unknown }).repositoryId;
+        if (dependency !== null) {
+          if (typeof dependency !== 'string' || !/^R[1-9]\d{0,14}$/.test(dependency)
+            || !this.database.prepare("SELECT 1 FROM entities WHERE id = ? AND kind = 'repository'").get(dependency)
+            || !this.resolved(dependency, principalId, seen)?.capabilities.view) return undefined;
+          repositoryId = dependency;
+        }
+      }
       const graph = this.projectGraph(id);
       const parent = graph?.parentId ? this.resolved(graph.parentId, principalId, seen) : undefined;
       if (graph?.parentId && !parent) return undefined;
@@ -101,7 +113,7 @@ export class PolicyStore {
         if (!parent || parent.policy.kind !== 'project' || !graph.parentId) return undefined;
         return { policy: { ...parent.policy, objectId: id }, space: parent.space, capabilities: { ...parent.capabilities, managePolicy: false }, ownerId: null, parentId: graph.parentId, inheritedFrom: { projectId: graph.parentId, policyVersion: parent.policy.version } };
       }
-      return { policy, space, capabilities: effectiveAccess(policy, space, principalId, ownerId === principalId, this.projectMember(id, principalId), parent?.capabilities), ownerId, ...(graph?.parentId ? { parentId: graph.parentId } : {}) };
+      return { policy, space, capabilities: effectiveAccess(policy, space, principalId, ownerId === principalId, this.projectMember(id, principalId), parent?.capabilities), ownerId, ...(repositoryId ? { repositoryId } : {}), ...(graph?.parentId ? { parentId: graph.parentId } : {}) };
     } catch (error) {
       if (error instanceof HttpError) return undefined;
       throw error;
@@ -137,8 +149,8 @@ export class PolicyStore {
   describe(id: string, principalId: string): ObjectAccess {
     const result = this.resolved(id, principalId);
     if (!result?.capabilities.view) throw notFound();
-    const { policy, space, capabilities, ownerId, parentId, inheritedFrom } = result;
-    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? '; task owner also has access' : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${inheritedFrom ? '; inherited from parent project' : ''}`;
+    const { policy, space, capabilities, ownerId, repositoryId, parentId, inheritedFrom } = result;
+    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? '; task owner also has access' : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${repositoryId ? '; requires linked repository view access' : ''}${inheritedFrom ? '; inherited from parent project' : ''}`;
     return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: 'task-owner' as const, principalId: ownerId } } : {}) };
   }
   private audience(input: unknown): Audience {

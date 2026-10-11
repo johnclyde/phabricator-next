@@ -153,7 +153,7 @@ test('view, edit and interaction rules remain independent of each other and bear
   } finally { await app.close(); }
 });
 
-test('hidden references are redacted on reads, preserved by unrelated edits, and rejected generically as input', async () => {
+test('hidden projects are redacted while hidden repositories gate linked revisions, with generic input rejection', async () => {
   const app = await start();
   try {
     const access = { spaceId: 'S1', view: members(app.alice.id), edit: members(app.alice.id), interact: members(app.alice.id) };
@@ -161,12 +161,14 @@ test('hidden references are redacted on reads, preserved by unrelated edits, and
     const repository = await app.create<Repository>('alice', '/api/repositories', { name: 'Confidential repository name', remoteUrl: 'https://example.invalid/confidential.git', access });
     const task = await app.create<Task>('alice', '/api/tasks', { title: 'Shared task', projectId: project.id });
     const revision = await app.create<RevisionDetail>('alice', '/api/revisions', { ...paper, projectId: project.id, repositoryId: repository.id });
+    const unlinked = await app.create<RevisionDetail>('alice', '/api/revisions', { ...paper, projectId: project.id });
     const state = (await app.request<AppState>('bob', '/api/state')).body;
     assert.deepEqual(state.tasks[0]!.projectIds, []);
-    assert.equal(state.revisions[0]!.projectId, null); assert.equal(state.revisions[0]!.repositoryId, null);
+    assert.deepEqual(state.revisions.map(item => item.id), [unlinked.revision.id]); assert.equal(state.revisions[0]!.projectId, null); assert.equal(state.revisions[0]!.repositoryId, null);
     assert.doesNotMatch(JSON.stringify(state), /Confidential project name|Confidential repository name|confidential\.git/);
     for (const suffix of ['', '/export']) {
-      const response = await app.request<Pick<RevisionDetail, 'revision'>>('bob', `/api/revisions/${revision.revision.id}${suffix}`);
+      denied(await app.request('bob', `/api/revisions/${revision.revision.id}${suffix}`), 404);
+      const response = await app.request<Pick<RevisionDetail, 'revision'>>('bob', `/api/revisions/${unlinked.revision.id}${suffix}`);
       assert.equal(response.status, 200);
       assert.equal(response.body.revision.projectId, null); assert.equal(response.body.revision.repositoryId, null);
     }

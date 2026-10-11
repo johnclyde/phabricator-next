@@ -1,3 +1,4 @@
+import DraftAvailability from './DraftAvailability';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { MessageSquare, RotateCcw, CheckCircle2 } from 'lucide-react';
 import { diffWordsWithSpace } from 'diff';
@@ -90,7 +91,7 @@ function Thread({ thread, detail, version, online, canEdit, canInteract, mutate,
     {events.length > 0 && <ol className="thread-events" aria-label="Thread state history">{events.map(event => { const viewed = detail.versions.find(item => item.id === event.versionId); return <li key={event.id}><span><strong>{event.actor}</strong> {event.action} while viewing version {viewed?.number ?? 'unknown'} · {timestamp(event.createdAt)}</span><button className="text-button" onClick={() => openSource(event.versionId, root.filePath, null)}>View version {viewed?.number ?? ''}</button></li>; })}</ol>}
     {error && <div className="banner error" role="alert">{error}<button onClick={() => void saved()}>Reload discussion</button></div>}
     <div className="thread-actions">{canInteract && <button className="button" onClick={() => setReply(!reply)}><MessageSquare size={15}/>{reply ? 'Close Reply' : 'Reply'}</button>}{canEdit && <button className="button" disabled={!online || busy} onClick={() => void changeStatus()}>{thread.status === 'open' ? <CheckCircle2 size={15}/> : <RotateCcw size={15}/>}{busy ? 'Saving…' : thread.status === 'open' ? 'Resolve Thread' : 'Reopen Thread'}</button>}{!online && canEdit && <small className="muted">Reconnect to resolve or reopen a thread.</small>}</div>
-    {reply && canInteract && <ReplyComposer key={`${thread.id}:${version.id}`} revisionId={detail.revision.id} threadId={thread.id} version={version} originalNumber={original?.number} mutate={mutate} saved={saved}/>}
+    {reply && canInteract && <DraftAvailability draftKey={`comment-source:${detail.revision.id}:reply:${thread.id}:${version.id}`}><ReplyComposer key={`${thread.id}:${version.id}`} revisionId={detail.revision.id} threadId={thread.id} version={version} originalNumber={original?.number} mutate={mutate} saved={saved}/></DraftAvailability>}
   </article>;
 }
 function ThreadSuggestion({ root, thread, detail, online, canEdit, mutate, saved, applied, openSource }: { root: ReviewComment; thread: ReviewThread; detail: RevisionDetail; online: boolean; canEdit: boolean; mutate: Mutate; saved: () => Promise<void>; applied: () => Promise<void>; openSource: (versionId: string, path: string | null, line: number | null) => void }) {
@@ -130,21 +131,20 @@ function Comment({ comment, versions }: { comment: ReviewComment; versions: Revi
   return <div className="comment" data-comment-id={comment.id}><span className="avatar small-avatar">{comment.author.slice(0, 1).toUpperCase()}</span><div><div className="comment-meta"><strong>{comment.author}</strong><span>{timestamp(comment.createdAt)}</span><span>v{original?.number ?? '?'}{comment.filePath ? ` · ${comment.filePath}:${comment.line || 'passage'}` : ''}</span>{viewed && viewed.id !== comment.versionId && <span>Replied while viewing v{viewed.number}</span>}</div><p>{comment.body}</p></div></div>;
 }
 function ReplyComposer({ revisionId, threadId, version, originalNumber, mutate, saved }: { revisionId: string; threadId: string; version: RevisionVersion; originalNumber?: number; mutate: Mutate; saved: () => Promise<void> }) {
-  const { readStored, writeStored, removeStored, durable, assertActive, quarantinedDrafts } = useWorkspace();
+  const { readStored, writeStored, removeStoredIfEqual, durable, assertActive, draftIsHeld, draftHasUnsavedMemory } = useWorkspace();
   const key = `comment-source:${revisionId}:reply:${threadId}:${version.id}`;
   const [body, setBody] = useState(() => readStored<{ body: string }>(key, { body: '' }).body);
   const mounted = useRef(true); const latestBody = useRef(body); latestBody.current = body;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const [persisted, setPersisted] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const held = quarantinedDrafts().some(draft => draft.key === key);
+  const [persisted, setPersisted] = useState(() => !draftHasUnsavedMemory(key)); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const held = draftIsHeld(key);
   const submit = async () => {
     if (held || !body.trim()) return;
     const submitted = { body, viewedVersionId: version.id, threadId };
     setBusy(true); setError('');
     try {
       await mutate(`/api/revisions/${revisionId}/threads/${threadId}/replies`, 'POST', { body: submitted.body, viewedVersionId: submitted.viewedVersionId }, 'Reply added'); assertActive();
-      const current = readStored<typeof submitted | null>(key, null);
-      if (current && JSON.stringify(current) === JSON.stringify(submitted)) removeStored(key);
+      removeStoredIfEqual(key, submitted);
       if (mounted.current && latestBody.current === submitted.body) setBody('');
       await saved();
     } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save reply.'); } finally { if (mounted.current) setBusy(false); }

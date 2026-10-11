@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,7 @@ import { createStore } from '../server/store.ts';
 import type { WorkboardDetail, WorkboardReceipt } from '../shared/workboards.ts';
 import { createGitFixture } from './git-fixture.ts';
 import type { GitBlob, GitHistory, GitRefs, GitTree, RepositoryDetail } from '../shared/repositories.ts';
+import type { RevisionDetail, RevisionVersion } from '../shared/types.ts';
 
 const cli = fileURLToPath(new URL('../cli/index.ts', import.meta.url));
 const loader = import.meta.resolve('tsx');
@@ -26,6 +28,65 @@ function runCommand(cwd: string, args: string[], token?: string) {
   });
 }
 const run = (cwd: string, paths: string[]) => runCommand(cwd, ['check', '--kind', 'document', '--json', '--server', 'https://network-access-is-not-needed.invalid', ...paths]);
+
+test('CLI imports a complete pinned text tree, recovers receipts, preserves provenance and obeys continuing source access', async () => {
+  const fixture = await createGitFixture(); const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/workspace/', provisioning: true });
+  const author = await provision.createAccount({ username: 'git-importer', displayName: 'Git importer', password: 'test-only-import-cli-password' });
+  const owner = await provision.createAccount({ username: 'git-custodian', displayName: 'Git custodian', password: 'test-only-import-cli-owner-password' });
+  const repository = store.createRepository({ name: 'Imported source', remoteUrl: 'https://example.invalid/source.git', defaultBranch: 'main' });
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/workspace/', gitRepositories: { [repository.id]: fixture.barePath } });
+  const token = app.auth.createToken(author.id, { name: 'Import source', scopes: ['read', 'write'] });
+  const reader = app.auth.createToken(author.id, { name: 'Read source', scopes: ['read'] });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
+  const command = (args: string[], credential = token.token) => runCommand(fixture.root, [...args, '--server', server], credential);
+  const title = 'Imported paper \u001b[31mred\u001b[0m';
+  const input = ['import-git', repository.id, '--commit', fixture.importCommit, '--title', title, '--kind', 'paper', '--request-id', 'cli-complete-import'];
+  try {
+    for (const invalid of [input.concat('--path', 'docs/paper.tex'), input.concat('--revision', 'P1'), input.map(value => value === fixture.importCommit ? 'main' : value)]) assert.equal((await command(invalid)).code, 1);
+    assert.equal((await command(input, reader.token)).code, 1);
+    const submitted = await command([...input, '--json']); assert.equal(submitted.code, 0, submitted.stderr);
+    assert.match(submitted.stderr, /Import request ID: cli-complete-import/);
+    const detail = JSON.parse(submitted.stdout) as RevisionDetail; const first = detail.versions[0]!; const provenance = first.gitSource!;
+    assert.equal(detail.revision.kind, 'paper'); assert.equal(detail.revision.repositoryId, repository.id); assert.equal(detail.reviews.length, 0);
+    assert.equal(provenance.commitId, fixture.importCommit); assert.equal(provenance.scope, 'complete-text-tree');
+    assert.ok(provenance.manifest.some(entry => entry.mode === '100755'));
+    assert.ok(first.files.some(file => file.content.startsWith('\ufeff')));
+    const actualTree = (await fixture.git(['ls-tree', '-r', '-z', fixture.importCommit])).split('\0').filter(Boolean).map(record => {
+      const [header, path] = record.split('\t'); const [mode, , objectId] = header!.split(' '); return { path, mode, objectId };
+    }).sort((a, b) => a.path! < b.path! ? -1 : a.path! > b.path! ? 1 : 0);
+    assert.deepEqual(provenance.manifest, actualTree);
+    assert.deepEqual(first.files.map(file => file.path), actualTree.map(entry => entry.path));
+    for (const file of first.files) {
+      const bytes = Buffer.from(file.content, 'utf8');
+      const objectId = createHash(provenance.objectFormat).update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+      assert.equal(provenance.manifest.find(entry => entry.path === file.path)!.objectId, objectId);
+    }
+    const parked = join(fixture.root, 'unavailable-copy.git'); await rename(fixture.barePath, parked);
+    try {
+      const retry = await command([...input, '--json']); assert.equal(retry.code, 0, retry.stderr); assert.deepEqual(JSON.parse(retry.stdout), detail);
+      const displayed = await command(input); assert.equal(displayed.code, 0, displayed.stderr); assert.ok(!displayed.stdout.includes('\u001b')); assert.match(displayed.stdout, /\\u001b\[31m/);
+    } finally { await rename(parked, fixture.barePath); }
+    assert.equal(store.state({ configured: false, model: null }).revisions.length, 1);
+    assert.equal((await command(input.map(value => value === title ? 'Different request' : value))).code, 1);
+    assert.equal((await command(['import-git', repository.id, '--commit', fixture.head, '--title', 'Unsupported complete tree', '--request-id', 'cli-unsupported'])).code, 1);
+    assert.equal(store.state({ configured: false, model: null }).revisions.length, 1);
+    const exported = await command(['export', detail.revision.id, '--version', '1']); assert.equal(exported.code, 0, exported.stderr);
+    const exportedVersion = JSON.parse(exported.stdout) as { version: RevisionVersion }; assert.deepEqual(exportedVersion.version.gitSource, provenance);
+    await writeFile(join(fixture.root, 'paper.tex'), '\ufeffEdited paper source.\n');
+    const edit = await command(['diff', '--revision', detail.revision.id, '--message', 'Edit imported source', 'paper.tex']); assert.equal(edit.code, 0, edit.stderr);
+    const updated = store.detail(detail.revision.id); const last = updated.versions.find(version => version.number === 2)!;
+    assert.equal(last.gitSource, undefined); assert.equal(last.files[0]!.content, '\ufeffEdited paper source.\n');
+    assert.deepEqual(updated.versions.find(version => version.number === 1)!.gitSource, provenance);
+    const policy = app.policies.policy(repository.id, owner.id);
+    app.policies.setPolicy(repository.id, { expectedVersion: policy.version, spaceId: policy.spaceId, ...policy.rules, view: { kind: 'principals', principalIds: [owner.id] } }, owner.id);
+    assert.equal((await command(['show', detail.revision.id])).code, 1);
+    assert.equal((await command(['export', detail.revision.id, '--version', '1'])).code, 1);
+    assert.equal((await command(input)).code, 1);
+    const visible = await command(['list']); assert.equal(visible.code, 0, visible.stderr); assert.ok(!visible.stdout.includes(detail.revision.id));
+  } finally { await app.close(); store.close(); await fixture.close(); }
+});
 
 test('CLI observes real Git snapshots through mounted read-only access without following moved refs', async () => {
   const fixture = await createGitFixture();

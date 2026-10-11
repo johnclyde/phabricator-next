@@ -1,5 +1,5 @@
 import type { ObjectAccess } from './policy';
-import type { Repository } from './types';
+import type { Repository, RevisionKind, SourceFile } from './types';
 
 /** Limits bound a single observed result; an exceeded limit is never an empty result. */
 export const GIT_LIMITS = Object.freeze({
@@ -31,3 +31,13 @@ interface GitBlobIdentity extends GitResponse { commitId: string; path: string; 
 export type GitBlob = GitBlobIdentity & ({ state: 'text'; content: string; size: number } | { state: 'binary' | 'oversized' | 'unsupported_encoding' | 'symlink'; size: number } | { state: 'submodule'; size: null });
 export interface GitHistoryQuery { commit: string; path?: string; after?: number; limit?: number }
 export interface GitHistory extends GitResponse { commitId: string; path: string; commits: GitCommit[]; nextAfter: number | null }
+
+/** Original Git identity of a complete imported text tree, never inherited by edited versions. */
+export interface GitSourceProvenance {
+  kind: 'git'; repositoryId: string; objectFormat: GitObjectFormat;
+  commitId: string; treeId: string; scope: 'complete-text-tree';
+  manifest: { path: string; mode: '100644' | '100755'; objectId: string }[];
+}
+/** Internal verified collector output. The import API accepts only GitImportInput. */
+export interface GitImportSnapshot extends GitResponse { files: SourceFile[]; provenance: GitSourceProvenance }
+export interface GitImportInput { commitId: string; kind: RevisionKind; title: string; summary?: string; projectId?: string | null }

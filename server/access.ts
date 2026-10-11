@@ -7,7 +7,7 @@ import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import type { MutationResponse, Store } from './store.ts';
+import { gitImportInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 
 const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions']);
@@ -249,6 +249,7 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && /^\/api\/repositories\/R\d+\/import-revision$/.test(path)) this.references(gitImportInput(input));
     const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|bulk-moves|columns|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
     if (workboard && method !== 'GET') {
       const id = workboard[1]!; const data = record(input);
@@ -464,9 +465,15 @@ export class AccessLayer {
   present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false): MutationResponse {
     let target = this.target(method, path);
     const body = record(response.body);
-    if (method === 'POST' && (CREATES.has(path) || path === '/api/spaces')) {
+    const gitImport = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
+    if (method === 'POST' && (CREATES.has(path) || path === '/api/spaces' || gitImport)) {
       const id = body?.id ?? record(body?.revision)?.id;
       if (typeof id !== 'string') throw new HttpError(409, 'This saved response cannot be safely replayed.');
+      if (gitImport) {
+        if (!/^[DPL][1-9]\d*$/.test(id) || record(body?.revision)?.repositoryId !== gitImport[1]) throw new HttpError(409, 'This saved import cannot be safely replayed.');
+        // This child denial must not invalidate the still-visible source repository.
+        if (!this.canView(id)) throw new HttpError(404, 'Imported revision was not found.', 'REVISION_REFERENCE_UNAVAILABLE');
+      }
       target = { id, capability: 'edit' };
     }
     // The write was authorized under the same writer lock. Reassigning a task

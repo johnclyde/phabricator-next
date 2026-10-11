@@ -4,8 +4,9 @@ import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
-import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry } from '../shared/repositories.ts';
-import { HttpError } from './validation.ts';
+import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry } from '../shared/repositories.ts';
+import type { SourceFile } from '../shared/types.ts';
+import { files, HttpError } from './validation.ts';
 
 export interface GitObserver {
   info(repositoryId: string, signal?: AbortSignal): Promise<GitObserverInfo>;
@@ -14,6 +15,7 @@ export interface GitObserver {
   tree(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitTree>;
   blob(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitBlob>;
   history(repositoryId: string, query: GitHistoryQuery, signal?: AbortSignal): Promise<GitHistory>;
+  importSnapshot(repositoryId: string, commit: string, signal?: AbortSignal): Promise<GitImportSnapshot>;
 }
 
 const unavailable = () => new HttpError(503, 'The local Git repository is unavailable or its configuration is unsupported.', 'GIT_UNAVAILABLE');
@@ -22,6 +24,7 @@ const corrupt = () => new HttpError(422, 'The Git object cannot be safely decode
 const invalid = () => new HttpError(400, 'Provide a full Git commit identifier and a valid repository path or history query.', 'GIT_INVALID_QUERY');
 const limit = () => new HttpError(422, 'This Git operation exceeds the supported size, time, or result limit.', 'GIT_LIMIT_EXCEEDED');
 const aborted = () => new HttpError(499, 'The Git operation was cancelled.', 'GIT_ABORTED');
+const unsupportedImport = () => new HttpError(422, 'Import requires a complete nonempty tree of UTF-8 text files with supported source paths. Empty directories, binary files, symlinks and submodules are unsupported.', 'GIT_IMPORT_UNSUPPORTED');
 const checkAbort = (signal: AbortSignal): void => { if (signal.aborted) throw aborted(); };
 
 /** Operator configuration only. Never echo private paths or configuration values. */
@@ -336,6 +339,57 @@ class LocalGitObserver implements GitObserver {
         commits.push(commit);
       }
       return { repositoryId: id, objectFormat: repository.format, commitId: query.commit, path, commits, nextAfter: identifiers.length > page ? after + page : null };
+    });
+  }
+  async importSnapshot(id: string, commit: string, signal?: AbortSignal): Promise<GitImportSnapshot> {
+    if (!isGitObjectId(commit)) throw invalid();
+    return this.observe(id, signal, async repository => {
+      const source = await readCommit(repository, commit);
+      const pending = [{ objectId: source.treeId, path: '' }];
+      const leaves: (GitTreeEntry & { mode: '100644' | '100755' })[] = []; let entryCount = 0;
+      while (pending.length) {
+        checkAbort(repository.signal);
+        const tree = pending.pop()!; const entries = await readTree(repository, tree.objectId, tree.path);
+        // A file-only snapshot cannot faithfully represent an empty Git subtree.
+        if (!entries.length) throw unsupportedImport();
+        entryCount += entries.length; if (entryCount > GIT_LIMITS.treeEntries) throw limit();
+        for (const entry of entries) {
+          if (entry.type === 'tree') pending.push(entry);
+          else if (entry.type === 'file' && (entry.mode === '100644' || entry.mode === '100755')) {
+            leaves.push({ ...entry, mode: entry.mode }); if (leaves.length > 100) throw limit();
+          } else throw unsupportedImport();
+        }
+      }
+      leaves.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+      // Validate all paths before loading any file bodies; do not expose rejected names in diagnostics.
+      try { files(leaves.map(entry => ({ path: entry.path, content: '' }))); }
+      catch { throw unsupportedImport(); }
+      const collected: SourceFile[] = []; const contents = new Map<string, { size: number; content: string }>(); let bytes = 0;
+      for (const entry of leaves) {
+        checkAbort(repository.signal);
+        const cached = contents.get(entry.objectId);
+        const size = cached?.size ?? await objectSize(repository, entry.objectId);
+        bytes += size; if (size > GIT_LIMITS.blobBytes || bytes > 1_500_000) throw limit();
+        if (cached) { collected.push({ path: entry.path, content: cached.content }); continue; }
+        const data = await rawObject(repository, entry.objectId, 'blob'); if (data.length !== size) throw corrupt();
+        if (data.includes(0)) throw unsupportedImport();
+        let content: string;
+        try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data); }
+        catch { throw unsupportedImport(); }
+        contents.set(entry.objectId, { size, content });
+        collected.push({ path: entry.path, content });
+      }
+      let validated: SourceFile[];
+      try { validated = files(collected); } catch { throw unsupportedImport(); }
+      checkAbort(repository.signal);
+      return {
+        repositoryId: id, objectFormat: repository.format, files: validated,
+        provenance: {
+          kind: 'git', repositoryId: id, objectFormat: repository.format, commitId: commit,
+          treeId: source.treeId, scope: 'complete-text-tree',
+          manifest: leaves.map(({ path, mode, objectId }) => ({ path, mode, objectId })),
+        },
+      };
     });
   }
 }

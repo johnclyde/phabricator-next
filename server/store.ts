@@ -11,6 +11,7 @@ import { normalizeProjectTags } from '../shared/project-hierarchy.ts';
 import type { ProjectChildPreview, ProjectKind, ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectPreferences, ProjectWatchersPage } from '../shared/projects.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
 import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
+import { GIT_LIMITS, isGitObjectId, type GitImportInput, type GitImportSnapshot, type GitSourceProvenance } from '../shared/repositories.ts';
 import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from './workboards.ts';
 import type { TaskColumnMove, WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardBulkMoveReceipt, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
 
@@ -20,6 +21,14 @@ export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
 export interface StoreOptions { path?: string }
 type JsonRow = { data: string };
+
+/** Public import metadata contains no source, policy, or provenance supplied by a client. */
+export function gitImportInput(input: unknown): GitImportInput {
+  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'projectId']);
+  if (typeof data.commitId !== 'string' || !isGitObjectId(data.commitId)) throw new HttpError(400, 'Select a full lowercase commit object ID.', 'GIT_INVALID_QUERY');
+  if (data.projectId !== undefined && data.projectId !== null && (typeof data.projectId !== 'string' || !/^PROJ[1-9]\d{0,14}$/.test(data.projectId))) throw new HttpError(400, 'Reference unavailable.');
+  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), ...(data.projectId === undefined ? {} : { projectId: data.projectId as string | null }) };
+}
 
 export function contentHash(sourceFiles: SourceFile[]): string {
   const canonical = [...sourceFiles].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map(({ path, content }) => ({ path, content }));
@@ -744,15 +753,40 @@ export class Store {
     return { document: this.get<WikiDocument>('document', id), history: this.documentHistory(id), activity: this.activities(id) };
   }
   createRevision(input: unknown, attribution?: ActorAttribution): RevisionDetail {
+    return this.createRevisionRecord(input, attribution);
+  }
+  /** Only the verified server collector may supply Git provenance. */
+  createRevisionFromGit(repositoryId: string, input: unknown, snapshot: GitImportSnapshot, attribution?: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = gitImportInput(input);
+      const invalid = () => new HttpError(422, 'The Git snapshot could not be verified for import.', 'GIT_INVALID_OBJECT');
+      const source = files(snapshot.files);
+      const provenance = snapshot.provenance;
+      if (snapshot.repositoryId !== repositoryId || !['sha1', 'sha256'].includes(snapshot.objectFormat)
+        || !provenance || provenance.kind !== 'git' || provenance.repositoryId !== repositoryId || provenance.objectFormat !== snapshot.objectFormat
+        || provenance.commitId !== data.commitId || !isGitObjectId(provenance.commitId, snapshot.objectFormat) || !isGitObjectId(provenance.treeId, snapshot.objectFormat)
+        || provenance.scope !== 'complete-text-tree' || !Array.isArray(provenance.manifest) || provenance.manifest.length !== source.length) throw invalid();
+      const manifest = source.map((file, index) => {
+        const entry = provenance.manifest[index]; const bytes = Buffer.from(file.content, 'utf8');
+        if (!entry || entry.path !== file.path || !['100644', '100755'].includes(entry.mode) || !isGitObjectId(entry.objectId, snapshot.objectFormat)
+          || bytes.length > GIT_LIMITS.blobBytes || /[\uD800-\uDFFF]/u.test(file.content)
+          || createHash(snapshot.objectFormat).update(`blob ${bytes.length}\0`).update(bytes).digest('hex') !== entry.objectId) throw invalid();
+        return { path: entry.path, mode: entry.mode, objectId: entry.objectId };
+      });
+      const gitSource: GitSourceProvenance = { kind: 'git', repositoryId, objectFormat: snapshot.objectFormat, commitId: data.commitId, treeId: provenance.treeId, scope: 'complete-text-tree', manifest };
+      return this.createRevisionRecord({ title: data.title, summary: data.summary, kind: data.kind, projectId: data.projectId, repositoryId, files: source }, attribution, gitSource);
+    });
+  }
+  private createRevisionRecord(input: unknown, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionDetail {
     const data = object(input, ['title', 'summary', 'kind', 'files', 'repositoryId', 'projectId']);
     const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
     const source = files(data.files);
     const now = new Date().toISOString();
     const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
-    this.save('revision', revision); this.saveVersion(revision, source, 'Initial version', attribution); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
+    this.save('revision', revision); this.saveVersion(revision, source, 'Initial version', attribution, gitSource); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
   }
-  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution): RevisionVersion {
-    const version: RevisionVersion = { ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source), createdAt: new Date().toISOString() };
+  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionVersion {
+    const version: RevisionVersion = { ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version)); return version;
   }
   requireVersion(id: string, expected: unknown): RevisionDetail {

@@ -10,7 +10,8 @@ import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
-import { createStore, type MutationResponse, type Store } from './store.ts';
+import { createStore, gitImportInput, type MutationResponse, type Store } from './store.ts';
+import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
 import { PolicyStore } from './policy.ts';
@@ -73,6 +74,17 @@ function send(res: ServerResponse, status: number, value: unknown): void {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   res.end(JSON.stringify(value));
+}
+
+async function waitForGit<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  let remove = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const cancel = () => reject(new HttpError(499, 'Repository read was canceled.', 'GIT_ABORTED'));
+    signal.addEventListener('abort', cancel, { once: true }); remove = () => signal.removeEventListener('abort', cancel);
+    if (signal.aborted) cancel();
+  });
+  try { return await Promise.race([aborted, work]); } finally { remove(); }
 }
 
 async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: string, path: string, basePath: string): Promise<void> {
@@ -189,15 +201,19 @@ export function createApp(options: AppOptions = {}): App {
     }
   }
 
-  async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext): Promise<MutationResponse> {
+  async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
     const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
+    const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
       const data = object(input, ['provider', 'expectedVersion']);
       scope = choice(data.provider, 'provider', ['local', 'openai', 'ollama']) === 'openai' ? 'review:hosted' : 'review:local';
     }
-    const authorize = () => { auth.revalidate(context, scope); access.authorize(method, path, input); };
+    const authorize = () => {
+      auth.revalidate(context, scope); access.authorize(method, path, input);
+      if (importMatch && signal?.aborted) throw new HttpError(499, 'Repository import was canceled.', 'GIT_ABORTED');
+    };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
     const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
     const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed);
@@ -213,11 +229,29 @@ export function createApp(options: AppOptions = {}): App {
       const active = pending.get(key);
       if (active) {
         if (active.fingerprint !== fingerprint) throw new HttpError(409, 'This idempotency key is being used for a different request.');
-        const response = await active.promise;
+        let response: MutationResponse;
+        try { response = await active.promise; } catch (error) { store.read(authorize); throw error; }
         return store.read(() => { authorize(); return present(response); });
       }
     }
     const execute = async (): Promise<MutationResponse> => {
+      if (importMatch) {
+        const repositoryId = importMatch[1]!; const data = gitImportInput(input);
+        let snapshot: GitImportSnapshot;
+        try { snapshot = await waitForGit(git.importSnapshot(repositoryId, data.commitId, signal), signal); }
+        catch (error) {
+          store.read(authorize);
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(503, 'Repository contents are unavailable.', 'GIT_UNAVAILABLE');
+        }
+        return store.mutate(key, fingerprint, () => {
+          const sourcePolicy = policies.policy(repositoryId, context.principalId);
+          if (sourcePolicy.kind === 'project') throw new HttpError(409, 'Repository policy cannot be copied.');
+          const detail = store.createRevisionFromGit(repositoryId, data, snapshot, attribution);
+          policies.configureNew(detail.revision.id, { spaceId: sourcePolicy.spaceId, ...sourcePolicy.rules }, context.principalId);
+          return { status: 201, body: detail };
+        }, authorize, present);
+      }
       if (method === 'POST' && reviewMatch) {
         const data = object(input, ['provider', 'expectedVersion']);
         const provider = choice(data.provider, 'provider', ['local', 'openai', 'ollama']);
@@ -229,6 +263,7 @@ export function createApp(options: AppOptions = {}): App {
         let analysis: ReviewAnalysis;
         try { analysis = provider === 'local' ? analyzeLocally(detail.revision.kind, version.files) : await analyzeAI(detail.revision.kind, version.files, provider); }
         catch (error) {
+          store.read(authorize);
           if (error instanceof HttpError) throw error;
           console.error('Review provider failed:', error instanceof Error ? error.message : 'unknown provider error');
           throw new HttpError(502, 'The review provider failed. No review evidence was saved.');
@@ -515,8 +550,18 @@ export function createApp(options: AppOptions = {}): App {
       const key = req.headers['idempotency-key'];
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
-      const result = await mutate(req.method!, path, await body(req), key, context);
-      send(res, result.status, result.body);
+      const input = await body(req);
+      if (req.method === 'POST' && /^\/api\/repositories\/R\d+\/import-revision$/.test(path)) {
+        const controller = new AbortController(); const abort = () => controller.abort();
+        const close = () => { if (!res.writableEnded) abort(); };
+        gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+        if (req.aborted || res.destroyed) abort();
+        try { const result = await mutate(req.method, path, input, key, context, controller.signal); if (!res.destroyed) send(res, result.status, result.body); }
+        finally { gitReads.delete(controller); req.off('aborted', abort); res.off('close', close); }
+      } else {
+        const result = await mutate(req.method!, path, input, key, context);
+        send(res, result.status, result.body);
+      }
     })().catch((error: unknown) => {
       if (res.destroyed) return;
       if (res.headersSent) { res.destroy(); return; }

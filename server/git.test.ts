@@ -14,6 +14,10 @@ function hasCode(code: string) { return (error: unknown) => error instanceof Htt
 async function fixtureTest(work: (fixture: GitFixture) => Promise<void>, format: 'sha1' | 'sha256' = 'sha1') {
   const fixture = await createGitFixture(format); try { await work(fixture); } finally { await fixture.close(); }
 }
+async function commitRecords(fixture: GitFixture, records: string[]): Promise<string> {
+  const tree = (await fixture.git(['mktree', '-z'], records.join(''))).trim();
+  return (await fixture.git(['commit-tree', tree], 'Import boundary fixture\n')).trim();
+}
 
 test('operator bindings accept only bounded repository-ID to absolute-path maps without exposing values', () => {
   assert.deepEqual(parseGitRepositories(undefined), {});
@@ -197,4 +201,112 @@ test('the whole-operation deadline covers preflight and waiting requests, then r
     assert.ok((await results).every(result => result.status === 'rejected' && result.reason instanceof HttpError && result.reason.code === 'GIT_LIMIT_EXCEEDED'));
   } finally { context.mock.timers.reset(); }
   assert.equal((await observer.info('R1')).state, 'ready');
+}));
+
+for (const format of ['sha1', 'sha256'] as const) test(`Git ${format} imports one complete immutable text tree with exact blob and executable provenance`, async () => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath });
+  const result = await observer.importSnapshot('R1', fixture.importCommit);
+  assert.equal(result.repositoryId, 'R1'); assert.equal(result.objectFormat, format);
+  assert.equal(result.provenance.kind, 'git'); assert.equal(result.provenance.scope, 'complete-text-tree');
+  assert.equal(result.provenance.repositoryId, 'R1'); assert.equal(result.provenance.objectFormat, format);
+  assert.equal(result.provenance.commitId, fixture.importCommit);
+  assert.equal(result.provenance.treeId, (await observer.commit('R1', fixture.importCommit)).commit.treeId);
+  assert.equal(result.files.length, 8);
+  const paths = result.files.map(file => file.path); assert.deepEqual(paths, [...paths].sort());
+  assert.deepEqual(result.provenance.manifest.map(entry => entry.path), paths);
+  assert.equal(result.files.find(file => file.path === 'docs/empty.txt')?.content, '');
+  assert.equal(result.files.find(file => file.path === '\ufeffsource.txt')?.content, '\ufeffLiteral source.\n');
+  assert.equal(result.files.find(file => file.path === '<script>.txt')?.content, '<script>window.fixtureExecuted = true</script>\n');
+  assert.equal(result.files.find(file => file.path === 'unicodé/研究.md')?.content, 'Unicode source.\n');
+  for (const [index, file] of result.files.entries()) {
+    const manifest = result.provenance.manifest[index]!;
+    assert.equal(manifest.mode, file.path === 'tools/check.sh' ? '100755' : '100644');
+    const bytes = Buffer.from(file.content, 'utf8');
+    assert.equal(manifest.objectId, createHash(format).update(`blob ${bytes.length}\0`).update(bytes).digest('hex'));
+  }
+  await fixture.advanceMain();
+  assert.deepEqual(await observer.importSnapshot('R1', fixture.importCommit), result);
+  for (const id of ['main', 'HEAD', fixture.importCommit.slice(0, 12), `${fixture.importCommit}:README.md`]) await assert.rejects(observer.importSnapshot('R1', id), hasCode('GIT_INVALID_QUERY'));
+}, format));
+
+test('imports reject the whole tree when any file is binary, invalid UTF-8, oversized, a symlink or a submodule', async () => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath });
+  const cases: { content?: Buffer | string; mode: string; type: string; code: string }[] = [
+    { content: Buffer.from([65, 0, 66]), mode: '100644', type: 'blob', code: 'GIT_IMPORT_UNSUPPORTED' },
+    { content: Buffer.from([0xc0, 0xaf]), mode: '100644', type: 'blob', code: 'GIT_IMPORT_UNSUPPORTED' },
+    { content: 'x'.repeat(GIT_LIMITS.blobBytes + 1), mode: '100644', type: 'blob', code: 'GIT_LIMIT_EXCEEDED' },
+    { content: 'a-safe.txt', mode: '120000', type: 'blob', code: 'GIT_IMPORT_UNSUPPORTED' },
+    { mode: '160000', type: 'commit', code: 'GIT_IMPORT_UNSUPPORTED' },
+  ];
+  for (const entry of cases) {
+    const object = entry.content === undefined ? fixture.base : (await fixture.git(['hash-object', '-w', '--stdin'], entry.content)).trim();
+    const commit = await commitRecords(fixture, [`100644 blob ${fixture.readmeBlob}\ta-safe.txt\0`, `${entry.mode} ${entry.type} ${object}\tz-rejected\0`]);
+    let delivered = false;
+    await assert.rejects(observer.importSnapshot('R1', commit).then(result => { delivered = true; return result; }), hasCode(entry.code));
+    assert.equal(delivered, false);
+  }
+  await assert.rejects(observer.importSnapshot('R1', fixture.head), hasCode('GIT_IMPORT_UNSUPPORTED'));
+  assert.equal((await observer.importSnapshot('R1', fixture.importCommit)).files.length, 8);
+}));
+
+test('imports reject unsafe revision paths, empty trees and empty subtrees without omitting source entries', async () => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath });
+  for (const path of ['unsafe:filename', 'unsafe\\filename', 'unsafe\nfilename', ' ', 'x'.repeat(241)]) {
+    const commit = await commitRecords(fixture, [`100644 blob ${fixture.readmeBlob}\ta-safe.txt\0`, `100644 blob ${fixture.readmeBlob}\t${path}\0`]);
+    await assert.rejects(observer.importSnapshot('R1', commit), hasCode('GIT_IMPORT_UNSUPPORTED'));
+  }
+  await assert.rejects(observer.importSnapshot('R1', fixture.emptyCommit), hasCode('GIT_IMPORT_UNSUPPORTED'));
+  const empty = (await fixture.git(['mktree'], '')).trim();
+  const withEmpty = await commitRecords(fixture, [`100644 blob ${fixture.readmeBlob}\ta-safe.txt\0`, `040000 tree ${empty}\tempty\0`]);
+  await assert.rejects(observer.importSnapshot('R1', withEmpty), hasCode('GIT_IMPORT_UNSUPPORTED'));
+  const invalidName = Buffer.concat([Buffer.from('100644 '), Buffer.from([0xc0, 0xaf]), Buffer.from([0]), Buffer.from(fixture.readmeBlob, 'hex')]);
+  const invalidTree = (await fixture.git(['hash-object', '--literally', '-t', 'tree', '-w', '--stdin'], invalidName)).trim();
+  const invalidCommit = (await fixture.git(['commit-tree', invalidTree], 'Invalid UTF-8 name\n')).trim();
+  await assert.rejects(observer.importSnapshot('R1', invalidCommit), hasCode('GIT_UNSUPPORTED_ENCODING'));
+}));
+
+test('import limits count every file and repeated blob byte while bounding the entire traversed tree', async () => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath });
+  const atFileLimit = await commitRecords(fixture, Array.from({ length: 100 }, (_, index) => `100644 blob ${fixture.readmeBlob}\tf${index}\0`));
+  assert.equal((await observer.importSnapshot('R1', atFileLimit)).files.length, 100);
+  const overFileLimit = await commitRecords(fixture, Array.from({ length: 101 }, (_, index) => `100644 blob ${fixture.readmeBlob}\tf${index}\0`));
+  await assert.rejects(observer.importSnapshot('R1', overFileLimit), hasCode('GIT_LIMIT_EXCEEDED'));
+  const content = 'é'.repeat(125_000); const blob = (await fixture.git(['hash-object', '-w', '--stdin'], content)).trim();
+  const atByteLimit = await commitRecords(fixture, Array.from({ length: 6 }, (_, index) => `100644 blob ${blob}\tf${index}\0`));
+  assert.equal((await observer.importSnapshot('R1', atByteLimit)).files.reduce((bytes, file) => bytes + Buffer.byteLength(file.content), 0), 1_500_000);
+  const overByteLimit = await commitRecords(fixture, Array.from({ length: 7 }, (_, index) => `100644 blob ${blob}\tf${index}\0`));
+  await assert.rejects(observer.importSnapshot('R1', overByteLimit), hasCode('GIT_LIMIT_EXCEEDED'));
+  const child = (await observer.commit('R1', fixture.base)).commit.treeId;
+  const overTreeLimit = await commitRecords(fixture, Array.from({ length: GIT_LIMITS.treeEntries }, (_, index) => `040000 tree ${child}\td${index}\0`));
+  await assert.rejects(observer.importSnapshot('R1', overTreeLimit), hasCode('GIT_LIMIT_EXCEEDED'));
+}));
+
+test('imports verify blob bytes against immutable object IDs before returning any source', async () => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath });
+  const body = Buffer.from('Tampered imported source.\n'); const raw = Buffer.concat([Buffer.from(`blob ${body.length}\0`), body]);
+  const file = join(fixture.barePath, 'objects', fixture.readmeBlob.slice(0, 2), fixture.readmeBlob.slice(2));
+  await chmod(file, 0o600); await writeFile(file, deflateSync(raw));
+  await assert.rejects(observer.importSnapshot('R1', fixture.importCommit), hasCode('GIT_INVALID_OBJECT'));
+}));
+
+test('imports share browsing queue bounds and release capacity on cancellation', async () => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath }); const controller = new AbortController(); controller.abort();
+  await assert.rejects(observer.importSnapshot('R1', fixture.importCommit, controller.signal), hasCode('GIT_ABORTED'));
+  const active = new AbortController();
+  const requests = Array.from({ length: GIT_LIMITS.concurrency + GIT_LIMITS.queued }, (_, index) => index % 2 ? observer.importSnapshot('R1', fixture.importCommit, active.signal) : observer.history('R1', { commit: fixture.head }, active.signal));
+  const settled = Promise.allSettled(requests);
+  await assert.rejects(observer.importSnapshot('R1', fixture.importCommit), hasCode('GIT_BUSY'));
+  active.abort(); assert.ok((await settled).every(result => result.status === 'rejected' && result.reason instanceof HttpError && result.reason.code === 'GIT_ABORTED'));
+  assert.equal((await observer.importSnapshot('R1', fixture.importCommit)).files.length, 8);
+}));
+
+test('one import deadline covers collection, preflight and queued operations without partial snapshots', async context => fixtureTest(async fixture => {
+  const observer = createGitObserver({ R1: fixture.barePath });
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const requests = Array.from({ length: GIT_LIMITS.concurrency + 2 }, () => observer.importSnapshot('R1', fixture.importCommit));
+    const settled = Promise.allSettled(requests); context.mock.timers.tick(GIT_LIMITS.timeoutMs);
+    assert.ok((await settled).every(result => result.status === 'rejected' && result.reason instanceof HttpError && result.reason.code === 'GIT_LIMIT_EXCEEDED'));
+  } finally { context.mock.timers.reset(); }
+  assert.equal((await observer.importSnapshot('R1', fixture.importCommit)).files.length, 8);
 }));

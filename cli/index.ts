@@ -12,7 +12,7 @@ import { visibleProjectScope } from '../shared/project-hierarchy';
 import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 import type { WorkboardCardPage, WorkboardDetail } from '../shared/workboards';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories';
-import type { GitBlob, GitHistory, GitRefs, GitTree, RepositoryDetail } from '../shared/repositories';
+import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, RepositoryDetail } from '../shared/repositories';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -27,6 +27,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- refs R1 [--json]
   npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
   npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
+  npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--project ID|NAME] [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
@@ -53,6 +54,11 @@ browse lists a directory; --file reads one file. Text display escapes terminal
 control characters; --json preserves the source as a JSON string. history reads
 one commit-pinned page and reports the next --after value. Nothing is fetched,
 checked out, imported, or pushed by these commands.
+import-git explicitly creates a review from the entire pinned text tree, retaining
+Git provenance and repository access requirements. Unsupported files reject the
+whole import. Nothing is executed or reviewed automatically. The request ID is
+printed to stderr before submission; repeat the identical command with that
+--request-id to recover an uncertain result without creating another review.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -100,6 +106,7 @@ async function main() {
       joined: { type: 'boolean' }, watching: { type: 'boolean' },
       'show-hidden': { type: 'boolean' },
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
+      'request-id': { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -111,13 +118,13 @@ async function main() {
   if (rawPath === undefined) throw new Error('Provide an absolute HTTP(S) server URL.');
   const basePath = normalizeBasePath(rawPath || '/');
   server.pathname = basePath;
-  const request = async <T>(path: string, method = 'GET', body?: unknown): Promise<T> => {
+  const request = async <T>(path: string, method = 'GET', body?: unknown, requestId?: string): Promise<T> => {
     const token = process.env.PHABRICATOR_TOKEN;
     if (token && (!/^[A-Za-z0-9._-]{1,256}$/.test(token))) throw new Error('PHABRICATOR_TOKEN has an invalid format.');
     if (token && server.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(server.hostname)) throw new Error('API tokens require HTTPS except for a loopback server.');
     const response = await fetch(new URL(mountPath(path, basePath), server), {
       method, signal: AbortSignal.timeout(135_000), redirect: 'error',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(method === 'GET' ? {} : { 'Idempotency-Key': randomUUID() }) },
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(method === 'GET' ? {} : { 'Idempotency-Key': requestId ?? randomUUID() }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const value = await response.json() as T & { error?: string };
@@ -208,6 +215,29 @@ async function main() {
       : id && /^PROJ[1-9]\d*$/.test(id) ? await request<ProjectDetail>(`/api/projects/${id}`)
         : id && /^R[1-9]\d*$/.test(id) ? await request<RepositoryDetail>(`/api/repositories/${id}`) : await getDetail(id);
     return console.log(JSON.stringify(detail, null, 2));
+  }
+  if (command === 'import-git') {
+    const id = args[0]; const commitId = values.commit;
+    if (args.length !== 1 || !id || !/^R[1-9]\d*$/.test(id)) throw new Error('Provide one repository ID such as R1.');
+    if (!commitId || !isGitObjectId(commitId)) throw new Error('--commit requires a full lowercase Git object ID, not a branch name or revision expression.');
+    if (!values.title?.trim()) throw new Error('--title is required for a new imported review.');
+    if ([values.path, values.file, values.revision, values.after, values.limit, values.version, values.message].some(value => value !== undefined)) throw new Error('import-git creates a new review from the entire commit. File filters, paging and existing-revision options are not accepted.');
+    if ((values.project?.length ?? 0) > 1) throw new Error('An imported review accepts at most one --project.');
+    const requestId = values['request-id'] ?? randomUUID();
+    if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('--request-id must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
+    const projectId = values.project?.[0] ? visibleProjectId(values.project[0], await request<AppState>('/api/state')) : undefined;
+    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(projectId ? { projectId } : {}) };
+    console.error(`Import request ID: ${requestId}. Keep this ID and the same inputs when retrying an uncertain result.`);
+    const detail = await request<RevisionDetail>(`/api/repositories/${id}/import-revision`, 'POST', input, requestId);
+    const version = detail.versions.find(item => item.number === 1); const gitSource = version?.gitSource;
+    if (detail.revision.repositoryId !== id || detail.revision.kind !== kind || !gitSource || gitSource.repositoryId !== id || gitSource.commitId !== commitId || gitSource.scope !== 'complete-text-tree' || !isGitObjectId(commitId, gitSource.objectFormat)) throw new Error('The import receipt does not match the requested repository and commit. Retain the request ID and inspect the saved result before starting another import.');
+    if (values.json) console.log(JSON.stringify(detail, null, 2));
+    else {
+      console.log(`${detail.revision.id} · v${version!.number} · ${terminalText(detail.revision.title)}`);
+      console.log(`Imported ${version!.files.length} files from ${id} at ${commitId}. Repository access remains required.`);
+      console.log(new URL(`${basePath}#${detail.revision.id}`, server).href);
+    }
+    return;
   }
   if (command === 'repositories') {
     if (args.length) throw new Error('repositories accepts options, not positional IDs. Use show R1 for one repository.');
@@ -375,7 +405,7 @@ async function readSources(paths: string[]): Promise<SourceFile[]> {
       if (read > 500_000) throw new Error(`${name} exceeds 500 KB.`);
       bytes = buffer.subarray(0, read);
     } finally { await handle.close(); }
-    const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
     if (content.includes('\0')) throw new Error(`${name} contains binary content.`);
     size += bytes.length;
     if (size > 1_000_000) throw new Error('Snapshot exceeds 1 MB.');

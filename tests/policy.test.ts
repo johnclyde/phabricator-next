@@ -16,12 +16,13 @@ const status = (expected: number) => (error: unknown) => typeof error === 'objec
 const policyInput = (expectedVersion: number, spaceId = 'S1', view: Audience = shared, edit: Audience = shared, interact: Audience = shared) => ({ expectedVersion, spaceId, view, edit, interact });
 function database(path = ':memory:') {
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON; CREATE TABLE entities(id TEXT PRIMARY KEY, data TEXT NOT NULL); INSERT INTO entities(id, data) VALUES ('T1', '{}'), ('W1', '{}'); PRAGMA user_version = 3;");
+  db.exec("PRAGMA foreign_keys = ON; CREATE TABLE entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL); INSERT INTO entities(id, kind, data) VALUES ('T1', 'task', '{}'), ('W1', 'document', '{}'); PRAGMA user_version = 3;");
   initializePolicies(db);
   return { db, policies: new PolicyStore(db, options) };
 }
 function insert(db: DatabaseSync, id: string) {
-  db.prepare('INSERT INTO entities(id, data) VALUES (?, ?)').run(id, '{}');
+  const kind = id.startsWith('PROJ') ? 'project' : id.startsWith('R') ? 'repository' : /^[DPL]/.test(id) ? 'revision' : id.startsWith('T') ? 'task' : 'document';
+  db.prepare('INSERT INTO entities(id, kind, data) VALUES (?, ?, ?)').run(id, kind, kind === 'revision' ? '{"repositoryId":null}' : '{}');
   registerDefaultPolicy(db, id);
 }
 
