@@ -44,7 +44,7 @@ test('schema 16 upgrade adds empty evidence tables and preserves all existing so
   const directory = mkdtempSync(join(tmpdir(), 'citation-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema16(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 29);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) {

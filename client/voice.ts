@@ -11,7 +11,7 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files' | 'pastes';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
-export type VoiceCommand = { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -57,6 +57,11 @@ export function parseCommand(input: string): VoiceCommand {
   if (/^(?:show|open) (?:my tasks|tasks assigned to me)$/.test(text)) return { type: 'taskFilter', value: 'mine' };
   if (/^(?:show|open) unassigned tasks$/.test(text)) return { type: 'taskFilter', value: 'unassigned' };
   if (/^(?:show|open) (?:tasks i follow|followed tasks)$/.test(text)) return { type: 'taskFilter', value: 'following' };
+  const revisionFollowing = text.match(/^(?:show|open) (?:the )?(?:(followed|all) (revisions|reviews|papers|drafts|documents)|(revisions|reviews|papers|drafts|documents) i follow)$/);
+  if (revisionFollowing) {
+    const noun = revisionFollowing[2] || revisionFollowing[3];
+    return { type: 'revisionFollowingFilter', view: noun === 'papers' ? 'papers' : noun === 'drafts' || noun === 'documents' ? 'drafts' : 'reviews', following: revisionFollowing[1] !== 'all' };
+  }
   const filter = text.match(/^(?:filter|show) (?:by )?(open|all|in progress|resolved|duplicate|accepted|needs review|changes requested|changes planned|draft|closed|abandoned)$/);
   if (filter) return { type: 'filter', value: filter[1].replaceAll(' ', '_') };
   return { type: 'unknown', text: original };

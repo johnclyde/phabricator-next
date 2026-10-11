@@ -39,3 +39,12 @@ test('revision lifecycle filters navigate without voice mutation commands', () =
   for (const value of ['changes planned', 'changes requested', 'closed', 'abandoned']) assert.deepEqual(parseCommand(`show ${value}`), { type: 'filter', value: value.replaceAll(' ', '_') });
   for (const value of ['abandon revision', 'reclaim revision', 'close revision', 'request review', 'accept reviewed version']) assert.equal(parseCommand(value).type, 'unknown');
 });
+
+test('following commands select the requested revision list without changing subscriptions', () => {
+  for (const [noun, view] of [['revisions', 'reviews'], ['reviews', 'reviews'], ['papers', 'papers'], ['drafts', 'drafts'], ['documents', 'drafts']] as const) {
+    for (const command of [`Show followed ${noun}.`, `open ${noun} I follow`, `show the followed ${noun}`]) assert.deepEqual(parseCommand(command), { type: 'revisionFollowingFilter', view, following: true });
+    assert.deepEqual(parseCommand(`show all ${noun}`), { type: 'revisionFollowingFilter', view, following: false });
+  }
+  for (const command of ['follow P2', 'unfollow revision D1', 'mute all papers', 'subscribe Alice', 'show followed papers and unsubscribe', 'show all drafts and delete them']) assert.equal(parseCommand(command).type, 'unknown');
+  assert.deepEqual(parseCommand('show followed tasks'), { type: 'taskFilter', value: 'following' });
+});

@@ -6,6 +6,7 @@ import { initializeRevisionLifecycle, RevisionLifecycleStore } from './revision-
 import type { RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { initializeRevisionReviewers, RevisionReviewerStore } from './revision-reviewers.ts';
 import type { RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
+import { initializeRevisionSubscriptions, RevisionSubscriptionStore } from './revision-subscriptions.ts';
 import { initializeRevisionMetadata, RevisionMetadataStore } from './revision-metadata.ts';
 import type { RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
@@ -172,6 +173,7 @@ export class Store {
   readonly revisionLifecycle: RevisionLifecycleStore;
   readonly revisionReviewers: RevisionReviewerStore;
   readonly revisionMetadata: RevisionMetadataStore;
+  readonly revisionSubscriptions: RevisionSubscriptionStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -184,7 +186,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 28) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 29) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -445,11 +447,16 @@ export class Store {
       try { this.transaction(() => { initializeRevisionMetadata(this.database); this.database.exec('PRAGMA user_version = 28'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 29) {
+      try { this.transaction(() => { initializeRevisionSubscriptions(this.database); this.database.exec('PRAGMA user_version = 29'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.revisionMetadata = new RevisionMetadataStore(this.database, options.revisionMetadata);
     this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
     this.revisionReviewers = new RevisionReviewerStore(this.database, this.revisionLifecycle, options.revisionReviewers);
     this.revisionLifecycle.connectReviewers(this.revisionReviewers);
     this.revisionAuthorship = new RevisionAuthorshipStore(this.database, this.revisionLifecycle.config.closeOnAccept, (id, previous, author, actor, operationId) => this.revisionReviewers.authorChanged(id, previous, author, actor, operationId));
+    this.revisionSubscriptions = new RevisionSubscriptionStore(this.database, this.revisionAuthorship, this.revisionReviewers);
     this.revisionDependencies = new RevisionDependencyStore(this.database, id => this.revisionMetadata.state(id));
     this.revisionStack = new RevisionStackStore(this.database, id => this.revisionMetadata.state(id), this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
@@ -1600,6 +1607,7 @@ export class Store {
       this.insertComment(comment);
       const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
       this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, id, commentId, JSON.stringify(thread));
+      this.revisionSubscriptions.commented(id, comment.id, attribution);
       this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); return comment;
     });
   }
@@ -1675,6 +1683,7 @@ export class Store {
       const comment: ReviewComment = { id: randomUUID(), threadId, revisionId: id, versionId: root.versionId, viewedVersionId: viewedVersion.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), ...(root.docxAnchor ? { docxAnchor: root.docxAnchor } : {}), body: string(data.body, 'Reply', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       const updated = this.advanceThread(thread, comment.createdAt);
       this.insertComment(comment); this.saveThread(updated);
+      this.revisionSubscriptions.commented(id, comment.id, attribution);
       this.event(id, 'replied', `Replied to a discussion while viewing version ${viewedVersion.number}.`, attribution);
       return comment;
     });

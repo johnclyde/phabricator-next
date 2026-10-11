@@ -32,6 +32,7 @@ import { parseRevisionDependencyInput } from './store.ts';
 import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 import { revisionLifecycleInput, type RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { revisionReviewerInput, type RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
+import { revisionSubscriptionInput } from '../shared/revision-subscriptions.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 
 const MAX_BODY = 2_000_000;
@@ -287,6 +288,21 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const subscriptions = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/subscriptions$/.exec(path) : null;
+    if (subscriptions) {
+      const id = subscriptions[1]!;
+      store.read(() => { auth.revalidate(context, 'write'); access.require(id); });
+      if (!rawKey) throw new HttpError(400, 'Following changes require an Idempotency-Key.');
+      let data;
+      try { data = revisionSubscriptionInput(input); } catch { throw new HttpError(400, 'Provide an exact following action, person and subscription, role and access versions.'); }
+      const authorize = () => { auth.revalidate(context, 'write'); access.requireRevisionSubscriptionAction(id, data); };
+      store.read(authorize);
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex');
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionSubscriptions.mutate(id, data, actor, access.revisionSubscriptionTarget(id, data), retryKeySha256) }), authorize, response => access.presentRevisionSubscription(id, data, response, retryKeySha256));
+    }
     const metadata = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/metadata$/.exec(path) : null;
     if (metadata) {
       const id = metadata[1]!;
@@ -716,6 +732,19 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const revisionSubscriptions = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/subscriptions(?:\/(history|mute-history|person))?$/.exec(path);
+          if (revisionSubscriptions) {
+            const id = revisionSubscriptions[1]!, route = revisionSubscriptions[2]; access.require(id);
+            const allowed = route === 'person' ? ['principalId'] : route === 'mute-history' ? ['before', 'limit', 'expectedMuteVersion'] : route === 'history' ? ['before', 'limit', 'expectedSubscriptionVersion'] : ['after', 'limit', 'expectedSubscriptionVersion', 'expectedAuthorVersion', 'expectedReviewerVersion'];
+            for (const key of url.searchParams.keys()) if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw new HttpError(400, 'Use unique supported following parameters.');
+            const number = (key: string): number | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < (key.startsWith('expected') ? 0 : 1)) throw new HttpError(400, 'Choose valid following versions and page limits.'); return Number(value); };
+            const person = (key: string): string | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!value.length || value.length > 240 || /[\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(value)) throw new HttpError(400, 'Selected member is unavailable.'); return value; };
+            if (route === 'person') { const principalId = person('principalId'); if (!principalId) throw new HttpError(400, 'Choose one member.'); send(res, 200, access.revisionSubscriptionPerson(id, principalId)); }
+            else if (route === 'mute-history') send(res, 200, access.revisionMuteHistory(id, { before: number('before'), limit: number('limit'), expectedMuteVersion: number('expectedMuteVersion') }));
+            else if (route === 'history') send(res, 200, access.revisionSubscriptionHistory(id, { before: number('before'), limit: number('limit'), expectedSubscriptionVersion: number('expectedSubscriptionVersion') }));
+            else send(res, 200, access.revisionSubscriptions(id, { after: person('after'), limit: number('limit'), expectedSubscriptionVersion: number('expectedSubscriptionVersion'), expectedAuthorVersion: number('expectedAuthorVersion'), expectedReviewerVersion: number('expectedReviewerVersion') }));
+            return;
+          }
           const metadata = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/metadata(\/history)?$/.exec(path);
           if (metadata) {
             const id = metadata[1]!; access.require(id);

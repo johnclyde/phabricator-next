@@ -8,6 +8,8 @@ import { revisionLifecycleInputHash } from './revision-lifecycle.ts';
 import { revisionReviewerPermission, type RevisionReviewerInput, type RevisionReviewerSnapshot, type RevisionReviewerHistory } from '../shared/revision-reviewers.ts';
 import { revisionReviewerInputHash } from './revision-reviewers.ts';
 import type { RevisionMetadataInput, RevisionMetadataSnapshot, RevisionMetadataHistory } from '../shared/revision-metadata.ts';
+import { revisionSubscriptionInputHash } from './revision-subscriptions.ts';
+import type { RevisionSubscriptionInput, RevisionSubscriptionSnapshot, RevisionSubscriptionHistory, RevisionMuteHistory, RevisionSubscriptionPerson } from '../shared/revision-subscriptions.ts';
 import { revisionMetadataInputHash } from './revision-metadata.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
@@ -55,6 +57,7 @@ export class AccessLayer {
     state.accessEpoch = this.policies.epoch();
     state.canCreate = this.context.scopes.includes('write');
     state.currentPrincipalId = this.principal;
+    state.followingRevisionIds = state.revisions.filter(revision => this.store.revisionSubscriptions.effective(revision.id, this.principal)).map(revision => revision.id);
     state.followingTaskIds = state.tasks.filter(task => this.store.subscriptionStatus(task.id, this.principal).subscribed).map(task => task.id);
     state.joinedProjectIds = state.projects.filter(project => this.store.projectPreferences(project.id, this.principal).membership.active).map(project => project.id);
     state.watchingProjectIds = state.projects.filter(project => this.store.projectPreferences(project.id, this.principal).watching.active).map(project => project.id);
@@ -79,6 +82,60 @@ export class AccessLayer {
       const permission = revisionReviewerPermission(action.action);
       return access.capabilities[permission] ? action : { ...action, available: false, reason: `${permission === 'edit' ? 'Editing' : 'Interaction'} permission is required for this reviewer action.` };
     }), access, accessEpoch: this.policies.epoch() };
+  }
+  revisionSubscriptions(id: string, query: { after?: string; limit?: number; expectedSubscriptionVersion?: number; expectedAuthorVersion?: number; expectedReviewerVersion?: number }): RevisionSubscriptionSnapshot {
+    this.require(id);
+    return { ...this.store.revisionSubscriptions.snapshot(id, this.principal, query), access: this.describe(id), accessEpoch: this.policies.epoch() };
+  }
+  revisionSubscriptionPerson(id: string, principalId: string): RevisionSubscriptionPerson {
+    this.require(id); this.revisionSubscriptionReference(id, principalId, false);
+    return { ...this.store.revisionSubscriptions.person(id, principalId), accessEpoch: this.policies.epoch() };
+  }
+  revisionSubscriptionHistory(id: string, query: { before?: number; limit?: number; expectedSubscriptionVersion?: number }): RevisionSubscriptionHistory {
+    this.require(id);
+    return { ...this.store.revisionSubscriptions.history(id, query), accessEpoch: this.policies.epoch() };
+  }
+  revisionMuteHistory(id: string, query: { before?: number; limit?: number; expectedMuteVersion?: number }): RevisionMuteHistory {
+    this.require(id);
+    return { ...this.store.revisionSubscriptions.muteHistory(id, this.principal, query), accessEpoch: this.policies.epoch() };
+  }
+  requireRevisionSubscriptionAction(id: string, input: RevisionSubscriptionInput): void {
+    this.require(id);
+    if (input.action === 'mute' || input.action === 'unmute') {
+      if (input.principalId !== this.principal) throw new HttpError(403, 'Mute preferences may only be changed for yourself.', 'ACTION_FORBIDDEN');
+    } else if (input.principalId !== this.principal) {
+      if (input.action === 'unsubscribe') this.require(id, 'edit');
+      else if (!this.policies.access(id, this.principal).edit) this.require(id, 'interact');
+    }
+  }
+  private revisionSubscriptionReference(id: string, principalId: string, active: boolean): { principalId: string; displayName: string } {
+    if (!active) {
+      const status = this.store.revisionSubscriptions.status(id, principalId);
+      if ((status.version > 0 || status.automatic.length > 0) && status.displayName !== null) return { principalId, displayName: status.displayName };
+    }
+    const resolved = this.principalReference(principalId, active);
+    return { principalId: resolved, displayName: resolved === this.principal ? this.context.displayName : this.auth.listAccounts().find(account => account.id === resolved)!.displayName };
+  }
+  revisionSubscriptionTarget(id: string, input: RevisionSubscriptionInput): { principalId: string; displayName: string } {
+    this.requireRevisionSubscriptionAction(id, input);
+    if (input.principalId === this.principal) return { principalId: this.principal, displayName: this.context.displayName };
+    return this.revisionSubscriptionReference(id, input.principalId, input.action === 'subscribe');
+  }
+  presentRevisionSubscription(id: string, input: RevisionSubscriptionInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
+    this.requireRevisionSubscriptionAction(id, input);
+    const invalid = (): never => { throw new HttpError(409, 'This saved following receipt does not match the requested operation.', 'REVISION_SUBSCRIPTION_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.revisionSubscriptions.operationRevisionId(body.operationId) !== id) return invalid();
+      operation = this.store.revisionSubscriptions.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.attribution.principalId !== this.principal
+      || operation.retryKeySha256 !== retryKeySha256
+      || operation.inputSha256 !== revisionSubscriptionInputHash(input) || !isDeepStrictEqual(operation.input, input)
+      || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionMetadata(id: string): RevisionMetadataSnapshot {
     this.require(id);

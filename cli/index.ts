@@ -23,6 +23,7 @@ import { revisionDependenciesCommand } from './revision-dependencies';
 import { revisionAuthorshipCommand } from './revision-authorship';
 import { revisionLifecycleCommand } from './revision-lifecycle';
 import { revisionReviewersCommand } from './revision-reviewers';
+import { revisionSubscriptionsCommand } from './revision-subscriptions';
 import { revisionMetadataCommand } from './revision-metadata';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
@@ -61,6 +62,11 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- revision-reviewers P2
   npm run arc -- revision-reviewer-history P2 [--before N] [--limit N] [--reviewer-version N]
   npm run arc -- edit-revision-reviewers P2 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- revision-subscriptions P2 [--after ID] [--limit N] [--subscription-version N] [--author-version N] [--reviewer-version N]
+  npm run arc -- revision-subscription-status P2 --principal ID
+  npm run arc -- revision-subscription-history P2 [--before N] [--limit N] [--subscription-version N]
+  npm run arc -- revision-mute-history P2 [--before N] [--limit N] [--mute-version N]
+  npm run arc -- edit-revision-subscriptions P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- revision-metadata P2
   npm run arc -- revision-metadata-history P2 [--before N] [--limit N] [--metadata-version N]
   npm run arc -- edit-revision-metadata P2 --intent REQUEST.json [--request-id KEY]
@@ -253,7 +259,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
-      draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
+      draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, 'subscription-version': { type: 'string' }, 'mute-version': { type: 'string' }, principal: { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -312,6 +318,7 @@ async function main() {
   if (await revisionAuthorshipCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionLifecycleCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionReviewersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionSubscriptionsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
