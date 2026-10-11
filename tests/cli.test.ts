@@ -88,6 +88,84 @@ test('CLI imports a complete pinned text tree, recovers receipts, preserves prov
   } finally { await app.close(); store.close(); await fixture.close(); }
 });
 
+test('CLI imports later complete Git versions with explicit pins, source view access and repeatable historical receipts', async () => {
+  const fixture = await createGitFixture(); const store = createStore({ path: ':memory:' });
+  const provision = createAuth({ database: store.database, mode: 'local', basePath: '/workspace/', provisioning: true });
+  const author = await provision.createAccount({ username: 'version-importer', displayName: 'Version importer', password: 'test-only-version-cli-password' });
+  const owner = await provision.createAccount({ username: 'version-custodian', displayName: 'Version custodian', password: 'test-only-version-cli-owner-password' });
+  const repository = store.createRepository({ name: 'Version source', remoteUrl: 'https://example.invalid/source.git', defaultBranch: 'main' });
+  let providerCalls = 0;
+  const app = createApp({ store, seed: false, authMode: 'password', basePath: '/workspace/', gitRepositories: { [repository.id]: fixture.barePath }, analyzeAI: async () => { providerCalls++; return { provider: 'local', model: 'fixture', summary: 'No findings', findings: [] }; } });
+  const token = app.auth.createToken(author.id, { name: 'Import versions', scopes: ['read', 'write'] });
+  const reader = app.auth.createToken(author.id, { name: 'Read versions', scopes: ['read'] });
+  const requests: string[] = []; app.server.on('request', req => requests.push(`${req.method} ${req.url}`));
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
+  const command = (args: string[], credential = token.token) => runCommand(fixture.root, [...args, '--server', server], credential);
+  const title = 'Pinned review \u001b[31mtitle\u001b[0m'; const message = 'Whole source replacement\nLiteral \u001b[31mtext\u001b[0m and \u009b control';
+  const ownerOnly = { kind: 'principals' as const, principalIds: [owner.id] };
+  const change = (args: string[], flag: string, value: string) => { const next = [...args]; next[next.indexOf(flag) + 1] = value; return next; };
+  const omit = (args: string[], flag: string) => { const next = [...args]; next.splice(next.indexOf(flag), 2); return next; };
+  try {
+    const initial = await command(['import-git', repository.id, '--commit', fixture.importCommit, '--title', title, '--kind', 'paper', '--request-id', 'version-cli-create', '--json']);
+    assert.equal(initial.code, 0, initial.stderr); const created = JSON.parse(initial.stdout) as RevisionDetail; const id = created.revision.id; const first = created.versions[0]!;
+    store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Explicit fixture evidence', findings: [] });
+    store.createComment(id, { versionId: first.id, body: 'Keep the discussion attached to the original source.', filePath: 'README.md', line: 1 });
+    store.updateRevision(id, { status: 'accepted', expectedVersion: 1 });
+    const before = store.detail(id); const revisionPolicy = app.policies.policy(id, author.id);
+    const policy = app.policies.policy(repository.id, owner.id);
+    app.policies.setPolicy(repository.id, { expectedVersion: policy.version, spaceId: policy.spaceId, ...policy.rules, edit: ownerOnly }, owner.id);
+    assert.equal(app.policies.access(repository.id, author.id).view, true); assert.equal(app.policies.access(repository.id, author.id).edit, false);
+    assert.equal(app.policies.access(id, author.id).edit, true);
+    const input = ['import-git-version', id, '--commit', fixture.importNextCommit, '--version', '1', '--version-id', first.id, '--content-hash', first.contentHash, '--message', message, '--request-id', 'version-cli-next'];
+    for (const flag of ['--version', '--version-id', '--content-hash', '--commit', '--message']) {
+      const start = requests.length; const result = await command(omit(input, flag)); assert.equal(result.code, 1, flag); assert.equal(requests.length, start, 'missing pins fail before any lookup or write');
+    }
+    for (const extra of [['--title', 'New title'], ['--path', 'README.md'], ['--provider', 'openai'], ['--project', 'PROJ1'], ['--after', '1']]) {
+      const start = requests.length; assert.equal((await command([...input, ...extra])).code, 1); assert.equal(requests.length, start, 'incompatible options fail before any lookup or write');
+    }
+    assert.equal((await command(input, reader.token)).code, 1);
+    for (const wrong of [change(input, '--version', '2'), change(input, '--version-id', '00000000-0000-4000-8000-000000000000'), change(input, '--content-hash', 'f'.repeat(64)), change(input, '--commit', fixture.head)]) assert.equal((await command(wrong)).code, 1);
+    assert.equal(store.detail(id).versions.length, 1); assert.equal(store.detail(id).revision.status, 'accepted');
+    const start = requests.length; const imported = await command([...input, '--json']); assert.equal(imported.code, 0, imported.stderr);
+    assert.deepEqual(requests.slice(start), [`POST /workspace/api/revisions/${id}/import-git`], 'all pins come from the explicit request, without a current-head GET');
+    assert.ok(!imported.stderr.includes('\u001b')); assert.ok(!imported.stderr.includes('\u009b'));
+    const intentLine = imported.stderr.split('\n').find(line => line.startsWith('Import intent: '))!;
+    const intent = JSON.parse(intentLine.slice('Import intent: '.length)) as { server: string; revisionId: string; requestId: string; input: unknown };
+    assert.deepEqual(intent, { server, revisionId: id, requestId: 'version-cli-next', input: { commitId: fixture.importNextCommit, expectedVersion: 1, expectedVersionId: first.id, expectedContentHash: first.contentHash, message } });
+    const result = JSON.parse(imported.stdout) as RevisionDetail; const second = result.versions.find(version => version.number === 2)!;
+    assert.equal(result.revision.status, 'needs_review'); assert.equal(result.revision.title, title); assert.equal(result.revision.repositoryId, repository.id); assert.equal(result.revision.kind, 'paper');
+    assert.deepEqual(result.versions[0], first); assert.deepEqual(result.comments, before.comments); assert.deepEqual(result.reviews, before.reviews);
+    assert.equal(second.gitSource?.commitId, fixture.importNextCommit); assert.equal(second.message, message); assert.equal(second.files.length, 8);
+    assert.ok(second.files.some(file => file.path === 'added.md')); assert.ok(!second.files.some(file => file.path === 'name with spaces.md'));
+    assert.equal(second.gitSource?.manifest.find(file => file.path === 'tools/check.sh')?.mode, '100644'); assert.equal(first.gitSource?.manifest.find(file => file.path === 'tools/check.sh')?.mode, '100755');
+    for (const file of second.files) { const bytes = Buffer.from(file.content, 'utf8'); assert.equal(second.gitSource?.manifest.find(entry => entry.path === file.path)?.objectId, createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')); }
+    assert.deepEqual(app.policies.policy(id, author.id), revisionPolicy);
+    assert.throws(() => store.updateRevision(id, { expectedVersion: 2, status: 'accepted' }), /current-version review evidence/);
+    const append = async (previous: RevisionVersion, commitId: string, key: string): Promise<RevisionDetail> => {
+      const next = await command(['import-git-version', id, '--commit', commitId, '--version', String(previous.number), '--version-id', previous.id, '--content-hash', previous.contentHash, '--message', key, '--request-id', key, '--json']); assert.equal(next.code, 0, next.stderr); return JSON.parse(next.stdout) as RevisionDetail;
+    };
+    const restored = await append(second, fixture.importEqualCommit, 'version-cli-equal'); const third = restored.versions.find(version => version.number === 3)!;
+    const equal = await append(third, fixture.importCommit, 'version-cli-identical'); const fourth = equal.versions.find(version => version.number === 4)!;
+    assert.equal(third.contentHash, fourth.contentHash); assert.notEqual(third.id, fourth.id); assert.notEqual(third.gitSource?.commitId, fourth.gitSource?.commitId);
+    const older = await append(fourth, fixture.base, 'version-cli-older'); assert.equal(older.revision.currentVersion, 5); assert.equal(older.versions.at(-1)!.files.length, 1); assert.equal(older.versions.at(-1)!.gitSource?.commitId, fixture.base);
+    assert.deepEqual(older.versions.slice(0, 2), result.versions); assert.deepEqual(older.comments, before.comments); assert.deepEqual(older.reviews, before.reviews);
+    const parked = join(fixture.root, 'version-source-unavailable.git'); await rename(fixture.barePath, parked);
+    try {
+      const retryStart = requests.length; const retry = await command([...input, '--json']); assert.equal(retry.code, 0, retry.stderr); assert.deepEqual(JSON.parse(retry.stdout), result);
+      assert.deepEqual(requests.slice(retryStart), [`POST /workspace/api/revisions/${id}/import-git`]); assert.equal(retry.stderr, imported.stderr);
+      const displayed = await command(input); assert.equal(displayed.code, 0, displayed.stderr); assert.match(displayed.stdout, /v2/); assert.ok(!displayed.stdout.includes('\u001b')); assert.match(displayed.stdout, /\\u001b\[31m/);
+      assert.equal((await command(change(input, '--message', 'Changed retry payload'))).code, 1);
+      assert.equal((await command(change(input, '--request-id', 'version-cli-stale-new'))).code, 1);
+    } finally { await rename(parked, fixture.barePath); }
+    assert.equal(store.detail(id).versions.length, 5); assert.equal(providerCalls, 0);
+    const finalPolicy = app.policies.policy(repository.id, owner.id);
+    app.policies.setPolicy(repository.id, { expectedVersion: finalPolicy.version, spaceId: finalPolicy.spaceId, ...finalPolicy.rules, view: ownerOnly }, owner.id);
+    assert.equal((await command(input)).code, 1, 'current source visibility is required even for a saved retry');
+    assert.equal(store.detail(id).versions.length, 5);
+  } finally { await app.close(); store.close(); await fixture.close(); }
+});
+
 test('CLI observes real Git snapshots through mounted read-only access without following moved refs', async () => {
   const fixture = await createGitFixture();
   const store = createStore({ path: ':memory:' });

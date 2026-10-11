@@ -7,7 +7,7 @@ import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import { gitImportInput, type MutationResponse, type Store } from './store.ts';
+import { gitImportInput, gitVersionImportInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 
 const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions']);
@@ -250,6 +250,9 @@ export class AccessLayer {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
     if (method === 'POST' && /^\/api\/repositories\/R\d+\/import-revision$/.test(path)) this.references(gitImportInput(input));
+    // The target's central policy already requires continuing repository view.
+    // Pins are validated here, but their current-head match belongs after replay.
+    if (method === 'POST' && /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path)) gitVersionImportInput(input);
     const workboard = /^\/api\/projects\/(PROJ\d+)\/workboard(?:\/(moves|bulk-moves|columns|import)(?:\/([^/]+)(\/reorder)?)?)?$/.exec(path);
     if (workboard && method !== 'GET') {
       const id = workboard[1]!; const data = record(input);

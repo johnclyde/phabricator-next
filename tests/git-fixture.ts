@@ -12,6 +12,8 @@ export interface GitFixture {
   feature: string;
   emptyCommit: string;
   importCommit: string;
+  importNextCommit: string;
+  importEqualCommit: string;
   annotatedTag: string;
   readmeBlob: string;
   advanceMain(content?: string): Promise<string>;
@@ -79,7 +81,14 @@ export async function createGitFixture(objectFormat: 'sha1' | 'sha256' = 'sha1')
     // Keep the complete importable tree independent of main's deliberate unsupported entries.
     const importEntries = entries.filter(entry => entry.type === 'blob' && ['100644', '100755'].includes(entry.mode) && !['binary.dat', 'invalid.txt', 'oversized.txt'].includes(entry.path));
     importEntries.push({ path: '\ufeffsource.txt', mode: '100644', type: 'blob', id: await blob('\ufeffLiteral source.\n') });
-    const importCommit = await commit(await tree(importEntries), 'Complete text source for review', [base]);
+    const importTree = await tree(importEntries);
+    const importCommit = await commit(importTree, 'Complete text source for review', [base]);
+    const importEqualCommit = await commit(importTree, 'Same complete tree in another commit', [importCommit]);
+    const importNextEntries = importEntries.filter(entry => entry.path !== 'name with spaces.md').map(entry => ({ ...entry }));
+    importNextEntries.find(entry => entry.path === 'README.md')!.id = await blob('# Example repository\nA new complete review version.\n');
+    importNextEntries.find(entry => entry.path === 'tools/check.sh')!.mode = '100644';
+    importNextEntries.push({ path: 'added.md', mode: '100644', type: 'blob', id: await blob('Added in the next complete tree.\n') });
+    const importNextCommit = await commit(await tree(importNextEntries), 'Changed complete text source for review', [importCommit]);
     const feature = await commit(await tree([{ path: 'README.md', mode: '100644', type: 'blob', id: await blob('Feature source.\n') }]), 'Feature branch', [base]);
     const target = await commit(await tree(entries), 'Update source and add files', [base]);
     const head = await commit(await tree(entries), 'Merge feature branch', [target, feature]);
@@ -87,7 +96,7 @@ export async function createGitFixture(objectFormat: 'sha1' | 'sha256' = 'sha1')
     for (const [ref, id] of [['refs/heads/main', head], ['refs/heads/feature', feature], ['refs/tags/v1', base], ['refs/tags/v2', annotatedTag], ['refs/tags/source-blob', readmeBlob]]) await git(['update-ref', ref!, id!]);
     let latest = head;
     return {
-      root, barePath, objectFormat, base, head, feature, emptyCommit, importCommit, annotatedTag, readmeBlob, git,
+      root, barePath, objectFormat, base, head, feature, emptyCommit, importCommit, importNextCommit, importEqualCommit, annotatedTag, readmeBlob, git,
       async advanceMain(content = '# Example repository\nA later branch head.\n') {
         const nextEntries = entries.map(entry => ({ ...entry })); nextEntries.find(entry => entry.path === 'README.md')!.id = await blob(content);
         const next = await commit(await tree(nextEntries), 'Advance main', [latest]); await git(['update-ref', 'refs/heads/main', next, latest]); latest = next; return next;

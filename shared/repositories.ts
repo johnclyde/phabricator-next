@@ -38,6 +38,15 @@ export interface GitSourceProvenance {
   commitId: string; treeId: string; scope: 'complete-text-tree';
   manifest: { path: string; mode: '100644' | '100755'; objectId: string }[];
 }
-/** Internal verified collector output. The import API accepts only GitImportInput. */
+/** Internal verified collector output. Import APIs accept commit selectors and metadata, never this source payload. */
 export interface GitImportSnapshot extends GitResponse { files: SourceFile[]; provenance: GitSourceProvenance }
 export interface GitImportInput { commitId: string; kind: RevisionKind; title: string; summary?: string; projectId?: string | null }
+
+/** Explicit whole-tree replacement pinned to the current immutable review version. */
+export interface GitVersionImportInput {
+  commitId: string;
+  expectedVersion: number;
+  expectedVersionId: string;
+  expectedContentHash: string;
+  message: string;
+}

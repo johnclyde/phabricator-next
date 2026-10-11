@@ -17,7 +17,8 @@ jobs:
     name: Typecheck, tests, build, and browser tests
     # Standard hosted Linux runners are free for public repositories.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Both mount configurations run the complete desktop/mobile suite.
+    timeout-minutes: 30
     env:
       CI: 'true'
     steps:

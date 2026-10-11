@@ -10,7 +10,7 @@ import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
-import { createStore, gitImportInput, type MutationResponse, type Store } from './store.ts';
+import { createStore, gitImportInput, gitVersionImportInput, type MutationResponse, type Store } from './store.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
@@ -205,6 +205,8 @@ export function createApp(options: AppOptions = {}): App {
     const access = new AccessLayer(store, auth, policies, context);
     const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
     const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
+    const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
+    let versionImportRepository: string | undefined;
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
       const data = object(input, ['provider', 'expectedVersion']);
@@ -212,7 +214,8 @@ export function createApp(options: AppOptions = {}): App {
     }
     const authorize = () => {
       auth.revalidate(context, scope); access.authorize(method, path, input);
-      if (importMatch && signal?.aborted) throw new HttpError(499, 'Repository import was canceled.', 'GIT_ABORTED');
+      if (versionImportRepository) access.require(versionImportRepository);
+      if ((importMatch || versionImportMatch) && signal?.aborted) throw new HttpError(499, 'Repository import was canceled.', 'GIT_ABORTED');
     };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
     const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
@@ -235,6 +238,22 @@ export function createApp(options: AppOptions = {}): App {
       }
     }
     const execute = async (): Promise<MutationResponse> => {
+      if (versionImportMatch) {
+        const id = versionImportMatch[1]!; const data = gitVersionImportInput(input);
+        const repositoryId = store.read(() => { authorize(); return store.requireGitImportVersion(id, data).revision.repositoryId!; });
+        versionImportRepository = repositoryId;
+        let snapshot: GitImportSnapshot;
+        try { snapshot = await waitForGit(git.importSnapshot(repositoryId, data.commitId, signal), signal); }
+        catch (error) {
+          store.read(authorize);
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(503, 'Repository contents are unavailable.', 'GIT_UNAVAILABLE');
+        }
+        return store.mutate(key, fingerprint, () => {
+          if (snapshot.repositoryId !== repositoryId) throw new HttpError(422, 'The Git snapshot could not be verified for import.', 'GIT_INVALID_OBJECT');
+          return { status: 201, body: store.createVersionFromGit(id, data, snapshot, attribution) };
+        }, authorize, present);
+      }
       if (importMatch) {
         const repositoryId = importMatch[1]!; const data = gitImportInput(input);
         let snapshot: GitImportSnapshot;
@@ -551,7 +570,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req);
-      if (req.method === 'POST' && /^\/api\/repositories\/R\d+\/import-revision$/.test(path)) {
+      if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);

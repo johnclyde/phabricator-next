@@ -12,7 +12,7 @@ import { visibleProjectScope } from '../shared/project-hierarchy';
 import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile, TaskDetail } from '../shared/types';
 import type { WorkboardCardPage, WorkboardDetail } from '../shared/workboards';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories';
-import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, RepositoryDetail } from '../shared/repositories';
+import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, GitVersionImportInput, RepositoryDetail } from '../shared/repositories';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -28,6 +28,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
   npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
   npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--project ID|NAME] [--request-id KEY] [--json]
+  npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
@@ -59,6 +60,13 @@ Git provenance and repository access requirements. Unsupported files reject the
 whole import. Nothing is executed or reviewed automatically. The request ID is
 printed to stderr before submission; repeat the identical command with that
 --request-id to recover an uncertain result without creating another review.
+import-git-version replaces an existing review's complete source tree with a new
+immutable version. Copy --version, --version-id and --content-hash from the exact
+version you inspected with show or export. These pins are required on every
+attempt, including retries; the command never selects a newer review head.
+The linked repository is selected by the server. Its view access and the review's
+edit access are required. The exact request is printed as escaped JSON to stderr
+before submission. Retry it unchanged with the same --request-id.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -94,8 +102,8 @@ function visibleOwnerId(owner: string, state: AppState): string | null | undefin
 }
 
 async function main() {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true, strict: true,
+  const { values, positionals, tokens } = parseArgs({
+    allowPositionals: true, strict: true, tokens: true,
     options: {
       kind: { type: 'string' }, title: { type: 'string' }, summary: { type: 'string' },
       revision: { type: 'string' }, message: { type: 'string' }, provider: { type: 'string', default: 'local' },
@@ -107,6 +115,7 @@ async function main() {
       'show-hidden': { type: 'boolean' },
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
       'request-id': { type: 'string' },
+      'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -221,7 +230,7 @@ async function main() {
     if (args.length !== 1 || !id || !/^R[1-9]\d*$/.test(id)) throw new Error('Provide one repository ID such as R1.');
     if (!commitId || !isGitObjectId(commitId)) throw new Error('--commit requires a full lowercase Git object ID, not a branch name or revision expression.');
     if (!values.title?.trim()) throw new Error('--title is required for a new imported review.');
-    if ([values.path, values.file, values.revision, values.after, values.limit, values.version, values.message].some(value => value !== undefined)) throw new Error('import-git creates a new review from the entire commit. File filters, paging and existing-revision options are not accepted.');
+    if ([values.path, values.file, values.revision, values.after, values.limit, values.version, values.message, values['version-id'], values['content-hash']].some(value => value !== undefined)) throw new Error('import-git creates a new review from the entire commit. File filters, paging and existing-revision options are not accepted.');
     if ((values.project?.length ?? 0) > 1) throw new Error('An imported review accepts at most one --project.');
     const requestId = values['request-id'] ?? randomUUID();
     if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('--request-id must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
@@ -236,6 +245,38 @@ async function main() {
       console.log(`${detail.revision.id} · v${version!.number} · ${terminalText(detail.revision.title)}`);
       console.log(`Imported ${version!.files.length} files from ${id} at ${commitId}. Repository access remains required.`);
       console.log(new URL(`${basePath}#${detail.revision.id}`, server).href);
+    }
+    return;
+  }
+  if (command === 'import-git-version') {
+    const allowed = new Set(['commit', 'version', 'version-id', 'content-hash', 'message', 'request-id', 'json', 'server', 'help']);
+    if (tokens.some(token => token.kind === 'option' && !allowed.has(token.name))) throw new Error('import-git-version accepts only the target revision, exact source/version pins, message, request ID and output/server options. Create, source-filter, range and review-provider options are not accepted.');
+    const id = args[0]; const commitId = values.commit; const expectedVersion = Number(values.version);
+    const expectedVersionId = values['version-id']; const expectedContentHash = values['content-hash']; const message = values.message;
+    if (args.length !== 1 || !id || !/^[DPL][1-9]\d{0,14}$/.test(id)) throw new Error('Provide one existing revision ID such as D1, P2 or L3.');
+    if (!commitId || !isGitObjectId(commitId)) throw new Error('--commit requires a full lowercase Git object ID, not a branch name or revision expression.');
+    if (!values.version || !/^[1-9]\d*$/.test(values.version) || !Number.isSafeInteger(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER) throw new Error('--version requires the positive version number you inspected.');
+    if (!expectedVersionId?.trim() || expectedVersionId.length > 100 || expectedVersionId.includes('\0')) throw new Error('--version-id requires the exact immutable version ID you inspected.');
+    if (!expectedContentHash || !/^[a-f0-9]{64}$/.test(expectedContentHash)) throw new Error('--content-hash requires the full lowercase SHA-256 content hash you inspected.');
+    if (!message?.trim() || message.length > 10_000 || message.includes('\0')) throw new Error('--message requires a nonempty description of at most 10,000 characters.');
+    const requestId = values['request-id'] ?? randomUUID();
+    if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('--request-id must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
+    const input: GitVersionImportInput = { commitId, expectedVersion, expectedVersionId, expectedContentHash, message };
+    console.error(`Import request ID: ${requestId}. Keep the exact request below for an unchanged retry.`);
+    console.error(`Import intent: ${terminalText(JSON.stringify({ server: server.href, revisionId: id, requestId, input }))}`);
+    const detail = await request<RevisionDetail>(`/api/revisions/${id}/import-git`, 'POST', input, requestId);
+    const previous = detail.versions.find(item => item.number === expectedVersion);
+    const version = detail.versions.find(item => item.number === expectedVersion + 1); const source = version?.gitSource;
+    if (detail.revision.id !== id || !detail.revision.repositoryId || !/^R[1-9]\d*$/.test(detail.revision.repositoryId)
+      || previous?.revisionId !== id || previous.id !== expectedVersionId || previous.contentHash !== expectedContentHash
+      || version?.revisionId !== id || version.message !== message || !source || source.kind !== 'git' || source.scope !== 'complete-text-tree'
+      || source.repositoryId !== detail.revision.repositoryId || source.commitId !== commitId || !['sha1', 'sha256'].includes(source.objectFormat)
+      || !isGitObjectId(commitId, source.objectFormat) || !isGitObjectId(source.treeId, source.objectFormat)) throw new Error('The import receipt does not match the requested revision, source commit and version pins. Retain the exact request and retry it unchanged before starting another import.');
+    if (values.json) console.log(JSON.stringify(detail, null, 2));
+    else {
+      console.log(`${id} · v${version.number} · ${terminalText(detail.revision.title)}`);
+      console.log(`Imported ${version.files.length} files from ${source.repositoryId} at ${commitId}. Repository access remains required.`);
+      console.log(new URL(`${basePath}#${id}`, server).href);
     }
     return;
   }

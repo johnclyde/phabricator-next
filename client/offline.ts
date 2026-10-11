@@ -29,9 +29,9 @@ function queuedObject(item: PendingMutation): string | null {
   if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:repository|repository-import|revision-source|revision|revision-comparison|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return key.startsWith('repository-import:') || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
-function isRetainedDraftKey(key: string): boolean { return key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('repository-import:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function objectFromKey(key: string): string | null { return /^(?:repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -67,6 +67,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   }
   const contentKey = (key: string) => storageKey(prefix + key);
   const blockedDraft = (key: string, value?: unknown): boolean => {
+    if (key.startsWith('revision-git-import:')) {
+      const ids = draftObjects(key, value); const target = objectFromKey(key);
+      return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.edit === false);
+    }
     if (key.startsWith('workboard-move:')) {
       const taskId = /^workboard-move:PROJ\d+:(T\d+)/.exec(key)?.[1];
       const ids = draftObjects(key, value);
@@ -101,6 +105,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const draftObjects = (key: string, value?: unknown): string[] => {
     const primary = objectFromKey(key);
+    if (key.startsWith('revision-git-import:')) {
+      try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { repositoryId?: unknown } | null; return [primary, typeof draft?.repositoryId === 'string' && /^R\d+$/.test(draft.repositoryId) ? draft.repositoryId : null].filter((id): id is string => typeof id === 'string'); } catch { return primary ? [primary] : []; }
+    }
     if (!key.startsWith('workboard-move:')) return primary ? [primary] : [];
     const task = /^workboard-move:PROJ\d+:(T\d+)/.exec(key)?.[1];
     try {
@@ -388,6 +395,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const relatedIds = [...new Set([...authorityIds, ...(bulkDestination ? [bulkDestination, ...bulkTaskIds] : importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [])])];
     const relatedGenerations = relatedIds.map(id => ({ id, generation: session.objectGenerations.get(id) || 0 }));
     const referenceUnavailable = () => {
+      if (/^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path)) return new RequestError('The source repository is unavailable. The original version import request is retained for export or explicit retry after access returns.', 404, 'REPOSITORY_REFERENCE_UNAVAILABLE');
       const changed = (id: string) => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)) || relatedGenerations.some(item => item.id === id && item.generation !== (session.objectGenerations.get(id) || 0));
       const code = authorityIds.some(changed) ? 'COLUMN_UNAVAILABLE' : bulkTaskIds.some(changed) ? 'TASK_REFERENCE_UNAVAILABLE' : (bulkDestination || importSource) ? 'PROJECT_REFERENCE_UNAVAILABLE' : 'TASK_REFERENCE_UNAVAILABLE';
       return new RequestError(bulkDestination ? 'A selected column, project or task is no longer available. Review a new bulk move preview.' : importSource ? 'The source project is no longer available. Its import preview has been removed.' : 'A selected card is no longer available. Review the move before saving.', 404, code);
@@ -503,12 +511,17 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory')).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return key.startsWith('repository-import:') || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
+      return (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };
+  const savedDraftRecords = (prefix: string): { key: string; value: unknown }[] => {
+    if (!sessionIsActive(session)) return [];
+    const keys = [...new Set(savedEntries().map(([key]) => key.replace(/:unsaved-memory$/, '')).filter(key => isDraftKey(key) && key.startsWith(prefix)))];
+    return keys.flatMap(key => { const value = readStored<unknown>(key, null); return value === null ? [] : [{ key, value }]; });
+  };
   const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
-  return { session, durable, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  return { session, durable, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.
