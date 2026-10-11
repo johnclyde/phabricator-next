@@ -1,0 +1,9 @@
+import { canonicalWikiPath, type WikiMoveInput, type WikiMovePreview, type WikiMoveReceipt, type WikiPathResult } from '../shared/wiki';
+export interface WikiAuthority { path: string; accessEpoch: number; ancestorIds: string[]; parentId: string | null }
+export interface WikiMoveDraft { destinationPath: string; message: string; authorityIds?: string[]; editIds?: string[] }
+export interface WikiMoveIntent { id: string; sourceId: string; input: WikiMoveInput; preview: WikiMovePreview; draft: WikiMoveDraft; authorityIds: string[]; editIds: string[] }
+export function wikiHref(path: string): string { const canonical = canonicalWikiPath(path); return `#wiki/${canonical === '/' ? '' : canonical.split('/').map(encodeURIComponent).join('/')}`; }
+export function wikiAuthority(result: WikiPathResult): WikiAuthority { const ancestorIds = result.hierarchy.ancestors.flatMap(item => item.document ? [item.document.id] : []); return { path: result.path, accessEpoch: result.accessEpoch, ancestorIds, parentId: result.hierarchy.ancestors.at(-1)?.document?.id || null }; }
+export function wikiMoveReceiptMatches(receipt: WikiMoveReceipt, intent: WikiMoveIntent): boolean {
+  return Boolean(receipt?.source?.id === intent.sourceId && receipt.source.version === intent.input.expectedVersion + 1 && receipt.source.location?.status === 'moved' && receipt.source.location.path === intent.preview.source.path && receipt.source.location.movedToId === receipt.destination?.id && receipt.destination.location?.status === 'active' && receipt.destination.location.path === intent.input.destinationPath && receipt.destination.version === intent.input.expectedDestinationVersion + 1 && (!intent.input.expectedDestinationId || receipt.destination.id === intent.input.expectedDestinationId) && receipt.sourceVersionId && receipt.destinationVersionId && receipt.operationId);
+}

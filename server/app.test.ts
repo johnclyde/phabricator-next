@@ -116,11 +116,11 @@ test('validation rejects unsafe files, anchors, unknown properties, and stale wi
     const created = (await app.request<RevisionDetail>('/api/revisions', 'POST', revisionInput)).body;
     assert.equal(created.revision.id, 'D1');
     for (const anchor of [{ versionId: 'wrong' }, { versionId: created.versions[0]!.id, filePath: 'missing.ts', line: 1 }, { versionId: created.versions[0]!.id, filePath: 'main.ts', line: 900 }, { versionId: created.versions[0]!.id, line: 1 }]) assert.equal((await app.request(`/api/revisions/${created.revision.id}/comments`, 'POST', { body: 'A comment', ...anchor })).status, 400);
-    const document = (await app.request<WikiDocument>('/api/documents', 'POST', { title: 'Notes', slug: 'research/notes', content: '# Notes' })).body;
-    const update = { title: 'Notes', slug: 'research/notes', content: '# Revised', expectedVersion: 1 };
+    const document = (await app.request<WikiDocument>('/api/documents', 'POST', { title: 'Notes', slug: '/', content: '# Notes' })).body;
+    const update = { title: 'Notes', slug: '/', content: '# Revised', expectedVersion: 1 };
     assert.equal((await app.request(`/api/documents/${document.id}`, 'PUT', update)).status, 200);
     assert.equal((await app.request(`/api/documents/${document.id}`, 'PUT', update)).status, 409);
-    assert.equal((await app.request('/api/documents', 'POST', { title: 'Collision', slug: 'research/notes', content: '' })).status, 409);
+    assert.equal((await app.request('/api/documents', 'POST', { title: 'Collision', slug: '/', content: '' })).status, 409);
     state = (await app.request<AppState>('/api/state')).body; assert.equal(state.documents.length, 1); assert.equal(state.documents[0]!.version, 2);
   } finally { await app.close(); }
 });

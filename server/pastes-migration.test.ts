@@ -22,7 +22,7 @@ function schema17(path: string) {
   store.citationEvidence.retract(paper.revision.id, evidence.id, { expectedRecordVersion: 1, reason: 'Superseded source' }, actor);
   const definitions = db.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name='entities' AND type IN ('index','trigger') AND name!='paste_identity_no_update' AND sql IS NOT NULL ORDER BY type,name").all() as { sql: string }[];
   db.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
-    DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete;
+    DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete;
     DROP TRIGGER paste_identity_no_update; DROP TABLE paste_transactions; DROP TABLE paste_versions;
     CREATE TABLE entities_v17(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('project','repository','revision','task','document','file')),data TEXT NOT NULL CHECK(json_valid(data)));
     INSERT INTO entities_v17(rowid,id,kind,data) SELECT rowid,id,kind,data FROM entities;
@@ -50,7 +50,7 @@ test('schema17 migration preserves all evidence and dependent schema, rowids, cu
       CREATE TRIGGER entities_note_update AFTER UPDATE OF operator_note ON entities BEGIN SELECT id FROM dependent_names WHERE id=NEW.id; END;`);
     const max = (db.prepare('SELECT MAX(rowid) AS n FROM entities').get() as { n: number }).n; db.prepare('UPDATE entities SET rowid=? WHERE rowid=?').run(max + 99, max);
     const before = snapshot(db); store.close(); store = new Store({ path }); const after = snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 19); assert.equal(store.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 20); assert.equal(store.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, `${table} exact historical bytes and rowids`); assert.deepEqual(after.references[table], before.references[table], `${table} foreign keys`); }
     for (const definition of before.schemas.filter(item => item.name !== 'entities')) assert.deepEqual(after.schemas.find(item => item.name === definition.name), definition, definition.name);
     assert.match(after.schemas.find(item => item.name === 'entities')!.sql, /'paste'/); assert.match(after.schemas.find(item => item.name === 'entities')!.sql, /operator_note/);

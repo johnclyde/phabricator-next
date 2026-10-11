@@ -6,6 +6,8 @@ import type { GitSourceProvenance } from './repositories';
 import type { FileRecord, RevisionAsset } from './files';
 import type { PasteRecord } from './pastes';
 import type { DocxSource } from './docx';
+import type { WikiHierarchy, WikiLocation, WikiMoveProvenance } from './wiki';
+export type { WikiStatus, WikiLocation, WikiReference, WikiAncestor, WikiChildren, WikiHierarchy, WikiPathResult, WikiMoveInput, WikiMovePreview, WikiMoveReceipt, WikiMoveProvenance } from './wiki';
 export type { FileRecord, RevisionAsset } from './files';
 export { WORKBOARD_BULK_MOVE_LIMIT } from './workboards';
 export type { WorkboardBulkMoveQuery, WorkboardBulkMoveTask, WorkboardBulkMovePreview, BulkMoveWorkboardCardsInput, WorkboardBulkMoveReceipt } from './workboards';
@@ -33,11 +35,11 @@ export type TaskUpdateResult = Task | TaskAccessLostAcknowledgement;
 export interface TaskHistory { transactions: TaskTransaction[]; nextBefore: number | null; firstAvailableSequence: number | null; accessEpoch?: number }
 export type TaskReference = Pick<Task, 'id' | 'title' | 'status' | 'priority' | 'version'>;
 export interface TaskDetail { task: Task; history: TaskHistory; dependsOn: TaskReference[]; blocks: TaskReference[]; duplicateOf: TaskReference[]; duplicates: TaskReference[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
-export interface WikiDocument { id: string; title: string; slug: string; content: string; version: number; createdAt: string; updatedAt: string }
-export interface WikiVersion { attribution?: ActorAttribution; id: string; documentId: string; number: number; title: string; slug: string; content: string; author: string | null; createdAt: string; message: string; kind: 'create' | 'edit' | 'restore' | 'legacy'; restoredFrom: number | null }
+export interface WikiDocument { location?: WikiLocation; id: string; title: string; slug: string; content: string; version: number; createdAt: string; updatedAt: string }
+export interface WikiVersion { accessEpoch?: number; location?: WikiLocation; move?: WikiMoveProvenance; attribution?: ActorAttribution; id: string; documentId: string; number: number; title: string; slug: string; content: string; author: string | null; createdAt: string; message: string; kind: 'create' | 'edit' | 'restore' | 'legacy' | 'move_to' | 'move_away'; restoredFrom: number | null }
 export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
-export interface WikiHistory { versions: WikiVersionSummary[]; nextBefore: number | null; firstAvailableVersion: number }
-export interface WikiDetail { document: WikiDocument; history: WikiHistory; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
+export interface WikiHistory { accessEpoch?: number; versions: WikiVersionSummary[]; nextBefore: number | null; firstAvailableVersion: number }
+export interface WikiDetail { document: WikiDocument; history: WikiHistory; activity: Activity[]; hierarchy?: WikiHierarchy; access?: ObjectAccess; accessEpoch?: number }
 export interface Revision { id: string; title: string; summary: string; kind: RevisionKind; status: RevisionStatus; repositoryId: string | null; projectId: string | null; currentVersion: number; createdAt: string; updatedAt: string }
 export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: GitSourceProvenance; docx?: DocxSource; docxOperation?: { kind: 'import' | 'reimport' | 'replace'; inputSha256: string }; id: string; revisionId: string; number: number; files: SourceFile[]; assets?: RevisionAsset[]; message: string; contentHash: string; createdAt: string }
 /** Source offsets are UTF-16 code units, start inclusive and end exclusive. */
@@ -69,5 +71,5 @@ export interface TaskCommentInput { body: string }
 export interface TaskDependencyInput { taskId: string; action: 'add' | 'remove'; expectedVersion: number }
 export interface TaskMergeInput { taskId: string; expectedVersion: number; expectedTargetVersion: number }
 export interface TaskMergeInInput { sources: { taskId: string; expectedVersion: number }[]; expectedVersion: number }
-export interface DocumentInput { title: string; slug: string; content: string; expectedVersion?: number; message?: string }
+export interface DocumentInput { title: string; slug: string; content: string; expectedVersion?: number; expectedAccessEpoch?: number; message?: string }
 export interface RestoreDocumentInput { version: number; expectedVersion: number; message?: string }

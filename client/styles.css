@@ -773,3 +773,16 @@
 .docx-inspection { margin: 18px 0; border: 1px solid var(--border); padding: 14px; }
 .docx-inspection .docx-reading { max-height: 320px; overflow: auto; padding: 14px; }
 @media (max-width: 600px) { .docx-reading { padding: 16px; font-size: 15px; } .docx-editor .file-actions, .docx-import .file-actions { align-items: stretch; } .docx-editor .file-actions .button, .docx-import .file-actions .button { flex: 1 1 150px; } }
+
+.wiki-breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; padding: 12px 0; overflow-wrap: anywhere; }
+.wiki-breadcrumbs > span { display: inline-flex; gap: 8px; }
+.wiki-children { margin: 0 0 18px; }
+.wiki-child-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.wiki-child-row strong, .wiki-child-row small { display: block; overflow-wrap: anywhere; }
+.wiki-child-row small { color: var(--muted); margin-top: 4px; }
+.wiki-path-search { display: flex; flex: 1; gap: 8px; }
+.wiki-path-search input { min-width: 0; flex: 1; }
+.wiki-path-preview, .wiki-move-preview, .wiki-move-recovery { margin: 14px 0; border: 1px solid var(--border); padding: 14px; overflow-wrap: anywhere; }
+.wiki-path-preview nav { display: flex; flex-wrap: wrap; gap: 12px; }
+.wiki-moved { border-left: 3px solid #d5a028; }
+@media(max-width:600px) { .wiki-child-row { padding: 14px; } .wiki-breadcrumbs { gap: 6px; } .wiki-path-search { flex-basis: 100%; } }

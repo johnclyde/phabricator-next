@@ -149,7 +149,7 @@ test('new history names its principal and idempotency keys never cross account b
     assert.equal(revision.versions[0]!.attribution?.principalId, app.alice.id);
     const comment = (await bob.request<ReviewComment>(`/api/revisions/${revision.revision.id}/comments`, 'POST', { versionId: revision.versions[0]!.id, body: 'An attributed response.' })).body;
     assert.equal(comment.author, 'Bob Researcher'); assert.equal(comment.attribution?.principalId, app.bob.id);
-    const document = (await alice.request<WikiDocument>('/api/documents', 'POST', { title: 'Attributed wiki', slug: 'attributed', content: 'Preserve the writer.' })).body;
+    const document = (await alice.request<WikiDocument>('/api/documents', 'POST', { title: 'Attributed wiki', slug: '/', content: 'Preserve the writer.' })).body;
     const version = (await bob.request<WikiVersion>(`/api/documents/${document.id}/versions/1`)).body;
     assert.equal(version.attribution?.principalId, app.alice.id);
   } finally { await app.close(); }

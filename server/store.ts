@@ -9,7 +9,7 @@ import { CitationEvidenceStore, initializeCitationEvidence } from './citation-ev
 import { sourceSnapshotCanonical, validateSourceSnapshot, validateDocxSource } from '../shared/source-snapshot.ts';
 import { DOCX_LIMITS, type DocxSource, type DocxProjection, type DocxFileIdentity, type DocxImportInput, type DocxReimportInput, type DocxReplaceInput, type DocxVersionPins } from '../shared/docx.ts';
 import type { FileRecord, RevisionAsset } from '../shared/files.ts';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskSubscriptionPage, TaskSubscriptionState, TaskSubscriptionStatus, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
@@ -24,6 +24,7 @@ import { applySuggestedReplacement, validateSuggestion } from '../shared/suggest
 import { GIT_LIMITS, isGitObjectId, type GitImportInput, type GitImportSnapshot, type GitSourceProvenance, type GitVersionImportInput } from '../shared/repositories.ts';
 import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from './workboards.ts';
 import type { TaskColumnMove, WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardBulkMoveReceipt, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
+import { canonicalWikiPath, wikiAncestors, wikiReference, WIKI_WRITE_PATH_MAX_LENGTH, WIKI_CHILD_SCAN_LIMIT, type WikiLocation, type WikiChildren, type WikiAncestor, type WikiMoveInput, type WikiMoveReceipt, type WikiMoveProvenance } from '../shared/wiki.ts';
 import type { DiscussionPreferences, SetThreadPreferenceInput, ThreadPreference } from '../shared/discussion.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord | PasteRecord;
@@ -99,6 +100,19 @@ export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] =
   return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets, docx)).digest('hex');
 }
 
+function wikiPath(input: unknown): string {
+  try { return canonicalWikiPath(string(input, 'Wiki path', 512, true)); }
+  catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid wiki path.'); }
+}
+export function parseWikiMoveInput(input: unknown): WikiMoveInput {
+  const data = object(input, ['destinationPath', 'expectedVersion', 'expectedSourceVersionId', 'expectedDestinationId', 'expectedDestinationVersion', 'expectedAccessEpoch', 'message']);
+  const destinationPath = wikiPath(data.destinationPath);
+  if (data.expectedDestinationId !== null && (typeof data.expectedDestinationId !== 'string' || !/^W[1-9]\d{0,14}$/.test(data.expectedDestinationId))) throw new HttpError(400, 'Choose the exact destination identity, or null for a new path.');
+  if (!Number.isSafeInteger(data.expectedDestinationVersion) || (data.expectedDestinationVersion as number) < 0 || (data.expectedDestinationId === null) !== (data.expectedDestinationVersion === 0)) throw new HttpError(400, 'Choose the exact destination version, or zero for a new path.');
+  return { destinationPath, expectedVersion: integer(data.expectedVersion, 'expectedVersion'), expectedSourceVersionId: string(data.expectedSourceVersionId, 'Expected source version ID', 100), expectedDestinationId: data.expectedDestinationId as string | null, expectedDestinationVersion: data.expectedDestinationVersion as number, expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), message: optionalString(data.message, 'Message', 10_000) };
+}
+export function wikiMoveInputHash(input: WikiMoveInput): string { return createHash('sha256').update(JSON.stringify(parseWikiMoveInput(input))).digest('hex'); }
+
 export class Store {
   readonly database: DatabaseSync;
   readonly fresh: boolean;
@@ -106,6 +120,7 @@ export class Store {
   readonly pastes: PasteStore;
   readonly citationEvidence: CitationEvidenceStore;
   private taskProjectsReady = false;
+  private wikiLocationsReady = false;
   private projects: ProjectStore;
   private workboards?: WorkboardStore;
   constructor(options: StoreOptions = {}) {
@@ -114,7 +129,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 19) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 20) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -323,6 +338,19 @@ export class Store {
         `);
       }); } catch (error) { this.database.close(); throw error; }
     }
+    if (version < 20) {
+      try { this.transaction(() => {
+        this.database.exec(`CREATE TABLE wiki_locations (document_id TEXT PRIMARY KEY REFERENCES entities(id), path TEXT NOT NULL UNIQUE, status TEXT NOT NULL CHECK(status IN ('active','moved','deleted','stub')), moved_to_id TEXT REFERENCES entities(id), CHECK((status='moved')=(moved_to_id IS NOT NULL)));`);
+        const insert = this.database.prepare("INSERT INTO wiki_locations(document_id,path,status,moved_to_id) VALUES (?,?,'active',NULL)");
+        for (const row of this.database.prepare("SELECT id,json_extract(data,'$.slug') AS slug FROM entities WHERE kind='document' ORDER BY rowid").all() as {id:string;slug:string}[]) insert.run(row.id, canonicalWikiPath(row.slug));
+        this.database.exec(`CREATE TABLE wiki_cursor_secret (singleton INTEGER PRIMARY KEY CHECK(singleton=1), key BLOB NOT NULL CHECK(length(key)=32));
+          CREATE TRIGGER wiki_cursor_secret_no_update BEFORE UPDATE ON wiki_cursor_secret BEGIN SELECT RAISE(ABORT,'Wiki cursor keys are immutable'); END;
+          CREATE TRIGGER wiki_cursor_secret_no_delete BEFORE DELETE ON wiki_cursor_secret BEGIN SELECT RAISE(ABORT,'Wiki cursor keys are immutable'); END;`);
+        this.database.prepare('INSERT INTO wiki_cursor_secret(singleton,key) VALUES (1,?)').run(randomBytes(32));
+        this.database.exec('PRAGMA user_version = 20');
+      }); } catch (error) { this.database.close(); throw error; }
+    }
+    this.wikiLocationsReady = true;
     this.pastes = new PasteStore(this.database, { nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor) });
     this.files = new FileStore(this.database);
     this.citationEvidence = new CitationEvidenceStore(this.database, this.files);
@@ -370,11 +398,13 @@ export class Store {
     const row = this.database.prepare('SELECT data FROM entities WHERE kind = ? AND id = ?').get(kind, id) as JsonRow | undefined;
     if (!row) throw new HttpError(404, `${kind} ${id} was not found.`);
     const value = JSON.parse(row.data) as T;
+    if (kind === 'document' && this.wikiLocationsReady) return { ...value, location: this.documentLocation(value.id) } as T;
     return kind === 'task' && this.taskProjectsReady ? this.hydrateTask(value as Task) as T : value;
   }
   private all<T extends Entity>(kind: Kind): T[] {
     if (kind === 'project' && this.projects) return this.projects.all() as T[];
     const values = (this.database.prepare('SELECT data FROM entities WHERE kind = ? ORDER BY rowid DESC').all(kind) as JsonRow[]).map(row => JSON.parse(row.data) as T);
+    if (kind === 'document' && this.wikiLocationsReady) return values.map(value => ({ ...value, location: this.documentLocation(value.id) }) as T);
     if (kind !== 'task' || !this.taskProjectsReady) return values;
     const projects = new Map<string, string[]>();
     for (const row of this.database.prepare('SELECT task_id, project_id FROM task_projects ORDER BY task_id, project_id').all() as { task_id: string; project_id: string }[]) {
@@ -392,6 +422,7 @@ export class Store {
       const { projectId: _legacyProjectId, projectIds: _projectIds, ...rest } = value as Task & { projectId?: unknown };
       metadata = rest;
     }
+    if (kind === 'document') { const { location: _location, ...rest } = value as WikiDocument; metadata = rest; }
     const json = JSON.stringify(metadata);
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
     if (created.changes) registerDefaultPolicy(this.database, value.id);
@@ -795,50 +826,143 @@ export class Store {
       return this.taskDetail(id);
     });
   }
-  private documentMutation(work: () => WikiDocument): WikiDocument {
-    // A savepoint preserves atomic history even for callers outside mutate(),
-    // and composes with the transaction used for replay and demo seeding.
+  private documentMutation<T>(work: () => T): T {
     this.database.exec('SAVEPOINT wiki_document_write');
-    try { const document = work(); this.database.exec('RELEASE wiki_document_write'); return document; }
-    catch (error) { this.database.exec('ROLLBACK TO wiki_document_write; RELEASE wiki_document_write'); throw error; }
+    try {
+      // Acquire the writer lock before observing heads, including direct Store calls.
+      this.database.prepare("UPDATE policy_meta SET value=value WHERE name='epoch'").run();
+      const result = work(); this.database.exec('RELEASE wiki_document_write'); return result;
+    } catch (error) { this.database.exec('ROLLBACK TO wiki_document_write; RELEASE wiki_document_write'); throw error; }
   }
+  documentLocation(id: string): WikiLocation {
+    const row = this.database.prepare('SELECT path,status,moved_to_id FROM wiki_locations WHERE document_id=?').get(id) as {path:string;status:WikiLocation['status'];moved_to_id:string|null} | undefined;
+    if (!row) throw new HttpError(404, 'Wiki location is unavailable.', 'WIKI_PATH_UNAVAILABLE');
+    return {path:row.path,status:row.status,movedToId:row.moved_to_id};
+  }
+  documentAtPath(path: string): WikiDocument | null {
+    const row = this.database.prepare('SELECT document_id FROM wiki_locations WHERE path=?').get(wikiPath(path)) as {document_id:string}|undefined;
+    return row ? this.get<WikiDocument>('document',row.document_id) : null;
+  }
+  documentAncestry(path: string): WikiAncestor[] { return wikiAncestors(wikiPath(path)).map(path => { const document=this.documentAtPath(path); return {path,document:document?wikiReference(document):null}; }); }
+  private wikiCursor(path:string, cursor:number):string {
+    const key=(this.database.prepare('SELECT key FROM wiki_cursor_secret WHERE singleton=1').get() as {key:Uint8Array}).key;
+    const nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',key,nonce);cipher.setAAD(Buffer.from(path));
+    const position=Buffer.alloc(8);position.writeBigUInt64BE(BigInt(cursor));
+    const body=Buffer.concat([cipher.update(position),cipher.final()]);
+    return Buffer.concat([nonce,cipher.getAuthTag(),body]).toString('base64url');
+  }
+  private readWikiCursor(path:string,token?:string):number {
+    if(token===undefined)return 0;
+    try {
+      if(!/^[A-Za-z0-9_-]{48}$/.test(token))throw new Error();
+      const bytes=Buffer.from(token,'base64url');if(bytes.toString('base64url')!==token)throw new Error();
+      const key=(this.database.prepare('SELECT key FROM wiki_cursor_secret WHERE singleton=1').get() as {key:Uint8Array}).key;
+      const decipher=createDecipheriv('aes-256-gcm',key,bytes.subarray(0,12));decipher.setAAD(Buffer.from(path));decipher.setAuthTag(bytes.subarray(12,28));
+      const position=Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]);if(position.length!==8)throw new Error();
+      const cursor=Number(position.readBigUInt64BE());if(cursor<1||!Number.isSafeInteger(cursor))throw new Error();return cursor;
+    }catch{throw new HttpError(400,'Invalid child cursor.');}
+  }
+  documentChildren(input: string, canView: (id:string)=>boolean, after?: string, limit=50): WikiChildren {
+    const path=wikiPath(input); integer(limit,'limit'); if(limit>100) throw new HttpError(400,'limit must be at most 100.');
+    const prefix=path==='/'?'':path, documents: WikiChildren['documents']=[], missingPaths=new Set<string>();
+    let cursor=this.readWikiCursor(path,after),scanned=0,ended=false;
+    while(scanned<WIKI_CHILD_SCAN_LIMIT && documents.length+missingPaths.size<limit) {
+      const rows=this.database.prepare("SELECT rowid AS cursor,document_id,path,status FROM wiki_locations WHERE rowid>? AND path<>? AND substr(path,1,?)=? ORDER BY rowid LIMIT ?").all(cursor,path,prefix.length,prefix,Math.min(100,WIKI_CHILD_SCAN_LIMIT-scanned)) as {cursor:number;document_id:string;path:string;status:WikiLocation['status']}[];
+      if(!rows.length){ended=true;break;}
+      for(const row of rows) {
+        cursor=row.cursor;scanned++;
+        if(canView(row.document_id)) {
+          const remainder=row.path.slice(prefix.length), component=remainder.split('/')[0]!;
+          const immediate=`${prefix}${component}/`;
+          if(immediate===row.path) documents.push(wikiReference(this.get<WikiDocument>('document',row.document_id)));
+          else if(!this.database.prepare('SELECT 1 FROM wiki_locations WHERE path=?').get(immediate)) missingPaths.add(immediate);
+        }
+        if(scanned>=WIKI_CHILD_SCAN_LIMIT || documents.length+missingPaths.size>=limit) break;
+      }
+    }
+    if(!ended) ended=!this.database.prepare('SELECT 1 FROM wiki_locations WHERE rowid>? AND path<>? AND substr(path,1,?)=? LIMIT 1').get(cursor,path,prefix.length,prefix);
+    return {documents,missingPaths:[...missingPaths],nextAfter:ended?null:this.wikiCursor(path,cursor)};
+  }
+  private requireWikiAncestors(path: string): void {
+    if(wikiAncestors(path).some(ancestor=>!this.database.prepare('SELECT 1 FROM wiki_locations WHERE path=?').get(ancestor))) throw new HttpError(409,'Create every parent document before using this path.','WIKI_ANCESTOR_REQUIRED');
+  }
+  private writeWikiLocation(id:string,location:WikiLocation):void {
+    this.database.prepare('INSERT INTO wiki_locations(document_id,path,status,moved_to_id) VALUES (?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET path=excluded.path,status=excluded.status,moved_to_id=excluded.moved_to_id').run(id,location.path,location.status,location.movedToId);
+  }
+  private wikiChanged():void { this.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run(); }
   createDocument(input: unknown, attribution?: ActorAttribution): WikiDocument { return this.documentMutation(() => this.writeDocument(input, undefined, null, attribution)); }
   updateDocument(id: string, input: unknown, attribution?: ActorAttribution): WikiDocument { return this.documentMutation(() => this.writeDocument(input, this.get<WikiDocument>('document', id), null, attribution)); }
   restoreDocument(id: string, input: unknown, attribution?: ActorAttribution): WikiDocument {
     return this.documentMutation(() => {
-      const data = object(input, ['version', 'expectedVersion', 'message']);
+      const data = object(input, ['version', 'expectedVersion', 'message', 'expectedAccessEpoch']);
       const current = this.get<WikiDocument>('document', id);
       if (integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This document changed. Reload before restoring.');
       const selected = this.documentVersion(id, integer(data.version, 'version'));
-      return this.writeDocument({
-        title: selected.title, content: selected.content, slug: current.slug, expectedVersion: current.version,
+      return this.writeDocument({ title: selected.title, content: selected.content, slug: current.slug, expectedVersion: current.version,
+        ...(data.expectedAccessEpoch===undefined?{}:{expectedAccessEpoch:data.expectedAccessEpoch}),
         message: data.message === undefined ? `Restored content from version ${selected.number}. Current slug retained.` : data.message,
       }, current, selected.number, attribution);
     });
   }
   private writeDocument(input: unknown, current?: WikiDocument, restoredFrom: number | null = null, attribution?: ActorAttribution): WikiDocument {
-    const data = object(input, ['title', 'slug', 'content', 'expectedVersion', 'message']);
+    const data = object(input, ['title', 'slug', 'content', 'expectedVersion', 'message', 'expectedAccessEpoch']);
+    if(data.expectedAccessEpoch!==undefined) this.docxEpoch(integer(data.expectedAccessEpoch,'expectedAccessEpoch'));
     if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This document changed. Reload before saving.');
     if (!current && data.expectedVersion !== undefined) throw new HttpError(400, 'expectedVersion is only used when updating a document.');
-    const slug = string(data.slug, 'Slug', 160);
-    if (!/^[a-z0-9]+(?:[-/][a-z0-9]+)*$/.test(slug)) throw new HttpError(400, 'Slug must contain lowercase letters, numbers, hyphens, or slash-separated paths.');
-    if (this.all<WikiDocument>('document').some(doc => doc.slug === slug && doc.id !== current?.id)) throw new HttpError(409, 'This slug is unavailable.');
+    const path=wikiPath(data.slug);
+    if(current && path!==current.location!.path) throw new HttpError(409,'Use Move to transfer content to another path.','WIKI_MOVE_REQUIRED');
+    if(!current) {
+      if(path.length>WIKI_WRITE_PATH_MAX_LENGTH) throw new HttpError(400,'New wiki paths must be at most 128 characters.');
+      if(this.documentAtPath(path)) throw new HttpError(409,'This wiki path is unavailable.','WIKI_PATH_CONFLICT');
+      this.requireWikiAncestors(path);
+    }
     const message = optionalString(data.message, 'Message', 10_000, current ? 'Updated document' : 'Initial version');
-    const now = new Date().toISOString();
-    const document: WikiDocument = { id: current?.id ?? this.nextId('document', 'W'), title: string(data.title, 'Title'), slug, content: string(data.content, 'Content', 500_000, true), version: (current?.version ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now };
+    const now = new Date().toISOString(),location:WikiLocation={path,status:'active',movedToId:null};
+    const document: WikiDocument = { id: current?.id ?? this.nextId('document', 'W'), title: string(data.title, 'Title'), slug: current?.slug??path, content: string(data.content, 'Content', 500_000, true), version: (current?.version ?? 0) + 1, createdAt: current?.createdAt ?? now, updatedAt: now,location };
     if (!Number.isSafeInteger(document.version)) throw new HttpError(409, 'This document has reached the supported version limit.');
-    this.save('document', document);
+    this.save('document', document);this.writeWikiLocation(document.id,location);
     this.saveWikiVersion(document, { kind: restoredFrom === null ? current ? 'edit' : 'create' : 'restore', author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), message, restoredFrom });
     this.event(document.id, restoredFrom === null ? current ? 'updated' : 'created' : 'restored', restoredFrom === null
       ? `Saved document ${document.title}, version ${document.version}.`
       : `Restored content from version ${restoredFrom} as version ${document.version}. Current slug retained.`, attribution);
+    if(!current || current.location!.status!=='active') this.wikiChanged();
     return document;
   }
-  private saveWikiVersion(document: WikiDocument, metadata: Pick<WikiVersion, 'kind' | 'author' | 'message' | 'restoredFrom' | 'attribution'>): WikiVersion {
-    const version: WikiVersion = {
-      id: randomUUID(), documentId: document.id, number: document.version, title: document.title,
-      slug: document.slug, content: document.content, createdAt: document.updatedAt, ...metadata,
-    };
+  moveDocument(id:string,input:unknown,attribution?:ActorAttribution):WikiMoveReceipt {
+    return this.documentMutation(()=>{
+      const data=parseWikiMoveInput(input); this.docxEpoch(data.expectedAccessEpoch);
+      const current=this.get<WikiDocument>('document',id),head=this.documentVersion(id,current.version),existing=this.documentAtPath(data.destinationPath);
+      if(current.version!==data.expectedVersion || head.id!==data.expectedSourceVersionId) throw new HttpError(409,'This document changed. Preview the move again.','WIKI_VERSION_CHANGED');
+      if(current.location!.status!=='active') throw new HttpError(409,'Only an active document can be moved.','WIKI_SOURCE_INACTIVE');
+      if(current.location!.path===data.destinationPath) throw new HttpError(409,'Choose a different destination path.','WIKI_PATH_CONFLICT');
+      if((existing?.id??null)!==data.expectedDestinationId || (existing?.version??0)!==data.expectedDestinationVersion) throw new HttpError(409,'The destination changed. Preview the move again.','WIKI_DESTINATION_CHANGED');
+      if(existing?.location!.status==='active') throw new HttpError(409,'The destination contains an active document.','WIKI_PATH_CONFLICT');
+      if(!existing && data.destinationPath.length>WIKI_WRITE_PATH_MAX_LENGTH) throw new HttpError(400,'New wiki paths must be at most 128 characters.');
+      this.requireWikiAncestors(data.destinationPath);
+      const now=new Date().toISOString(),operationId=randomUUID(),destinationId=existing?.id??this.nextId('document','W');
+      const move:WikiMoveProvenance={operationId,sourceId:id,destinationId,inputSha256:wikiMoveInputHash(data)};
+      const source:WikiDocument={...current,content:'',version:current.version+1,updatedAt:now,location:{path:current.location!.path,status:'moved',movedToId:destinationId}};
+      const destination:WikiDocument={id:destinationId,title:current.title,slug:existing?.slug??data.destinationPath,content:current.content,version:(existing?.version??0)+1,createdAt:existing?.createdAt??now,updatedAt:now,location:{path:data.destinationPath,status:'active',movedToId:null}};
+      if(!Number.isSafeInteger(source.version)||!Number.isSafeInteger(destination.version)) throw new HttpError(409,'A document has reached the supported version limit.');
+      this.save('document',destination);this.save('document',source);
+      this.writeWikiLocation(destinationId,destination.location!);this.writeWikiLocation(id,source.location!);
+      const metadata={author:attribution?.displayName??'You',...(attribution?{attribution}:{}),message:data.message??'',restoredFrom:null,move};
+      const sourceVersion=this.saveWikiVersion(source,{...metadata,kind:'move_away'}),destinationVersion=this.saveWikiVersion(destination,{...metadata,kind:'move_to'});
+      this.event(id,'moved_away','Moved document content to another path.',attribution);
+      this.event(destinationId,'moved_to','Received moved document content.',attribution);this.wikiChanged();
+      return {source,destination,sourceVersionId:sourceVersion.id,destinationVersionId:destinationVersion.id,operationId};
+    });
+  }
+  wikiMoveReceipt(sourceId:string,sourceVersionId:string,destinationVersionId:string):WikiMoveReceipt {
+    const read=(id:string):WikiVersion=>{const row=this.database.prepare('SELECT data FROM wiki_versions WHERE id=?').get(id) as JsonRow|undefined;if(!row)throw new HttpError(404,'Move evidence is unavailable.','WIKI_MOVE_UNAVAILABLE');return JSON.parse(row.data) as WikiVersion;};
+    const source=read(sourceVersionId),destination=read(destinationVersionId);
+    if(source.documentId!==sourceId || source.kind!=='move_away' || destination.kind!=='move_to' || !source.move || JSON.stringify(source.move)!==JSON.stringify(destination.move) || source.move.sourceId!==sourceId || source.move.destinationId!==destination.documentId || !source.location || !destination.location) throw new HttpError(409,'Move evidence does not match.','WIKI_MOVE_MISMATCH');
+    const snapshot=(version:WikiVersion):WikiDocument=>({id:version.documentId,title:version.title,slug:version.slug,content:version.content,version:version.number,createdAt:this.get<WikiDocument>('document',version.documentId).createdAt,updatedAt:version.createdAt,location:version.location!});
+    return {source:snapshot(source),destination:snapshot(destination),sourceVersionId,destinationVersionId,operationId:source.move.operationId};
+  }
+  private saveWikiVersion(document: WikiDocument, metadata: Pick<WikiVersion, 'kind' | 'author' | 'message' | 'restoredFrom' | 'attribution' | 'move'>): WikiVersion {
+    const version: WikiVersion = { id: randomUUID(), documentId: document.id, number: document.version, title: document.title,
+      slug: document.slug, content: document.content, createdAt: document.updatedAt, ...(document.location?{location:document.location}:{}), ...metadata };
     this.database.prepare('INSERT INTO wiki_versions (id, document_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, document.id, version.number, JSON.stringify(version));
     return version;
   }

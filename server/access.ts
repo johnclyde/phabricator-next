@@ -4,13 +4,14 @@ import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
 import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
-import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
+import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion } from '../shared/types.ts';
+import { canonicalWikiPath, wikiAncestors, wikiReference, WIKI_WRITE_PATH_MAX_LENGTH, type WikiHierarchy, type WikiPathResult, type WikiMovePreview, type WikiMoveReceipt } from '../shared/wiki.ts';
 import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
 import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
+import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseWikiMoveInput, wikiMoveInputHash, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 import { validatePasteContent, type PasteDetail, type PasteListQuery, type PastePage } from '../shared/pastes.ts';
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
@@ -73,7 +74,84 @@ export class AccessLayer {
   }
   document(id: string): WikiDetail {
     this.require(id);
-    return { ...this.store.documentDetail(id), access: this.describe(id), accessEpoch: this.policies.epoch() };
+    const detail = this.store.documentDetail(id);
+    return this.redact({ ...detail, hierarchy: this.wikiHierarchy(detail.document.location?.path ?? detail.document.slug), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  documentHistory(id: string, options: { before?: number; limit?: number } = {}): WikiHistory {
+    this.require(id); return this.redact({ ...this.store.documentHistory(id, options), accessEpoch: this.policies.epoch() });
+  }
+  documentVersion(id: string, version: number): WikiVersion {
+    this.require(id); return this.redact({ ...this.store.documentVersion(id, version), accessEpoch: this.policies.epoch() });
+  }
+  private wikiPath(value: unknown): string {
+    if (typeof value !== 'string') throw new HttpError(400, 'Provide a wiki path.');
+    try { return canonicalWikiPath(value); } catch { throw new HttpError(400, 'Provide a valid bounded wiki path.'); }
+  }
+  private wikiReferenceAccess(id: string, edit = false): void {
+    if (!this.canView(id)) throw new HttpError(404, 'Wiki path is unavailable.', 'WIKI_PATH_UNAVAILABLE');
+    if (edit && !this.policies.access(id, this.principal).edit) throw new HttpError(403, 'Editing this wiki destination requires edit access.', 'WIKI_DESTINATION_FORBIDDEN');
+  }
+  private wikiHierarchy(value: string, after?: string, limit?: number): WikiHierarchy {
+    const path = this.wikiPath(value);
+    const document = this.store.documentAtPath(path);
+    if (document) this.wikiReferenceAccess(document.id);
+    const ancestors = wikiAncestors(path).map(ancestor => {
+      const item = this.store.documentAtPath(ancestor);
+      if (item) this.wikiReferenceAccess(item.id);
+      return { path: ancestor, document: item ? wikiReference(item) : null };
+    });
+    const movedId = document?.location?.movedToId;
+    const movedTo = movedId && this.canView(movedId) ? wikiReference(this.store.documentDetail(movedId).document) : null;
+    return { ancestors, children: this.store.documentChildren(path, id => this.canView(id), after, limit), movedTo };
+  }
+  private wikiCreationDestination(value: unknown): { path: string; parent: WikiDocument | null } {
+    const path = this.wikiPath(value);
+    let parent: WikiDocument | null = null;
+    for (const ancestorPath of wikiAncestors(path)) {
+      const ancestor = this.store.documentAtPath(ancestorPath);
+      if (!ancestor) throw new HttpError(409, `Create the parent document at ${ancestorPath} before using this path.`, 'WIKI_ANCESTOR_MISSING');
+      this.wikiReferenceAccess(ancestor.id);
+      parent = ancestor;
+    }
+    if (parent) this.wikiReferenceAccess(parent.id, true);
+    return { path, parent };
+  }
+  wikiPathResult(value: string, after?: string, limit?: number): WikiPathResult {
+    const path = this.wikiPath(value); const hierarchy = this.wikiHierarchy(path, after, limit);
+    const document = this.store.documentAtPath(path);
+    let canCreate = !document && path.length <= WIKI_WRITE_PATH_MAX_LENGTH && this.context.scopes.includes('write');
+    let creationBlockedReason: string | null = document ? 'A document already occupies this path.' : path.length > WIKI_WRITE_PATH_MAX_LENGTH ? 'New wiki paths must be at most 128 characters.' : canCreate ? null : 'This credential cannot create documents.';
+    let defaultAccess: WikiPathResult['defaultAccess'] = null;
+    try {
+      const { parent } = this.wikiCreationDestination(path);
+      const policy = parent ? this.policies.policy(parent.id, this.principal) : null;
+      if (policy?.kind === 'project') throw new Error('Wiki parent must have document policy rules.');
+      const spaceId = policy?.spaceId ?? 'S1';
+      const space = this.policies.getSpace(spaceId, this.principal);
+      if (space.archived) { canCreate = false; creationBlockedReason = 'The inherited Space is archived.'; }
+      defaultAccess = { spaceId, ...(policy?.rules ?? { view: { kind: 'workspace' as const }, edit: { kind: 'workspace' as const }, interact: { kind: 'workspace' as const } }) };
+    } catch (error) {
+      if (!(error instanceof HttpError)) throw error;
+      canCreate = false; creationBlockedReason = error.status === 404 ? 'The parent path is unavailable.' : error.message;
+    }
+    return { path, document: document ? wikiReference(document) : null, hierarchy, canCreate, creationBlockedReason, defaultAccess, accessEpoch: this.policies.epoch() };
+  }
+  wikiMovePreview(id: string, value: string): WikiMovePreview {
+    this.require(id, 'edit');
+    const source = this.store.documentDetail(id).document;
+    if (source.location?.status !== 'active') throw new HttpError(409, 'Only an active document can be moved.', 'WIKI_SOURCE_INACTIVE');
+    const { path, parent } = this.wikiCreationDestination(value);
+    const destination = this.store.documentAtPath(path);
+    if (destination) this.wikiReferenceAccess(destination.id, true);
+    if (!destination && path.length > WIKI_WRITE_PATH_MAX_LENGTH) throw new HttpError(400, 'New wiki paths must be at most 128 characters.');
+    if (path === source.location.path || destination?.location?.status === 'active') throw new HttpError(409, 'The destination already contains an active document.', 'WIKI_DESTINATION_OCCUPIED');
+    const destinationSpaceId = destination ? this.policies.policy(destination.id, this.principal).spaceId : parent ? this.policies.policy(parent.id, this.principal).spaceId : 'S1';
+    const space = this.policies.getSpace(destinationSpaceId, this.principal);
+    if (!destination && space.archived) throw new HttpError(409, 'The destination Space is archived.');
+    const sourceVersionId = this.store.documentVersion(id, source.version).id;
+    const expectedAccessEpoch = this.policies.epoch();
+    return { source: wikiReference(source), sourceVersionId, destination: destination ? wikiReference(destination) : null, destinationPath: path, destinationSpaceId, expectedAccessEpoch,
+      defaultInput: { destinationPath: path, expectedVersion: source.version, expectedSourceVersionId: sourceVersionId, expectedDestinationId: destination?.id ?? null, expectedDestinationVersion: destination?.version ?? 0, expectedAccessEpoch, message: '' } };
   }
   project(id: string): ProjectDetail {
     this.require(id); const detail = this.store.projectDetail(id, this.principal);
@@ -225,7 +303,9 @@ export class AccessLayer {
         return change;
       }
       return Object.fromEntries(Object.entries(object).map(([key, child]) => [key,
-        key === 'projectIds' && Array.isArray(child) ? child.filter(id => typeof id === 'string' && this.canView(id))
+        key === 'movedToId' && typeof child === 'string' && !this.canView(child) ? null
+          : key === 'move' && record(child) && typeof record(child)!.sourceId === 'string' && typeof record(child)!.destinationId === 'string' && (!this.canView(record(child)!.sourceId as string) || !this.canView(record(child)!.destinationId as string)) ? undefined
+          : key === 'projectIds' && Array.isArray(child) ? child.filter(id => typeof id === 'string' && this.canView(id))
           : (key === 'projectId' || key === 'repositoryId') && typeof child === 'string' && !this.canView(child) ? null : visit(child),
       ]));
     };
@@ -276,6 +356,16 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && path === '/api/documents') this.wikiCreationDestination(record(input)?.slug ?? record(input)?.title);
+    if (method === 'POST' && /^\/api\/documents\/W\d+\/move$/.test(path)) {
+      const data = parseWikiMoveInput(input);
+      this.wikiCreationDestination(data.destinationPath);
+      const destination = this.store.documentAtPath(data.destinationPath);
+      if (destination) this.wikiReferenceAccess(destination.id, true);
+      if (data.expectedDestinationId) this.wikiReferenceAccess(data.expectedDestinationId, true);
+      // Identity/head/epoch equality is checked only for fresh writes. Saved
+      // retries must remain recoverable after later content changes.
+    }
     const docxImport = method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/import$/.test(path));
     if (docxImport) {
       const data = path === '/api/revisions/docx' ? parseDocxImportInput(input) : parseDocxReimportInput(input);
@@ -436,7 +526,8 @@ export class AccessLayer {
     if (method === 'POST' && CREATES.has(path)) {
       const data = record(input); const access = record(data?.access);
       const parentId = path === '/api/projects' && typeof data?.parentId === 'string' ? data.parentId : null;
-      const id = access?.spaceId ?? (parentId ? this.policies.policy(parentId, this.principal).spaceId : 'S1');
+      const wikiParent = path === '/api/documents' ? this.wikiCreationDestination(data?.slug ?? data?.title).parent : null;
+      const id = access?.spaceId ?? (wikiParent ? this.policies.policy(wikiParent.id, this.principal).spaceId : parentId ? this.policies.policy(parentId, this.principal).spaceId : 'S1');
       if (typeof id !== 'string') throw new HttpError(400, 'Choose an available Space.');
       this.require(id);
       if (this.policies.getSpace(id, this.principal).archived) throw new HttpError(409, 'This Space is archived. Choose another destination.');
@@ -565,6 +656,25 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && /^\/api\/documents\/W\d+\/move$/.test(path)) {
+      const invalid = (): never => { throw new HttpError(409, 'This saved wiki move receipt does not match the requested operation.', 'WIKI_RECEIPT_MISMATCH'); };
+      const input = parseWikiMoveInput(mutationInput);
+      if (!target || !body || typeof body.sourceVersionId !== 'string' || typeof body.destinationVersionId !== 'string') return invalid();
+      let expected: WikiMoveReceipt;
+      try { expected = this.store.wikiMoveReceipt(target.id, body.sourceVersionId, body.destinationVersionId); } catch { return invalid(); }
+      const { accessEpoch: _epoch, ...saved } = body;
+      if (!isDeepStrictEqual(saved, expected) || expected.source.version !== input.expectedVersion + 1
+        || expected.destination.version !== input.expectedDestinationVersion + 1
+        || (input.expectedDestinationId !== null && input.expectedDestinationId !== expected.destination.id)
+        || expected.destination.location?.path !== input.destinationPath) return invalid();
+      const previous = this.store.documentVersion(target.id, input.expectedVersion);
+      const result = this.store.documentVersion(target.id, expected.source.version);
+      const destination = this.store.documentVersion(expected.destination.id, expected.destination.version);
+      if (previous.id !== input.expectedSourceVersionId || result.attribution?.principalId !== this.principal || destination.attribution?.principalId !== this.principal
+        || result.move?.inputSha256 !== wikiMoveInputHash(input) || destination.move?.inputSha256 !== wikiMoveInputHash(input)) return invalid();
+      this.wikiReferenceAccess(expected.destination.id, true);
+      return { status: response.status, body: { ...expected, accessEpoch: this.policies.epoch() } };
+    }
     if (method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path))) {
       const invalid = (): never => { throw new HttpError(409, 'This saved Word receipt does not match the original operation.', 'DOCX_RECEIPT_MISMATCH'); };
       if (!target || !body || !record(body.revision) || !Array.isArray(body.versions)) return invalid();

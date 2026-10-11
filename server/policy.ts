@@ -3,10 +3,11 @@ import type { Audience, Capability, ProjectCapability, ProjectAudience, Effectiv
 import { audienceLabel, effectiveAccess, spaceAccess } from '../shared/policy.ts';
 import { HttpError, integer, object, optionalString, string } from './validation.ts';
 import { ancestorIds, effectiveMember, hierarchy } from './project-graph.ts';
+import { canonicalWikiPath, wikiAncestors, wikiParentPath } from '../shared/wiki.ts';
 
 type JsonRow = { data: string };
 type PolicyRow = { data: string; space_data: string; owner_id: string | null; entity_kind: string; entity_data: string };
-type ResolvedPolicy = { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null; repositoryId?: string; parentId?: string; inheritedFrom?: { projectId: string; policyVersion: number } };
+type ResolvedPolicy = { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null; repositoryId?: string; parentId?: string; wiki?: boolean; inheritedFrom?: { projectId: string; policyVersion: number } };
 type Traversal = { remaining: number };
 /** Per decision: policy nodes, active attachment edges and distinct source File checks. */
 export const POLICY_TRAVERSAL_MAX_WORK = 1024;
@@ -100,6 +101,27 @@ export class PolicyStore {
     const graph = hierarchy(this.database, id); if (!graph) throw notFound();
     ancestorIds(this.database, id); return graph;
   }
+  private hasWikiLocations(): boolean { return Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wiki_locations'").get()); }
+  private wikiPath(id: string): string {
+    const row = this.database.prepare('SELECT path FROM wiki_locations WHERE document_id = ?').get(id) as { path: string } | undefined;
+    if (!row) throw notFound();
+    return row.path;
+  }
+  /** Every existing ancestor imposes its own view and Space boundary. Missing
+   * legacy ancestors remain readable; new writes validate their existence. */
+  private wikiAncestorsVisible(id: string, principalId: string, traversal: Traversal): boolean {
+    const ownPath = this.wikiPath(id);
+    let paths: string[];
+    try { if (canonicalWikiPath(ownPath) !== ownPath) return false; paths = wikiAncestors(ownPath); } catch { return false; }
+    for (const path of paths) {
+      consume(traversal);
+      const ancestor = this.database.prepare('SELECT document_id FROM wiki_locations WHERE path = ?').get(path) as { document_id: string } | undefined;
+      if (!ancestor) continue;
+      const row = this.database.prepare("SELECT p.data,s.data AS space_data FROM object_policies p JOIN policy_spaces s ON s.id=p.space_id JOIN entities e ON e.id=p.object_id AND e.kind='document' WHERE p.object_id=?").get(ancestor.document_id) as { data: string; space_data: string } | undefined;
+      if (!row || !effectiveAccess(JSON.parse(row.data) as ObjectPolicy, JSON.parse(row.space_data) as Space, principalId).view) return false;
+    }
+    return true;
+  }
   /** Exhaustion invalidates the whole decision, including otherwise successful sibling branches. */
   private resolve(id: string, principalId: string): ResolvedPolicy | undefined {
     try { return this.resolved(id, principalId, new Set(), { remaining: POLICY_TRAVERSAL_MAX_WORK }); }
@@ -142,6 +164,8 @@ export class PolicyStore {
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
     const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
     try {
+      const wiki = row.entity_kind === 'document' && this.hasWikiLocations();
+      if (wiki && !this.wikiAncestorsVisible(id, principalId, traversal)) return undefined;
       let repositoryId: string | undefined;
       if (row.entity_kind === 'revision') {
         const entity: unknown = JSON.parse(row.entity_data);
@@ -174,7 +198,7 @@ export class PolicyStore {
           if (typeof fileId !== 'string' || !this.sourceFileVisible(fileId, id, principalId, seen, traversal)) return undefined;
         }
       }
-      return { policy, space, capabilities, ownerId, ...(repositoryId ? { repositoryId } : {}), ...(graph?.parentId ? { parentId: graph.parentId } : {}) };
+      return { policy, space, capabilities, ownerId, ...(wiki ? { wiki: true } : {}), ...(repositoryId ? { repositoryId } : {}), ...(graph?.parentId ? { parentId: graph.parentId } : {}) };
     } catch (error) {
       if (error instanceof HttpError) return undefined;
       throw error;
@@ -223,9 +247,9 @@ export class PolicyStore {
   describe(id: string, principalId: string): ObjectAccess {
     const result = this.resolve(id, principalId);
     if (!result?.capabilities.view) throw notFound();
-    const { policy, space, capabilities, ownerId, repositoryId, parentId, inheritedFrom } = result;
+    const { policy, space, capabilities, ownerId, repositoryId, parentId, inheritedFrom, wiki } = result;
     const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? (id.startsWith('F') ? '; file author also has access' : id.startsWith('PA') ? '; paste author also has access' : '; task owner also has access') : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${repositoryId ? '; requires linked repository view access' : ''}${id.startsWith('F') && capability === 'view' ? '; viewers of explicitly attached objects also have access, within the File Space' : ''}${inheritedFrom ? '; inherited from parent project' : ''}`;
-    return { policy, capabilities, viewLabel: label('view'), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: id.startsWith('F') ? 'file-author' as const : id.startsWith('PA') ? 'paste-author' as const : 'task-owner' as const, principalId: ownerId } } : {}) };
+    return { policy, capabilities, viewLabel: label('view') + (wiki ? '; requires view access to every existing ancestor document' : ''), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: id.startsWith('F') ? 'file-author' as const : id.startsWith('PA') ? 'paste-author' as const : 'task-owner' as const, principalId: ownerId } } : {}) };
   }
   private audience(input: unknown): Audience {
     const data = object(input, ['kind', 'principalIds']);
@@ -313,6 +337,10 @@ export class PolicyStore {
       const project = current.kind === 'project';
       const graph = this.projectGraph(id);
       const parent = graph?.parentId ? this.resolve(graph.parentId, principalId) : undefined;
+      const wikiParentPathValue = /^W[1-9]\d*$/.test(id) && this.hasWikiLocations() ? wikiParentPath(this.wikiPath(id)) : null;
+      const wikiParentRow = wikiParentPathValue ? this.database.prepare('SELECT document_id FROM wiki_locations WHERE path = ?').get(wikiParentPathValue) as { document_id: string } | undefined : undefined;
+      const wikiParent = wikiParentRow ? this.resolve(wikiParentRow.document_id, principalId) : undefined;
+      if (wikiParentPathValue && (!wikiParent || !wikiParent.capabilities.view || !wikiParent.capabilities.edit)) throw notFound();
       if (graph?.parentId && (!parent || !parent.capabilities.view || !parent.capabilities.edit)) throw notFound();
       if (graph?.kind === 'milestone') {
         if (input !== undefined || !parent) throw new HttpError(400, 'Milestones inherit access rules and Space from their parent.');
@@ -321,11 +349,36 @@ export class PolicyStore {
         return this.policy(id, principalId);
       }
       const data = input === undefined ? {} : object(input, ['spaceId', 'view', 'edit', 'interact', ...(project ? ['join'] : [])]);
-      const space = this.destination(input === undefined ? parent?.space.id ?? 'S1' : data.spaceId, principalId);
+      const space = this.destination(input === undefined ? wikiParent?.space.id ?? parent?.space.id ?? 'S1' : data.spaceId, principalId);
       const base = { objectId: id, spaceId: space.id, version: 1 };
-      const policy: ObjectPolicy = project ? { ...base, kind: 'project', rules: { view: data.view === undefined ? workspace() : this.projectAudience(data.view), edit: data.edit === undefined ? workspace() : this.projectAudience(data.edit), interact: data.interact === undefined ? workspace() : this.projectAudience(data.interact), join: data.join === undefined ? workspace() : this.projectAudience(data.join) } } : { ...base, rules: { view: data.view === undefined ? workspace() : this.audience(data.view), edit: data.edit === undefined ? workspace() : this.audience(data.edit), interact: data.interact === undefined ? workspace() : this.audience(data.interact) } };
+      const wikiRules = wikiParent?.policy.kind === 'project' ? undefined : wikiParent?.policy.rules;
+      const policy: ObjectPolicy = project ? { ...base, kind: 'project', rules: { view: data.view === undefined ? workspace() : this.projectAudience(data.view), edit: data.edit === undefined ? workspace() : this.projectAudience(data.edit), interact: data.interact === undefined ? workspace() : this.projectAudience(data.interact), join: data.join === undefined ? workspace() : this.projectAudience(data.join) } } : { ...base, rules: { view: data.view === undefined ? wikiRules?.view ?? workspace() : this.audience(data.view), edit: data.edit === undefined ? wikiRules?.edit ?? workspace() : this.audience(data.edit), interact: data.interact === undefined ? wikiRules?.interact ?? workspace() : this.audience(data.interact) } };
       this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId, this.projectMember(id, principalId), parent?.capabilities));
       this.save(policy); return policy;
+    });
+  }
+  /** Move copies the source rules, while the destination keeps its own Space
+   * (or inherits its parent's Space for a newly allocated identity). */
+  configureWikiMove(sourceId: string, destinationId: string, principalId: string, isNew: boolean): ObjectPolicy {
+    return transaction(this.database, () => {
+      if (!/^W[1-9]\d*$/.test(sourceId) || !/^W[1-9]\d*$/.test(destinationId)) throw notFound();
+      this.require(sourceId, principalId, 'edit');
+      const source = this.policy(sourceId, principalId);
+      const newPolicyRow = isNew ? this.database.prepare('SELECT data FROM object_policies WHERE object_id = ?').get(destinationId) as JsonRow | undefined : undefined;
+      if (!isNew) this.require(destinationId, principalId, 'edit');
+      const current = isNew && newPolicyRow ? JSON.parse(newPolicyRow.data) as ObjectPolicy : this.policy(destinationId, principalId);
+      if (isNew && current.version !== 1) throw new HttpError(409, 'The destination is no longer new.');
+      if (source.kind === 'project' || current.kind === 'project') throw notFound();
+      const parentPath = wikiParentPath(this.wikiPath(destinationId));
+      const parent = parentPath ? this.database.prepare('SELECT document_id FROM wiki_locations WHERE path = ?').get(parentPath) as { document_id: string } | undefined : undefined;
+      if (parent) this.require(parent.document_id, principalId, 'edit');
+      else if (parentPath) throw notFound();
+      const space = this.destination(isNew ? parent ? this.policy(parent.document_id, principalId).spaceId : 'S1' : current.spaceId, principalId, isNew ? undefined : current.spaceId);
+      const policy: ObjectPolicy = { objectId: destinationId, spaceId: space.id, version: isNew ? 1 : current.version + 1, rules: { ...source.rules } };
+      this.retain(effectiveAccess(policy, space, principalId));
+      this.save(policy);
+      this.require(destinationId, principalId, 'edit');
+      return policy;
     });
   }
   private save(policy: ObjectPolicy): void {

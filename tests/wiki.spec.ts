@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Request } from '@playwright/test';
 import type { AppState, WikiDocument } from '../shared/types';
 
 async function seedHistory(request: APIRequestContext, baseURL: string, count: number, label: string): Promise<WikiDocument> {
@@ -23,9 +23,11 @@ test('wiki edits compare and restore without rewriting history', async ({ page, 
   await page.getByRole('button', { name: 'Create Document', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Title', { exact: true }).fill(title);
-  await dialog.getByLabel('Document slug', { exact: true }).fill(`wiki-${info.project.name}-${Date.now()}`);
+  await dialog.getByLabel('Document path', { exact: true }).fill(`wiki-${info.project.name}-${Date.now()}`);
   await dialog.getByRole('textbox', { name: /^Content/ }).fill('The manuscript needs a short introduction.');
   await dialog.getByRole('textbox', { name: /^Edit summary/ }).fill('Initial argument');
+  await dialog.getByRole('button', { name: 'Check Document Path', exact: true }).click();
+  await expect(dialog.getByText('This document can be created here.', { exact: true })).toBeVisible();
   await dialog.getByRole('button', { name: 'Create Document', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1 })).toContainText(title);
   const id = new URL(page.url()).hash.slice(1);
@@ -247,9 +249,10 @@ for (const navigateAway of [false, true]) test(`a late document refresh cannot r
   const hold = new Promise<void>(resolve => { release = resolve; });
   const ready = new Promise<void>(resolve => { captured = resolve; });
   let first = true;
+  let heldRequest!: Request;
   await page.route(endpoint, async route => {
     if (!first) { await route.continue(); return; }
-    first = false;
+    first = false; heldRequest = route.request();
     const response = await route.fetch();
     expect((await response.json()).document.version).toBe(1);
     captured();
@@ -271,9 +274,11 @@ for (const navigateAway of [false, true]) test(`a late document refresh cannot r
     if (navigateAway) await page.evaluate(id => { location.hash = id; }, document.id);
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
     await expect(page.locator('.wiki-content')).toHaveText('Newer content must remain visible');
-    const late = page.waitForResponse(response => response.url() === endpoint);
     release();
-    await (await late).finished();
+    // Access-epoch retirement may abort the old read before it is released.
+    // Await that specific request rather than an unrelated subsequent read.
+    const late = await heldRequest.response();
+    if (late) await late.finished();
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
     await expect(page.locator('.wiki-content')).toHaveText('Newer content must remain visible');

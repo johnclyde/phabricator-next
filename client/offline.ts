@@ -1,3 +1,5 @@
+import { canonicalWikiPath } from '../shared/wiki';
+import type { WikiAuthority } from './wiki-client';
 import { comparisonMetadata, isComparisonSelection } from './comparison-model';
 import { repositorySelection } from './repository-cache';
 import type { BulkMoveWorkboardCardsInput } from '../shared/workboards';
@@ -8,8 +10,9 @@ export { RequestError } from './session';
 
 export type MutationMethod = 'POST' | 'PATCH' | 'PUT';
 export interface SubmittedBulkMove { projectId: string; sourceProxyId: string | null; requestId: string; input: BulkMoveWorkboardCardsInput }
-export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string }
+export interface PendingMutation { id: string; path: string; method: MutationMethod; body: unknown; label: string; createdAt: string; error?: string; wikiAuthority?: WikiAuthority }
 export function canQueue(path: string, method: MutationMethod, body?: unknown): boolean {
+  if (path === '/api/documents' && method === 'POST') { try { return Boolean(body && typeof body === 'object' && 'slug' in body && typeof body.slug === 'string' && canonicalWikiPath(body.slug) === body.slug && 'expectedAccessEpoch' in body && Number.isSafeInteger(body.expectedAccessEpoch) && Number(body.expectedAccessEpoch) >= 0); } catch { return false; } }
   if (/^\/api\/revisions\/[^/]+\/versions$/.test(path) && body && typeof body === 'object' && ['assets', 'shareAssets', 'expectedAccessEpoch'].some(key => key in body)) return false;
   if (path === '/api/projects' && method === 'POST') {
     if (!body || typeof body !== 'object') return false;
@@ -30,10 +33,10 @@ function queuedObject(item: PendingMutation): string | null {
   if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:docx-draft|docx-request|docx-selection|paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return /^(?:docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function objectFromKey(key: string): string | null { return /^(?:wiki-move|wiki-request|docx-draft|docx-request|docx-selection|paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return /^(?:wiki-move|wiki-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 // Personal presentation choices retain quota-failed memory, but are purged on view loss rather than treated as content drafts.
-function isRetainedDraftKey(key: string): boolean { return /^(?:docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return key.startsWith('draft:document:') || /^(?:wiki-move|wiki-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -70,6 +73,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   }
   const contentKey = (key: string) => storageKey(prefix + key);
   const blockedDraft = (key: string, value?: unknown): boolean => {
+    if (key.startsWith('draft:document:new')) { let authority: WikiAuthority | undefined; try { authority = ((value ?? JSON.parse(rawRead(key) || 'null')) as { wikiAuthority?: WikiAuthority } | null)?.wikiAuthority; } catch { /* Preserve unreadable drafts. */ } return draftObjects(key, value).some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects && !session.visibleObjects.has(id))) || Boolean(authority?.parentId && session?.objectCapabilities.get(authority.parentId)?.edit === false); }
+    if (/^wiki-(?:move|request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); let edits: string[] = []; try { edits = ((value ?? JSON.parse(rawRead(key) || 'null')) as { editIds?: string[] } | null)?.editIds || []; } catch { /* Keep unreadable recovery. */ } return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects && !session.visibleObjects.has(id))) || [target, ...edits].some(id => id && session?.objectCapabilities.get(id)?.edit === false); }
     if (/^docx-(?:draft|request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.edit === false); }
     if (key.startsWith('paste-create:')) { const space = objectFromKey(key); return Boolean(space && (session?.unavailableObjects.has(space) || (session?.visibleObjects && !session.visibleObjects.has(space)))); }
     if (key.startsWith('citation-draft:')) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.interact === false); }
@@ -111,6 +116,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const draftObjects = (key: string, value?: unknown): string[] => {
     const primary = objectFromKey(key);
+    if (/^wiki-(?:move|request):/.test(key) || key.startsWith('draft:document:')) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { authorityIds?: string[]; wikiAuthority?: WikiAuthority; spaceId?: string } | null; return [...new Set([...(primary ? [primary] : []), ...(draft?.authorityIds || draft?.wikiAuthority?.ancestorIds || []), ...(key.startsWith('draft:document:new') && draft?.spaceId ? [draft.spaceId] : [])])]; } catch { return primary ? [primary] : []; } }
     if (/^docx-(?:draft|request):/.test(key)) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { sourceFile?: { fileId?: unknown }; body?: { sourceFile?: { fileId?: unknown } } } | null; const file = draft?.sourceFile?.fileId ?? draft?.body?.sourceFile?.fileId; return [...(primary ? [primary] : []), ...(typeof file === 'string' && /^F\d+$/.test(file) ? [file] : [])]; } catch { return primary ? [primary] : []; } }
     if (key.startsWith('citation-draft:')) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { source?: { fileId?: unknown }; body?: { source?: { fileId?: unknown } } } | null; const source = draft?.source?.fileId ?? draft?.body?.source?.fileId; return [...(primary ? [primary] : []), ...(typeof source === 'string' && /^F\d+$/.test(source) ? [source] : [])]; } catch { return primary ? [primary] : []; } }
     if (key.startsWith('revision-git-import:')) {
@@ -220,7 +226,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session)) return;
     session.taskSnapshotGeneration += 1;
     for (const controller of session.taskReadControllers) if (controller !== except) controller.abort();
-    if (remove) for (const [key, value] of savedEntries()) if ((key.startsWith('revision:') && (() => { try { return docxSnapshot(key, JSON.parse(value)); } catch { return false; } })()) || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) rawRemove(key);
+    if (remove) for (const [key, value] of savedEntries()) if ((key.startsWith('revision:') && (() => { try { return docxSnapshot(key, JSON.parse(value)); } catch { return false; } })()) || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) rawRemove(key);
     for (const listener of session.taskSnapshotListeners) listener();
   };
   let holdingLegacy = false;
@@ -228,6 +234,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || holdingLegacy) return;
     holdingLegacy = true;
     try {
+      const wikiState = (() => { try { return JSON.parse(rawRead('state') || 'null') as { documents?: { id: string; slug: string; version: number; location?: { path: string; status: string } }[] } | null; } catch { return null; } })();
+      for (const item of rawOutbox()) if ((item.path === '/api/documents' && item.method === 'POST' && (!canQueue(item.path, item.method, item.body) || !item.wikiAuthority)) || (/^\/api\/documents\/W\d+$/.test(item.path) && item.method === 'PUT' && (() => { const current = wikiState?.documents?.find(document => document.id === objectFromPath(item.path)); const input = item.body as { slug?: unknown; expectedVersion?: unknown }; if (!current) return false; try { return (current.location?.status !== undefined && current.location.status !== 'active' && input.expectedVersion !== current.version) || (typeof input?.slug === 'string' && canonicalWikiPath(input.slug) !== (current.location?.path || canonicalWikiPath(current.slug))); } catch { return true; } })())) if (!session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older wiki request needs a new path and parent review. Export it before preparing a separate change; it will not submit automatically.' });
       for (const item of rawOutbox()) if ((item.path === '/api/projects' || /^\/api\/projects\/PROJ\d+$/.test(item.path)) && !canQueue(item.path, item.method, item.body) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older project change has no valid source version or includes an operation that requires an online review. Export and review it explicitly; automatic submission stopped.' });
       for (const [key, json] of savedEntries()) if (key.startsWith('project-draft:') && !session.quarantinedDrafts.has(key)) { try { const draft = JSON.parse(json) as { expectedVersion?: unknown }; if (!Number.isSafeInteger(draft.expectedVersion) || Number(draft.expectedVersion) < 1) quarantine({ key, objectId: objectFromKey(key)!, value: draft, reason: 'This older project draft has no recorded source version. Export the entire draft and review it against the current project before saving.' }); } catch { /* Preserve unreadable original bytes. */ } }
       for (const item of rawOutbox()) if (((item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path)) || (item.method === 'POST' && item.path === '/api/tasks')) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
@@ -250,7 +258,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const changed = (event: StorageEvent) => {
         if (!sessionIsActive(session)) return;
         if (event.key === null || event.key === contentKey('quarantine-ready') || event.key?.startsWith(contentKey('quarantined-drafts:'))) { syncDurableQuarantine(); quarantineChanged(); }
-        if (event.key === null || ((event.key?.startsWith(contentKey('revision:')) || event.key?.startsWith(contentKey('paste:')) || event.key?.startsWith(contentKey('paste-version:')) || event.key?.startsWith(contentKey('paste-list:')) || event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:')) || event.key?.startsWith(contentKey('workboard:')) || event.key?.startsWith(contentKey('repository:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
+        if (event.key === null || ((event.key?.startsWith(contentKey('wiki:')) || event.key?.startsWith(contentKey('wiki-path:')) || event.key?.startsWith(contentKey('revision:')) || event.key?.startsWith(contentKey('paste:')) || event.key?.startsWith(contentKey('paste-version:')) || event.key?.startsWith(contentKey('paste-list:')) || event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:')) || event.key?.startsWith(contentKey('workboard:')) || event.key?.startsWith(contentKey('repository:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
       };
       window.addEventListener('storage', changed);
       session.cleanupCallbacks.add(() => window.removeEventListener('storage', changed));
@@ -267,7 +275,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id)) || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
@@ -275,9 +283,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
     if (key.startsWith('revision-comparison:')) { if (!isComparisonSelection(value, objectFromKey(key) || '')) return false; value = comparisonMetadata(value); }
     if (/^repository:R\d+:selection$/.test(key)) { const selection = repositorySelection(value); if (!selection) return false; value = selection; }
-    if ((docxSnapshot(key, value) || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
+    if ((docxSnapshot(key, value) || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
     if (key.startsWith('workboard-move:') && draftObjects(key, value).some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'A selected move reference is no longer available' });
-    if (blockedDraft(key, value)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); }
+    if (blockedDraft(key, value)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key) || draftObjects(key, value)[0] || 'S1', value, reason: 'Permission to submit this draft changed' }); }
     if (hasDraftHold(key)) return false;
     if (key === 'outbox' && Array.isArray(value)) {
       const held = rawOutbox().filter(item => session.quarantinePending.has(`outbox:${item.id}`));
@@ -340,8 +348,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const entries = savedEntries();
     const heldFamilies = new Set(entries.flatMap(([key, json]) => { try { return isRetainedDraftKey(key) && draftObjects(key, JSON.parse(json)).some(id => changed.includes(id)) ? [key.replace(/:unsaved-memory$/, '')] : []; } catch { return []; } }));
     for (const [key, json] of entries) {
-      const objectId = objectFromKey(key);
       let value: unknown; try { value = JSON.parse(json); } catch { continue; }
+      const objectId = objectFromKey(key) || draftObjects(key, value)[0];
       if (!objectId || (!draftObjects(key, value).some(id => changed.includes(id)) && !heldFamilies.has(key.replace(/:unsaved-memory$/, '')))) continue;
       if (isDraftKey(key)) {
         if (hasSavedWork(key, value) && !quarantine({ key, objectId, value, reason: 'Object access changed' })) continue;
@@ -351,7 +359,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       } else removeStored(key);
     }
     const queued = readStored<PendingMutation[]>('outbox', []);
-    const affected = queued.filter(item => changed.includes(queuedObject(item) || ''));
+    const affected = queued.filter(item => changed.includes(queuedObject(item) || '') || item.wikiAuthority?.ancestorIds.some(id => changed.includes(id)));
     for (const item of affected) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'Object or destination Space access changed; automatic submission stopped' });
     // Aggregate snapshots can contain any of the revoked objects; refetch them.
     removeStored('state');
@@ -371,10 +379,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const draftEntries = savedEntries();
     const blockedFamilies = new Set(draftEntries.flatMap(([key, json]) => { try { return isRetainedDraftKey(key) && blockedDraft(key, JSON.parse(json)) ? [key.replace(/:unsaved-memory$/, '')] : []; } catch { return []; } }));
     for (const [key, json] of draftEntries) {
-      try { const value: unknown = JSON.parse(json); if (!blockedDraft(key, value) && !blockedFamilies.has(key.replace(/:unsaved-memory$/, ''))) continue; if (hasSavedWork(key, value)) { const saved = quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); draftsChanged = true; if (!saved) continue; } rawRemoveMatching(key, value); } catch { /* Preserve unreadable draft bytes in place. */ }
+      try { const value: unknown = JSON.parse(json); if (!blockedDraft(key, value) && !blockedFamilies.has(key.replace(/:unsaved-memory$/, ''))) continue; if (hasSavedWork(key, value)) { const saved = quarantine({ key, objectId: objectFromKey(key) || draftObjects(key, value)[0] || 'S1', value, reason: 'Permission to submit this draft changed' }); draftsChanged = true; if (!saved) continue; } rawRemoveMatching(key, value); } catch { /* Preserve unreadable draft bytes in place. */ }
     }
     const queue = readStored<PendingMutation[]>('outbox', []);
-    const forbidden = queue.filter(item => { const id = queuedObject(item); if (id?.startsWith('S')) return !spaceIds.includes(id) || archivedSpaceIds.includes(id); const capabilities = id ? session.objectCapabilities.get(id) : null; return capabilities && !((item.path.endsWith('/comments') || item.path.endsWith('/replies')) ? capabilities.interact : capabilities.edit); });
+    const forbidden = queue.filter(item => { const id = queuedObject(item); if (item.wikiAuthority && (item.wikiAuthority.ancestorIds.some(ancestor => !visible.has(ancestor)) || (item.wikiAuthority.parentId && session.objectCapabilities.get(item.wikiAuthority.parentId)?.edit === false))) return true; if (id?.startsWith('S')) return !spaceIds.includes(id) || archivedSpaceIds.includes(id); const capabilities = id ? session.objectCapabilities.get(id) : null; return capabilities && !((item.path.endsWith('/comments') || item.path.endsWith('/replies')) ? capabilities.interact : capabilities.edit); });
     for (const item of forbidden) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'Permission or destination Space changed; automatic submission stopped' }); draftsChanged = true; }
     if (draftsChanged) for (const listener of session.accessListeners) listener([]);
     session.visibleObjects = visible;
@@ -413,7 +421,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const citationRequest = /^\/api\/revisions\/[DPL]\d+\/(?:citations|citation-evidence)(?:[/?]|$)/.test(path);
     const docxRequest = /^\/api\/revisions(?:\/[DPL]\d+)?\/docx(?:[/?]|$)/.test(path);
     const pasteRequest = /^\/api\/pastes(?:[/?]|$)/.test(path);
-    const taskRequest = /^\/api\/revisions\/L\d+$/.test(path) || docxRequest || pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
+    const wikiRequest = /^\/api\/(?:wiki(?:[/?]|$)|documents(?:[/?]|$))/.test(path);
+    const taskRequest = wikiRequest || /^\/api\/revisions\/L\d+$/.test(path) || docxRequest || pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
     if ((options || docxRequest || pasteRequest || citationRequest || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
@@ -438,9 +447,12 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const bulkMove = boardMutation && path.endsWith('/bulk-moves') && options?.body && typeof options.body === 'object' ? options.body as { destinationProjectId?: unknown; tasks?: { taskId?: unknown }[] } : null;
     const bulkDestination = /^\/api\/projects\/PROJ\d+\/workboard\/bulk-move-preview\?/.test(path) && !options ? new URLSearchParams(path.split('?')[1]).get('destinationProjectId') : bulkMove && typeof bulkMove.destinationProjectId === 'string' ? bulkMove.destinationProjectId : null;
     const bulkTaskIds = bulkMove && Array.isArray(bulkMove.tasks) ? bulkMove.tasks.flatMap(task => task && typeof task.taskId === 'string' ? [task.taskId] : []) : [];
-    const relatedIds = [...new Set([...authorityIds, ...(bulkDestination ? [bulkDestination, ...bulkTaskIds] : importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [])])];
+    const queuedWiki = options?.queued ? readStored<PendingMutation[]>('outbox', []).find(item => item.id === options.id)?.wikiAuthority : undefined;
+    if (queuedWiki?.parentId && session.objectCapabilities.get(queuedWiki.parentId)?.edit === false) throw new RequestError('The wiki parent is no longer editable. Export this creation draft.', 403, 'ACTION_FORBIDDEN');
+    const relatedIds = [...new Set([...authorityIds, ...(queuedWiki?.ancestorIds || []), ...(bulkDestination ? [bulkDestination, ...bulkTaskIds] : importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [])])];
     const relatedGenerations = relatedIds.map(id => ({ id, generation: session.objectGenerations.get(id) || 0 }));
     const referenceUnavailable = () => {
+      if (wikiRequest) return new RequestError('A wiki parent or destination is unavailable. Your draft remains available for export.', 404, 'WIKI_PATH_UNAVAILABLE');
       if (docxRequest) return new RequestError('The original Word file is unavailable. Your unsaved work remains available for export.', 404, 'DOCX_SOURCE_UNAVAILABLE');
       if (citationRequest) return new RequestError('The supporting File is unavailable. Your evidence draft remains available for export.', 404, 'CITATION_SOURCE_UNAVAILABLE');
       if (/^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path)) return new RequestError('The source repository is unavailable. The original version import request is retained for export or explicit retry after access returns.', 404, 'REPOSITORY_REFERENCE_UNAVAILABLE');
@@ -562,7 +574,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory')).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return /^(?:docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
+      return /^(?:wiki-move|wiki-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };

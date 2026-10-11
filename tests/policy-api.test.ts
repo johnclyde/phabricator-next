@@ -23,6 +23,7 @@ async function start(options: AppOptions = {}) {
   const provisioner = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
   const alice = await provisioner.createAccount({ username: 'alice', displayName: 'Alice Writer', password: 'Alice test password sufficiently long' });
   const bob = await provisioner.createAccount({ username: 'bob', displayName: 'Bob Reviewer', password: 'Bob test password sufficiently long' });
+  if (!store.documentAtPath('/')) store.createDocument({ title: 'Wiki root', slug: '/', content: '' });
   const app = createApp({ ...options, store, seed: false, authMode: 'password' });
   const tokens = {
     alice: app.auth.createToken(alice.id, { name: 'Alice test access', scopes: ['read', 'write', 'review:local', 'review:hosted'] }).token,
@@ -77,10 +78,10 @@ test('a private Space hides all application objects and activity even when objec
     const alice = (await app.request<AppState>('alice', '/api/state')).body;
     const bob = (await app.request<AppState>('bob', '/api/state')).body;
     for (const kind of ['projects', 'repositories', 'tasks', 'documents', 'revisions'] as const) {
-      assert.equal(alice[kind].length, 1, kind);
-      assert.equal(bob[kind].length, 0, kind);
+      assert.equal(alice[kind].length, kind === 'documents' ? 2 : 1, kind);
+      assert.equal(bob[kind].length, kind === 'documents' ? 1 : 0, kind);
     }
-    assert.equal(bob.activity.length, 0);
+    assert.ok(bob.activity.every(event => event.objectId === 'W1'));
     assert.ok(!bob.spaces.some(item => item.id === space.id));
     for (const id of [project.id, repository.id, task.id, document.id, revision.revision.id]) assert.equal(bob.access[id], undefined, id);
     assert.doesNotMatch(JSON.stringify(bob), /Hidden|Confidential research|hidden Space description|private\.git/);
@@ -118,7 +119,7 @@ test('hidden and missing objects have indistinguishable history, source, export 
     const visibleSlug = await app.request('bob', '/api/documents', 'POST', { title: 'Collision', slug: 'visible-slug', content: '' });
     assert.equal(hiddenSlug.status, 409);
     assert.deepEqual(hiddenSlug, visibleSlug);
-    assert.equal(hiddenSlug.body.error, 'This slug is unavailable.');
+    assert.equal(hiddenSlug.body.error, 'This wiki path is unavailable.');
   } finally { await app.close(); }
 });
 
@@ -203,7 +204,10 @@ test('policy version conflicts and self-lockout cannot modify source snapshots o
     const selfLockout = await app.request('alice', `/api/policies/${document.id}`, 'PUT', { expectedVersion: changed.policy.version, spaceId: 'S1', view: members(app.bob.id), edit: members(app.bob.id), interact: members(app.bob.id) });
     assert.equal(selfLockout.status, 400);
     assert.deepEqual((await app.policy('alice', document.id)).policy, changed.policy);
-    assert.deepEqual(await Promise.all([1, 2].map(version => app.request<WikiVersion>('alice', `/api/documents/${document.id}/versions/${version}`))), before);
+    const after = await Promise.all([1, 2].map(version => app.request<WikiVersion>('alice', `/api/documents/${document.id}/versions/${version}`)));
+    assert.ok(after.every((response, index) => response.body.accessEpoch! > before[index]!.body.accessEpoch!));
+    const withoutEpoch = (response: Reply<WikiVersion>) => { const { accessEpoch: _epoch, ...body } = response.body; return { ...response, body }; };
+    assert.deepEqual(after.map(withoutEpoch), before.map(withoutEpoch));
     const detail = (await app.request<WikiDetail>('alice', `/api/documents/${document.id}`)).body;
     assert.equal(detail.document.version, 2); assert.equal(detail.history.versions.length, 2);
     denied(await app.request('bob', `/api/documents/${document.id}`, 'PUT', { title: document.title, slug: document.slug, content: 'Denied edit.', expectedVersion: 2 }), 403);

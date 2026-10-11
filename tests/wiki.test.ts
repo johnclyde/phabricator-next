@@ -55,9 +55,9 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
   let store = createStore({ path });
   try {
     assert.equal(store.fresh, false);
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 19);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 20);
     const detail = store.documentDetail('W1');
-    assert.deepEqual(detail.document, legacy);
+    assert.deepEqual(detail.document, { ...legacy, location: { path: 'research/existing/', status: 'active', movedToId: null } });
     assert.equal(detail.history.firstAvailableVersion, 7);
     assert.equal(detail.history.nextBefore, null);
     assert.equal(detail.history.versions.length, 1);
@@ -79,7 +79,7 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
     assert.deepEqual(store.documentDetail('W1').document, edited);
     assert.deepEqual(store.documentHistory('W1').versions.map(version => version.number), [8, 7]);
     assert.equal(store.documentHistory('W1').firstAvailableVersion, 7);
-    assert.equal(store.createDocument({ title: 'Next document', slug: 'next', content: '' }).id, 'W2');
+    assert.equal(store.createDocument({ title: 'Next document', slug: '/', content: '' }).id, 'W2');
     assert.throws(() => store.database.prepare('UPDATE wiki_versions SET data = data WHERE document_id = ?').run('W1'), /immutable/);
     assert.throws(() => store.database.prepare('DELETE FROM wiki_versions WHERE document_id = ?').run('W1'), /immutable/);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }
@@ -88,10 +88,10 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
 test('wiki reads expose exact snapshots and bounded exclusive-cursor history without full content', async () => {
   const app = await start();
   try {
-    const create = await app.request<WikiDocument>('/api/documents', 'POST', { title: 'Draft 1', slug: 'draft/one', content: 'Content 1', message: 'Beginning' });
+    const create = await app.request<WikiDocument>('/api/documents', 'POST', { title: 'Draft 1', slug: '/', content: 'Content 1', message: 'Beginning' });
     assert.equal(create.status, 201); const id = create.body.id;
     for (let version = 2; version <= 25; version += 1) {
-      assert.equal((await app.request(`/api/documents/${id}`, 'PUT', { title: `Draft ${version}`, slug: version === 2 ? 'draft/two' : 'draft/current', content: `Content ${version}`, expectedVersion: version - 1, message: `Edit ${version}` })).status, 200);
+      assert.equal((await app.request(`/api/documents/${id}`, 'PUT', { title: `Draft ${version}`, slug: '/', content: `Content ${version}`, expectedVersion: version - 1, message: `Edit ${version}` })).status, 200);
     }
     const detail = (await app.request<WikiDetail>(`/api/documents/${id}`)).body;
     assert.equal(detail.document.content, 'Content 25'); assert.equal(detail.document.version, 25);
@@ -107,8 +107,8 @@ test('wiki reads expose exact snapshots and bounded exclusive-cursor history wit
     assert.deepEqual(empty.versions, []); assert.equal(empty.nextBefore, null); assert.equal(empty.firstAvailableVersion, 1);
     const first = (await app.request<WikiVersion>(`/api/documents/${id}/versions/1`)).body;
     const second = (await app.request<WikiVersion>(`/api/documents/${id}/versions/2`)).body;
-    assert.equal(first.kind, 'create'); assert.equal(first.message, 'Beginning'); assert.equal(first.content, 'Content 1'); assert.equal(first.slug, 'draft/one');
-    assert.equal(second.kind, 'edit'); assert.equal(second.content, 'Content 2'); assert.equal(second.slug, 'draft/two');
+    assert.equal(first.kind, 'create'); assert.equal(first.message, 'Beginning'); assert.equal(first.content, 'Content 1'); assert.equal(first.slug, '/');
+    assert.equal(second.kind, 'edit'); assert.equal(second.content, 'Content 2'); assert.equal(second.slug, '/');
     assert.notEqual(first.id, second.id); assert.equal(first.documentId, id); assert.equal(second.documentId, id);
     const state = (await app.request<AppState>('/api/state')).body;
     assert.equal(state.documents.length, 1); assert.equal(state.documents[0]!.content, 'Content 25');
@@ -125,9 +125,9 @@ test('wiki restoration appends current-slug content with stale checks and persis
   const databasePath = join(directory, 'workspace.sqlite');
   let app = await start({ databasePath });
   try {
-    const first = (await app.request<WikiDocument>('/api/documents', 'POST', { title: 'Original title', slug: 'old/location', content: 'Original content' })).body;
+    const first = (await app.request<WikiDocument>('/api/documents', 'POST', { title: 'Original title', slug: '/', content: 'Original content' })).body;
     const snapshot = (await app.request<WikiVersion>(`/api/documents/${first.id}/versions/1`)).body;
-    const current = (await app.request<WikiDocument>(`/api/documents/${first.id}`, 'PUT', { title: 'New title', slug: 'new/location', content: 'New content', expectedVersion: 1 })).body;
+    const current = (await app.request<WikiDocument>(`/api/documents/${first.id}`, 'PUT', { title: 'New title', slug: '/', content: 'New content', expectedVersion: 1 })).body;
     const path = `/api/documents/${first.id}/restore`; const input = { version: 1, expectedVersion: 2 };
     const responses = await Promise.all([app.request<WikiDocument>(path, 'POST', input, 'wiki-restore-once'), app.request<WikiDocument>(path, 'POST', input, 'wiki-restore-once')]);
     assert.equal(responses[0]!.status, 200); assert.deepEqual(responses[0], responses[1]);
@@ -159,17 +159,17 @@ test('wiki restoration appends current-slug content with stale checks and persis
 test('wiki conflicts and failed writes leave latest content, history, events, and replay unchanged', async () => {
   const app = await start();
   try {
-    const first = (await app.request<WikiDocument>('/api/documents', 'POST', { title: 'First', slug: 'first', content: 'One' })).body;
+    const first = (await app.request<WikiDocument>('/api/documents', 'POST', { title: 'First', slug: '/', content: 'One' })).body;
     await app.request('/api/documents', 'POST', { title: 'Second', slug: 'occupied', content: 'Two' });
     const path = `/api/documents/${first.id}`;
     const before = (await app.request<WikiDetail>(path)).body;
     assert.equal((await app.request(path, 'PUT', { title: 'Collision', slug: 'occupied', content: 'Cannot save', expectedVersion: 1 }, 'wiki-retry')).status, 409);
     assert.deepEqual((await app.request<WikiDetail>(path)).body, before);
-    const retry = await app.request<WikiDocument>(path, 'PUT', { title: 'Allowed', slug: 'allowed', content: 'Saved', expectedVersion: 1 }, 'wiki-retry');
+    const retry = await app.request<WikiDocument>(path, 'PUT', { title: 'Allowed', slug: '/', content: 'Saved', expectedVersion: 1 }, 'wiki-retry');
     assert.equal(retry.status, 200); assert.equal(retry.body.version, 2);
     const competing = await Promise.all([
-      app.request(path, 'PUT', { title: 'Third', slug: 'allowed', content: 'Three', expectedVersion: 2 }),
-      app.request(path, 'PUT', { title: 'Other third', slug: 'allowed', content: 'Other three', expectedVersion: 2 }),
+      app.request(path, 'PUT', { title: 'Third', slug: '/', content: 'Three', expectedVersion: 2 }),
+      app.request(path, 'PUT', { title: 'Other third', slug: '/', content: 'Other three', expectedVersion: 2 }),
     ]);
     assert.deepEqual(competing.map(result => result.status).sort(), [200, 409]);
     const committed = (await app.request<WikiDetail>(path)).body;
@@ -177,9 +177,9 @@ test('wiki conflicts and failed writes leave latest content, history, events, an
     // Simulate an event-storage failure after both latest content and snapshot
     // were written; the entire document save must still roll back.
     app.store.database.exec("CREATE TRIGGER reject_wiki_activity BEFORE INSERT ON activity WHEN NEW.object_id = 'W1' BEGIN SELECT RAISE(ABORT, 'Simulated event failure'); END");
-    assert.throws(() => app.store.updateDocument('W1', { title: 'Uncommitted', slug: 'allowed', content: 'Must roll back', expectedVersion: 3 }), /Simulated event failure/);
+    assert.throws(() => app.store.updateDocument('W1', { title: 'Uncommitted', slug: '/', content: 'Must roll back', expectedVersion: 3 }), /Simulated event failure/);
     assert.deepEqual((await app.request<WikiDetail>(path)).body, committed);
     app.store.database.exec('DROP TRIGGER reject_wiki_activity');
-    assert.equal((await app.request(path, 'PUT', { title: 'Fourth', slug: 'allowed', content: 'Four', expectedVersion: 3 })).status, 200);
+    assert.equal((await app.request(path, 'PUT', { title: 'Fourth', slug: '/', content: 'Four', expectedVersion: 3 })).status, 200);
   } finally { await app.close(); }
 });

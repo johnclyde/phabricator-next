@@ -66,7 +66,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
     const bob = await operator.createAccount({ username: 'bob', displayName: 'Bob', password });
     const policies = new PolicyStore(store.database, { principalExists: id => [identity, alice.id, bob.id].includes(id) });
     const space = policies.createSpace({ name: 'Research', view: selected(identity, alice.id, bob.id), edit: selected(identity, alice.id) }, identity);
-    const wiki = store.createDocument({ title: 'Preserve source', slug: 'handoff-source', content: `A literal principal in source: ${identity}` });
+    const wiki = store.createDocument({ title: 'Preserve source', slug: '/', content: `A literal principal in source: ${identity}` });
     store.updateDocument(wiki.id, { title: wiki.title, slug: wiki.slug, content: 'Second immutable snapshot.', expectedVersion: 1 });
     policies.configureNew(wiki.id, { spaceId: space.id, view: selected(identity, alice.id, bob.id), edit: selected(identity), interact: selected(identity, bob.id) }, identity);
     const revision = store.createRevision({ title: 'Preserve paper', kind: 'paper', files: [{ path: 'paper.tex', content: 'Original paper.' }] });
