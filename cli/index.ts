@@ -13,6 +13,7 @@ import type { AppState, ProjectDetail, RevisionDetail, RevisionKind, SourceFile,
 import type { WorkboardCardPage, WorkboardDetail } from '../shared/workboards';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories';
 import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, GitVersionImportInput, RepositoryDetail } from '../shared/repositories';
+import { paperCommand } from './paper-builds';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -32,6 +33,12 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
+  npm run arc -- builds P2 [--before N] [--limit N] [--json]
+  npm run arc -- compile P2 --version-id ID --content-hash SHA256 --entrypoint main.tex --toolchain-id SHA256 [--request-id KEY] [--json]
+  npm run arc -- build P2 BUILD_ID [--json]
+  npm run arc -- cancel-build P2 BUILD_ID [--request-id KEY] [--json]
+  npm run arc -- retry-build P2 BUILD_ID [--request-id KEY] [--json]
+  npm run arc -- download-build P2 BUILD_ID --artifact pdf|log|manifest|synctex|mapping --output NEW_FILE [--json]
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -67,6 +74,12 @@ attempt, including retries; the command never selects a newer review head.
 The linked repository is selected by the server. Its view access and the review's
 edit access are required. The exact request is printed as escaped JSON to stderr
 before submission. Retry it unchanged with the same --request-id.
+compile explicitly submits a saved paper version to the operator's isolated TeX
+worker. Copy version pins from export and the toolchain ID from builds. No source
+is compiled on this computer by arc. The job continues after the command exits;
+build reads its status. retry-build creates a new job for the original exact
+source and toolchain; repeating its request ID recovers the same saved receipt.
+download-build verifies the artifact size and SHA-256 and never overwrites files.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -116,6 +129,8 @@ async function main() {
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
       'request-id': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
+      entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
+      artifact: { type: 'string' }, output: { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -127,19 +142,38 @@ async function main() {
   if (rawPath === undefined) throw new Error('Provide an absolute HTTP(S) server URL.');
   const basePath = normalizeBasePath(rawPath || '/');
   server.pathname = basePath;
-  const request = async <T>(path: string, method = 'GET', body?: unknown, requestId?: string): Promise<T> => {
+  const rawRequest = async (path: string, method = 'GET', body?: unknown, requestId?: string): Promise<Response> => {
     const token = process.env.PHABRICATOR_TOKEN;
     if (token && (!/^[A-Za-z0-9._-]{1,256}$/.test(token))) throw new Error('PHABRICATOR_TOKEN has an invalid format.');
     if (token && server.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(server.hostname)) throw new Error('API tokens require HTTPS except for a loopback server.');
-    const response = await fetch(new URL(mountPath(path, basePath), server), {
+    return fetch(new URL(mountPath(path, basePath), server), {
       method, signal: AbortSignal.timeout(135_000), redirect: 'error',
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(method === 'GET' ? {} : { 'Idempotency-Key': requestId ?? randomUUID() }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
+  };
+  const request = async <T>(path: string, method = 'GET', body?: unknown, requestId?: string): Promise<T> => {
+    const response = await rawRequest(path, method, body, requestId);
     const value = await response.json() as T & { error?: string };
     if (!response.ok) throw new Error(value.error || `Server returned HTTP ${response.status}`);
     return value;
   };
+  const download = async (path: string, maxBytes: number): Promise<Uint8Array> => {
+    const response = await rawRequest(path);
+    if (!response.ok) { const error = await response.json() as { error?: string }; throw new Error(error.error || `Server returned HTTP ${response.status}`); }
+    if (!response.body) throw new Error('The artifact response has no body.');
+    const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read(); if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) throw new Error('The artifact exceeds its declared size. No output file was written.');
+        chunks.push(value);
+      }
+    } finally { await reader.cancel(); reader.releaseLock(); }
+    return Buffer.concat(chunks, size);
+  };
+  if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

@@ -44,13 +44,14 @@ The server intentionally binds to loopback. Password sign-in is available with `
 - [Diffusion repository browsing and import](docs/git-repositories.md) reads operator-configured local bare Git repositories: branches and tags, exact commit metadata and parents, directory trees, UTF-8 files, and paged history. Selecting a reference pins its full commit ID; later branch movement never changes the selected source. An explicit import creates a code, paper or document review from a complete supported text tree, retaining immutable commit/tree/blob identities and original file modes. A subsequent import adds a version after checking the exact current base, preserves prior discussion and resets acceptance. Every linked revision remains subject to repository visibility. Visited source supports bounded offline reopening in local mode and current-tab retention in password mode; imports stay online. Repository hosting, working-copy ranges, blame, commit diffs and landing remain planned.
 - Tasks, repository registration, filtering, and a shared activity feed, backed by SQLite transactions. Wiki documents keep immutable content versions, edit summaries, paginated history, word/line comparisons, and restore-as-new edits. Existing databases retain their known latest snapshot with explicit legacy history gaps; missing older versions are never fabricated. Wiki history and comparisons respect object/Space policies. Upstream drafts, publication pointers and hierarchy moves remain planned.
 - Deterministic checks that run without internet: LaTeX labels/citations across supplied `.tex`/`.bib` files, drafting placeholders, conflict markers and a few source checks. These are explicitly labeled **local checks**, not AI or verification of scientific/legal claims.
+- Explicit [paper compilation](docs/paper-builds.md) pins a saved source version, entrypoint and compiler. Durable jobs provide cancellation, exact retries and immutable PDF/log/manifest/SyncTeX artifacts. A mobile PDF viewer links compiler locations back to their original source. Compilation requires an operator-configured isolated container and never runs TeX on the API host.
 - Explicit AI review adapters for hosted OpenAI and an installed local Ollama model, with source-anchor validation and no silent fallback.
 - Responsive navigation and touch controls. Local mode has cached visited revisions, persistent drafts and a retryable offline outbox. Password mode verifies identity before opening content and keeps drafts only in the current tab, with export before sign-out. Acceptance and AI jobs are never queued as ordinary offline edits.
 - Voice/typed commands for navigation, search, task drafting, summaries and reading open discussion threads, with optional spoken responses. Direct object navigation accepts commands such as “open W1”, “open wiki page 1”, “open task 123”, “open paper 2”, and “open repository 1”. Actual recognition depends on browser support and permission. The browser may use an external speech service; offline speech recognition is **not** implemented.
 - Password accounts, expiring browser sessions, CSRF protection, terminal account management and revocable scoped CLI tokens. New writes retain account and credential attribution. View/edit/interact policies and restrictive Spaces apply to existing objects, history, exports, activity, search inputs and review calls. Mobile access controls expose actual rules and preserve unsaved drafts when access changes.
 - An initial CLI for offline checks, explicit-file snapshot submission, review, export, visible task/project queries, paged workboard reads and exact Git source/history reads; authenticated workspaces use `PHABRICATOR_TOKEN`.
 
-No TeX, uploaded code, or document macros are executed. Paper iteration currently means source/structure review, comparison and source export; reproducible sandboxed PDF builds, SyncTeX and DOCX round-tripping are planned.
+Saving or reviewing a document never executes it. TeX runs only through an explicit paper-build request in the configured isolated worker; it is unavailable until the operator sets up that worker. Binary figures and versioned attachments, rendered PDF comparisons and DOCX round-tripping remain planned. See [the paper-build contract and limits](docs/paper-builds.md).
 
 ## AI configuration
 
@@ -76,6 +77,13 @@ npm run arc -- review P2 --provider local
 npm run arc -- list
 npm run arc -- show P2
 npm run arc -- export P2 --version 1
+
+# Compile an exact saved paper version using the configured isolated worker.
+npm run arc -- builds P2 --json
+npm run arc -- compile P2 --version-id VERSION_ID --content-hash CONTENT_HASH \
+  --entrypoint paper/main.tex --toolchain-id TOOLCHAIN_ID --request-id REQUEST_ID
+npm run arc -- build P2 BUILD_ID
+npm run arc -- download-build P2 BUILD_ID --artifact pdf --output paper.pdf
 
 # Read a project's independent columns and card order.
 npm run arc -- board PROJ1 --status all

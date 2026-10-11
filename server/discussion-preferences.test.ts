@@ -22,7 +22,7 @@ const workspace = { kind: 'workspace' as const };
 const status = (expected: number) => (error: unknown) => error !== null && typeof error === 'object' && 'status' in error && error.status === expected;
 const route = (id: string, threadId?: string) => `/api/revisions/${id}/${threadId ? `threads/${threadId}/preference` : 'discussion-preferences'}`;
 const raw = (db: DatabaseSync, table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
-const evidence = (db: DatabaseSync) => new Map((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'thread_preferences' AND name <> 'idempotency' ORDER BY name").all() as { name: string }[]).map(({ name }) => [name, raw(db, name)]));
+const evidence = (db: DatabaseSync) => new Map((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'thread_preferences' AND name <> 'idempotency' AND name NOT IN ('paper_builds','paper_build_artifacts') ORDER BY name").all() as { name: string }[]).map(({ name }) => [name, raw(db, name)]));
 function fixture(store: Store, repositoryId: string | null = null) {
   const detail = store.createRevision({ kind: 'document', title: 'Collapse a discussion', repositoryId, files: [{ path: 'motion.md', content: 'Original claim.\n' }] });
   const id = detail.revision.id; const version = detail.versions[0]!;
@@ -124,7 +124,7 @@ test('schema14 adds only empty private storage, preserves actual schema13 eviden
   const directory = mkdtempSync(join(tmpdir(), 'discussion-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaThirteen(path); let store = new Store({ path });
   try {
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 14); assert.equal(store.fresh, false);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 15); assert.equal(store.fresh, false);
     assert.deepEqual(evidence(store.database), old.before); assert.deepEqual(raw(store.database, 'idempotency'), old.replay); assert.deepEqual(raw(store.database, 'thread_preferences'), []);
     for (const schema of old.schemas) assert.deepEqual(store.database.prepare('SELECT name, sql FROM sqlite_master WHERE name=?').get(schema.name as string), schema);
     const original = store.detail('D1'); const preference = store.setThreadPreference('D1', 'legacy-comment', { collapsed: true, expectedVersion: 0 }, 'local:legacy-workspace');
@@ -145,7 +145,7 @@ test('failed schema14 migration rolls its new table back and leaves schema13 ava
   try {
     const db = new DatabaseSync(path);
     try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 13); assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='thread_preferences'").get(), undefined); assert.deepEqual(evidence(db), old.before); assert.deepEqual(raw(db, 'idempotency'), old.replay); } finally { db.close(); }
-    const store = new Store({ path }); try { assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 14); } finally { store.close(); }
+    const store = new Store({ path }); try { assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 15); } finally { store.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

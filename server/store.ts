@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { initializePaperBuilds } from './paper-builds.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -63,7 +64,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 14) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 15) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -243,6 +244,10 @@ export class Store {
           this.database.exec('PRAGMA user_version = 14');
         });
       } catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 15) {
+      try { this.transaction(() => { initializePaperBuilds(this.database); this.database.exec('PRAGMA user_version = 15'); }); }
+      catch (error) { this.database.close(); throw error; }
     }
     this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
     this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id), changed: (project, created, attribution) => this.workboards!.projectChanged(project, created, attribution) });

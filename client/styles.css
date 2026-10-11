@@ -568,3 +568,54 @@
   .discussion-navigation-actions > label { flex-basis: 100%; }
   .review-thread .original-thread-location { min-height: 44px; text-align: left; overflow-wrap: anywhere; }
 }
+
+/* Paper builds retain their source identity and keep PDF controls usable by touch. */
+.paper-builds { min-width: 0; }
+.paper-builds .card-body { min-width: 0; }
+.paper-builds .button, .paper-builds select, .paper-builds input, .paper-builds summary { min-height: 44px; }
+.paper-builds form { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+.paper-builds form .field { flex: 1; min-width: 160px; margin: 0; }
+.paper-builds code, .paper-builds p, .paper-builds dd { overflow-wrap: anywhere; }
+.paper-builds details { margin-block: 12px; }
+.paper-builds summary { display: flex; align-items: center; cursor: pointer; font-size: 13px; color: var(--muted); }
+.paper-build-metadata { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 16px; font-size: 12px; }
+.paper-build-metadata dd { margin: 0; }
+.paper-build-actions, .paper-pdf-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.paper-build-pending { padding: 12px; margin-block: 16px; border: 1px solid #dfca95; background: #fff9e7; }
+.paper-build-request + .paper-build-request { border-top: 1px solid #dfca95; margin-top: 12px; }
+.paper-build-history { list-style: none; padding: 0; margin: 0 0 14px; border: 1px solid var(--border); }
+.paper-build-history li + li { border-top: 1px solid var(--border); }
+.paper-build-select { display: flex; width: 100%; padding: 12px; justify-content: space-between; align-items: center; gap: 12px; text-align: left; background: white; border: 0; min-height: 60px; }
+.paper-build-select[aria-pressed="true"] { background: #eef6fc; box-shadow: inset 3px 0 #3979a7; }
+.paper-build-select > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.paper-build-select small { display: block; margin-top: 6px; color: var(--muted); }
+.paper-build-succeeded { background: #e3f3e7; color: #276738; }
+.paper-build-failed { background: #fbe5e4; color: #a0312e; }
+.paper-build-running, .paper-build-queued { background: #e4eef9; color: #2b5685; }
+.paper-build-detail { padding-top: 4px; border-top: 1px solid var(--border); }
+.paper-build-diagnostics { padding-left: 20px; }
+.paper-build-diagnostics li { padding-block: 8px; overflow-wrap: anywhere; }
+.paper-build-diagnostics .button { display: flex; margin-top: 8px; white-space: normal; text-align: left; }
+.paper-pdf { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 8px; min-width: 0; }
+.paper-pdf h3 { scroll-margin-top: 120px; }
+.paper-pdf-controls { margin: 12px 0; }
+.paper-pdf-controls label { display: flex; align-items: center; gap: 8px; }
+.paper-pdf-controls input { width: 70px; }
+.paper-pdf-controls .field { min-width: 0; flex: 1 1 200px; }
+.paper-pdf-controls select { max-width: 100%; }
+.paper-pdf-viewport { margin-block: 14px; overflow: auto; width: 100%; max-height: 75vh; background: #dfe4e8; border: 1px solid #cbd2d8; }
+.paper-pdf-sheet { position: relative; margin-inline: auto; background: white; }
+.paper-pdf-sheet canvas { display: block; cursor: crosshair; }
+.paper-pdf-highlight { position: absolute; pointer-events: none; background: #ffce0040; outline: 2px solid #a77900; }
+.paper-pdf-source { margin-block: 12px; padding: 10px; background: #f2f6f9; }
+.paper-pdf-text p { white-space: pre-wrap; line-height: 1.7; }
+@media (max-width: 700px) {
+  .paper-builds > .panel-heading { flex-wrap: wrap; gap: 8px; }
+  .paper-builds form { align-items: stretch; flex-direction: column; }
+  .paper-builds form .field { width: 100%; flex: auto; }
+  .paper-build-select { flex-wrap: wrap; }
+  .paper-build-metadata { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .paper-build-metadata dd { margin-bottom: 8px; }
+  .paper-build-actions .button { flex: 1 1 150px; white-space: normal; }
+  .paper-pdf-controls { gap: 8px; }
+}

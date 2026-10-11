@@ -17,6 +17,7 @@ import { seedDemo } from './seed.ts';
 import { PolicyStore } from './policy.ts';
 import { AccessLayer } from './access.ts';
 import { createGitObserver, type GitObserver } from './git.ts';
+import { PaperBuildService, type PaperRunner } from './paper-builds.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -29,10 +30,11 @@ export interface AppOptions {
   authMode?: AuthMode;
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
+  paperRunner?: PaperRunner | null;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
-export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; close: () => Promise<void> }
+export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; close: () => Promise<void> }
 
 function security(req: IncomingMessage, res: ServerResponse, configuredPort: number): void {
   if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) throw new HttpError(403, 'Only loopback clients are allowed.');
@@ -115,7 +117,7 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
       throw new HttpError(503, `Frontend mount does not match APP_BASE_PATH (${basePath}). Rebuild and start with the same APP_BASE_PATH.`);
     }
   }
-  const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+  const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
   res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
   res.setHeader('Cache-Control', pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache');
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
@@ -137,6 +139,8 @@ export function createApp(options: AppOptions = {}): App {
   });
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
+  const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null);
+  paperBuilds.start();
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
   const gitReads = new Set<AbortController>();
 
@@ -206,6 +210,8 @@ export function createApp(options: AppOptions = {}): App {
     const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
     const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
+    const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
+    if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
     let versionImportRepository: string | undefined;
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
@@ -215,6 +221,7 @@ export function createApp(options: AppOptions = {}): App {
     const authorize = () => {
       auth.revalidate(context, scope); access.authorize(method, path, input);
       if (versionImportRepository) access.require(versionImportRepository);
+      if (paper?.[2]) paperBuilds.get(paper[1]!, paper[2], context);
       if ((importMatch || versionImportMatch) && signal?.aborted) throw new HttpError(499, 'Repository import was canceled.', 'GIT_ABORTED');
     };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
@@ -238,6 +245,7 @@ export function createApp(options: AppOptions = {}): App {
       }
     }
     const execute = async (): Promise<MutationResponse> => {
+      if (paper) return store.mutate(key, fingerprint, () => ({ status: paper[3] === 'cancel' ? 200 : 201, body: paper[3] === 'cancel' ? paperBuilds.cancel(paper[1]!, paper[2]!, input, context) : paper[3] === 'retry' ? paperBuilds.retry(paper[1]!, paper[2]!, input, context) : paperBuilds.submit(paper[1]!, input, context) }), authorize, present);
       if (versionImportMatch) {
         const id = versionImportMatch[1]!; const data = gitVersionImportInput(input);
         const repositoryId = store.read(() => { authorize(); return store.requireGitImportVersion(id, data).revision.repositoryId!; });
@@ -430,6 +438,26 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const paper = /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)(?:\/(synctex)|\/artifacts\/([^/]+))?)?$/.exec(path);
+          if (paper) {
+            const id = paper[1]!; access.require(id);
+            if (!paper[2]) {
+              if ([...url.searchParams.keys()].some(name => !['before','limit'].includes(name) || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Invalid paper build list parameters.');
+              const pageNumber = (name: string) => { const value = url.searchParams.get(name); if (value !== null && !/^[1-9]\d*$/.test(value)) throw new HttpError(400, 'Invalid paper build page.'); return value === null ? undefined : Number(value); };
+              send(res, 200, paperBuilds.list(id, context, pageNumber('before'), pageNumber('limit'))); return;
+            }
+            if (url.search) throw new HttpError(400, 'Paper build reads do not accept query parameters.');
+            if (paper[3]) { send(res, 200, paperBuilds.synctex(id, paper[2], context)); return; }
+            if (paper[4]) {
+              const artifact = paperBuilds.artifact(id, paper[2], paper[4], context);
+              res.setHeader('Content-Type', artifact.metadata.mediaType); res.setHeader('Content-Length', artifact.metadata.bytes);
+              res.setHeader('Content-Disposition', `attachment; filename="${artifact.metadata.name}"`);
+              res.setHeader('Cache-Control', 'private, no-store'); res.setHeader('X-Access-Epoch', policies.epoch());
+              res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+              res.end(artifact.data); return;
+            }
+            send(res, 200, { build: paperBuilds.get(id, paper[2], context), accessEpoch: policies.epoch() }); return;
+          }
           const preferences = /^\/api\/revisions\/([DPL]\d+)\/discussion-preferences$/.exec(path);
           if (preferences) {
             access.require(preferences[1]!);
@@ -599,8 +627,9 @@ export function createApp(options: AppOptions = {}): App {
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   let closing: Promise<void> | undefined;
-  return { server, store, auth, policies, close: () => closing ??= (async () => {
+  return { server, store, auth, policies, paperBuilds, close: () => closing ??= (async () => {
     for (const controller of gitReads) controller.abort();
+    await paperBuilds.close();
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
     if (!options.store) store.close();
   })() };

@@ -163,6 +163,7 @@ test('mounted API and frontend stay inside their configured path and canonicaliz
   await writeFile(join(directory, 'index.html'), html);
   await mkdir(join(directory, 'assets'));
   await writeFile(join(directory, 'assets', 'app.js'), 'console.log("mounted");');
+  await writeFile(join(directory, 'assets', 'pdf.worker.mjs'), 'export const worker = true;');
   const app = await start({ basePath: '/workspace', distPath: directory });
   const rawStatus = (path: string) => new Promise<number | undefined>((resolveStatus, reject) => {
     const req = requestHttp(app.base, { path }, res => { res.resume(); res.on('end', () => resolveStatus(res.statusCode)); });
@@ -184,6 +185,8 @@ test('mounted API and frontend stay inside their configured path and canonicaliz
     assert.equal(page.status, 200); assert.equal(await page.text(), html);
     const asset = await fetch(`${app.base}/workspace/assets/app.js`);
     assert.equal(asset.status, 200); assert.match(asset.headers.get('Cache-Control')!, /immutable/);
+    const moduleWorker = await fetch(`${app.base}/workspace/assets/pdf.worker.mjs`);
+    assert.equal(moduleWorker.status, 200); assert.match(moduleWorker.headers.get('Content-Type')!, /^text\/javascript/); assert.equal(await moduleWorker.text(), 'export const worker = true;');
     assert.equal((await fetch(`${app.base}/workspace/missing.js`)).status, 404);
     for (const method of ['GET', 'HEAD']) {
       const redirect = await fetch(`${app.base}/workspace?next=%2F%2Fevil.example`, { method, redirect: 'manual' });

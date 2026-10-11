@@ -10,7 +10,7 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | F002 | Strict TypeScript browser/API/CLI foundation | Implemented; one process plus browser |
 | F003 | SQLite transactions, version snapshots, comments and evidence | Implemented; local mode and attributed authenticated writes |
 | F004 | Tasks, projects, wiki, repository registry, activity | Partial legacy parity; object policies implemented, no hosted repositories |
-| F005 | Paper and prose drafts with source/word comparisons | Implemented first slice; no PDF or DOCX engine |
+| F005 | Paper and prose drafts with source/word comparisons | Source iteration implemented; bounded PDF compilation is in D103. DOCX interchange remains open. |
 | F006 | Offline checks, drafts, snapshot reads and mutation outbox | Implemented first slice; conflicts require attention |
 | F007 | Hosted and local model review adapters | Implemented; credentials/runtime required; live provider evaluation pending |
 | F008 | Familiar responsive shell and typed/voice commands | Implemented first slice; speech recognition browser-dependent; direct D/P/L/W/T/PROJ/R object navigation supported |
@@ -27,7 +27,7 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | --- | --- | --- |
 | D101 | Paragraph and sentence anchors | Partial: immutable source-passage anchors and exact-quote projection across versions; repeated/changed/missing passages retain explicit uncertainty and original context. Semantic paragraph identities and rename/rebase mapping remain open. See [review threads](review-threads.md). |
 | D102 | Document compare controls | Partial: exact immutable pair/file selections, arbitrary/reverse/equal comparisons, deleted/empty files, bounded literal word/line differences, touch/keyboard/voice navigation across passages and files, and an optional space/tab-only navigation filter with skipped counts and unchanged literal evidence. Selections survive authorized refresh/offline reopening without following newer versions. Semantic moves, structural/formatting-aware filters, rename alignment, PDF comparison and deleted-side comments remain open. See [comparison contracts](comparisons.md). |
-| D103 | Sandboxed TeX jobs and PDF artifacts | Reproducible build manifest, source/PDF alignment, compile diagnostics, no unsafe shell or network access |
+| D103 | Sandboxed TeX jobs and PDF artifacts | Partial: exact source/toolchain pins, durable cancellable jobs and fenced recovery, immutable PDF/log/manifest/SyncTeX artifacts, authenticated mobile PDF viewing and original source navigation. Binary assets, broader page geometry, rendered PDF comparisons and general build plans remain open. See [paper builds](paper-builds.md). |
 | D104 | Citation/evidence objects | Import BibTeX and structured sources; show where a claim came from and whether the source was actually checked |
 | D105 | DOCX interchange | Preserve headings, footnotes, comments and tracked changes across golden-fixture round trips |
 | D106 | Review threads and resolutions | Partial: immutable replies, optimistic resolve/reopen, version-bound state history, exact single-passage suggestions and atomic application as new versions, plus viewer-specific collapse and shared touch/keyboard/voice thread navigation. Per-inline diff-order navigation, multi-passage/file proposals, rebasing, upstream publication semantics and automated proposal provenance remain open. See [suggested edits](suggested-edits.md). |
