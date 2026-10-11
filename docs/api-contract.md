@@ -6,8 +6,8 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 
 - `GET /api/health` → `{ok:true}`
 - `GET /api/state` → AppState; includes visible objects and filtered recent activity, visible Spaces, a member directory, object access descriptions, access epoch, currentPrincipalId, visible followingTaskIds, visible followingRevisionIds and creation capability
-- `GET /api/notifications?filter=all|unread|read&before=OPAQUE&limit=N` → private `NotificationInbox`; `GET /api/notifications/count` → visible unread count and observed horizon. Read-scoped authority and current revision View apply.
-- `POST /api/notifications/read` → content-free immutable receipt for `read`, `unread`, `read_through` or `read_object`; requires write-scoped authority, Idempotency-Key and access/read pins, never revision Edit. Automatic object-read marking is an explicit foreground POST, not a GET side effect. See [notification limits and recovery](notifications.md).
+- `GET /api/notifications?filter=all|unread|read&before=OPAQUE&limit=N` → private `NotificationInbox`; `GET /api/notifications/count` → visible unread count and observed horizon. Read-scoped authority and current object View apply.
+- `POST /api/notifications/read` → content-free immutable receipt for `read`, `unread`, `read_through` or `read_object`; requires write-scoped authority, Idempotency-Key and access/read pins, never object Edit. Automatic object-read marking is an explicit foreground POST, not a GET side effect. See [notification limits and recovery](notifications.md).
 - `POST /api/tasks` TaskInput → Task with `projectIds`; creation accepts `projectIds` or the legacy scalar `projectId` alias, never both; `PATCH /api/tasks/:id` UpdateTaskInput (expectedVersion required; project fields use the separate tag action) → Task or a content-free TaskAccessLostAcknowledgement after a fresh owner change removes the caller’s view access
 - `POST /api/tasks/:id/projects` TaskProjectsInput → TaskDetail; add/remove explicit tags or deliberately replace all tags, including omitted hidden associations; current task version and edit access, selected project visibility, local-mode offline replay supported
 - `GET /api/tasks/:id` → TaskDetail; current fields, first history page, visible dependencies, duplicate relationships and inverse links
@@ -16,6 +16,8 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 - `POST /api/tasks/:id/dependencies` TaskDependencyInput → TaskDetail; online-only directed edge change, source edit and destination view, atomic inverse history and cycle rejection
 - `POST /api/tasks/:sourceId/merge` TaskMergeInput → source TaskDetail; close one task as a duplicate, exact versions and edit access on both endpoints
 - `POST /api/tasks/:destinationId/merge-in` TaskMergeInInput → destination TaskDetail; atomically merge 1–100 selected sources, exact versions and edit access on every endpoint
+- `GET /api/tasks/:id/mute` and `/mute/history` → the current person's private mute preference and paged history.
+- `POST /api/tasks/:id/mute` → exact mute/unmute receipt, requiring View, write scope, Idempotency-Key and preference/access pins. No task Edit is required. See [task notification contracts](task-notifications.md).
 - `GET /api/tasks/:id/subscriptions?after=PRINCIPAL&limit=N` → TaskSubscriptionPage; effective following membership, exclusive principal cursor, default 50, maximum 100
 - `GET /api/tasks/:id/subscriptions/:principalId` → TaskSubscriptionStatus; includes absent preference version 0 and derived automatic following
 - `POST /api/tasks/:id/subscriptions` TaskSubscriptionInput → TaskSubscriptionStatus; online-only preference update with expectedMembershipVersion, separate from task field versions

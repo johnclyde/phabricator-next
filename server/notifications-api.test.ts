@@ -50,7 +50,7 @@ for (const basePath of ['/', '/mounted/']) test(`notification API isolates perso
     assert.equal((await app.summary()).unreadCount, 0, 'self subscription is silent');
     const comment = await app.comment(id, 'one-comment'); await app.comment(id, 'one-comment');
     const page = await app.inbox('reader'), other = await app.inbox('carol'); assert.equal(page.items.length, 1); assert.equal(page.unreadCount, 1); assert.equal((await app.summary('alice')).unreadCount, 0, 'actor is not notified');
-    const item = page.items[0]!; assert.equal(item.event.kind, 'commented'); assert.equal(item.event.revisionId, id); assert.equal(item.event.actor?.principalId, app.alice.id); assert.equal(item.event.head?.versionId, comment.versionId); assert.equal(item.version, 0); assert.equal(item.read, false);
+    const item = page.items[0]!; assert.equal(item.event.kind, 'commented'); assert.equal(item.event.objectId, id); assert.equal(item.event.actor?.principalId, app.alice.id); assert.equal((item.event.context.kind === 'revision' ? item.event.context.head?.versionId : undefined), comment.versionId); assert.equal(item.version, 0); assert.equal(item.read, false);
     assert.equal(other.items[0]!.event.id, item.event.id); assert.notEqual(other.items[0]!.id, item.id);
     const wire = JSON.stringify(page); assert.doesNotMatch(wire, /Private source|Private comment|credentialId|requestId/);
     const response = await app.request('/api/notifications'); assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -82,7 +82,7 @@ test('notification cursors bind owner, filter, epoch and read state while horizo
     const secondId = app.revision().revision.id; await app.follow(secondId); await app.comment(secondId);
     const summary = await app.summary(), objectRead = { action: 'read_object', revisionId: id, horizon: summary.horizon, expectedAccessEpoch: summary.accessEpoch };
     assert.equal((await app.request('/api/notifications/read', 'POST', objectRead, 'bob', 'object-view')).status, 200);
-    assert.deepEqual((await app.inbox('bob', '?filter=unread')).items.map(item => item.event.revisionId), [secondId]);
+    assert.deepEqual((await app.inbox('bob', '?filter=unread')).items.map(item => item.event.objectId), [secondId]);
     const oldCursor = (await app.inbox('bob', '?limit=1')).nextBefore!; app.policy(id, { interact: members(app.alice.id) });
     assert.equal((await app.request(`/api/notifications?before=${oldCursor}`)).status, 409);
     for (const suffix of ['?unknown=1', '?limit=1&limit=2', '?limit=101', '?limit=0', '?filter=unknown', '?before=', '/count?limit=1']) assert.equal((await app.request(`/api/notifications${suffix}`)).status, 400, suffix);
@@ -104,9 +104,9 @@ test('inbox rows and counts follow current revision, repository, historical File
     const bytes = await readFile(new URL('../tests/fixtures/docx/roundtrip.docx', import.meta.url));
     const upload = await app.request<FileRecord>('/api/files', 'POST', { name: 'Word notification source', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), dataBase64: bytes.toString('base64') }, 'alice', 'word-file'); assert.equal(upload.status, 201);
     const file = upload.body, imported = await app.request<RevisionDetail>('/api/revisions/docx', 'POST', { title: 'Word notification', testPlan: 'Read pages.', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: true, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'word-import'); assert.equal(imported.status, 201);
-    const word = imported.body.revision.id; await app.follow(word); await app.comment(word); assert.equal((await app.inbox()).items.find(row => row.event.revisionId === word)?.revision.kind, 'document');
+    const word = imported.body.revision.id; await app.follow(word); await app.comment(word); assert.equal((await app.inbox()).items.find(row => row.event.objectId === word)?.object.kind, 'document');
     const space = app.policies.createSpace({ name: 'Private File ceiling', view: members(app.alice.id), edit: members(app.alice.id) }, app.alice.id); app.policy(file.id, { spaceId: space.id });
-    assert.equal((await app.inbox()).items.some(row => row.event.revisionId === word), false); assert.equal((await app.summary()).unreadCount, 1);
+    assert.equal((await app.inbox()).items.some(row => row.event.objectId === word), false); assert.equal((await app.summary()).unreadCount, 1);
     app.policy(paper, { spaceId: space.id }); assert.equal((await app.summary()).unreadCount, 0);
   } finally { await app.close(); }
 });
@@ -175,7 +175,7 @@ test('revision API workflows publish one logical notification and exact retries 
     assert.equal((await app.request(`/api/revisions/${id}/threads/${thread.id}`, 'PATCH', { status: 'resolved', expectedThreadVersion: thread.version, versionId: comment.versionId }, 'alice', 'silent-resolution')).status, 200);
     const parent = app.revision().revision.id; assert.equal((await app.request(`/api/revisions/${id}/dependencies`, 'POST', { direction: 'parents', add: [parent], remove: [], expectedRelationshipVersion: app.store.revisionDependencies.version(id), expectedAccessEpoch: app.policies.epoch() }, 'alice', 'silent-dependency')).status, 200);
     assert.equal((await app.summary()).unreadCount, beforeSilent, 'thread resolution and dependency edits remain notification-silent');
-    assert.ok((await app.inbox()).items.every(item => item.revision.title === 'Renamed revision'), 'labels reflect current authorized metadata without rewriting events');
+    assert.ok((await app.inbox()).items.every(item => item.object.title === 'Renamed revision'), 'labels reflect current authorized metadata without rewriting events');
   } finally { await app.close(); }
 });
 

@@ -67,8 +67,8 @@ test('notification CLI preserves uncertain exact intentions, validates receipts,
 
 test('notification CLI rejects structurally valid pages with the wrong read filter or repeated cursor', async () => {
   const old = console.log; console.log = () => {};
-  const token = 'b'.repeat(720), event = { id: randomUUID(), revisionId: 'P1', kind: 'commented' as const, cause: { type: 'comment', id: randomUUID() }, actor: null, createdAt: '2026-10-11T00:00:00.000Z', head: null };
-  const page: NotificationInbox = { principalId: 'reader', items: [{ id: randomUUID(), event, revision: { id: 'P1', title: 'Source', kind: 'paper' }, read: true, version: 1 }], nextBefore: token, horizon: token, unreadCount: 0, readVersion: 1, accessEpoch: 2 };
+  const token = 'b'.repeat(720), event = { format: 'phabricator.notification-event.v2' as const, id: randomUUID(), objectId: 'P1', kind: 'commented' as const, cause: { type: 'comment', id: randomUUID() }, actor: null, createdAt: '2026-10-11T00:00:00.000Z', context: { kind: 'revision' as const, head: null } };
+  const page: NotificationInbox = { principalId: 'reader', items: [{ id: randomUUID(), event, object: { id: 'P1', title: 'Source', kind: 'paper' }, read: true, version: 1 }], nextBefore: token, horizon: token, unreadCount: 0, readVersion: 1, accessEpoch: 2 };
   const request = async <T>() => page as T;
   try {
     await assert.rejects(notificationsCommand({ command: 'notifications', args: [], options: { filter: 'unread' }, optionNames: ['filter'], download: async () => new Uint8Array(), request }), /does not match/);

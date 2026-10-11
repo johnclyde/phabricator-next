@@ -2,21 +2,27 @@ import { isRevisionId } from './revision-dependencies';
 import { isRevisionAuthor, isRevisionAuthorHead, isRevisionAuthorId } from './revision-authorship';
 import type { RevisionAuthor, RevisionAuthorHead } from './revision-authorship';
 
-export const NOTIFICATION_LIMITS = { page: 100, scan: 1000, unreadRevisions: 10000, readRows: 10000, recipients: 10000, projectRows: 20000 } as const;
-export const NOTIFICATION_KINDS = ['created', 'source_updated', 'commented', 'replied', 'suggestion_applied', 'review_completed', 'reviewers_changed', 'lifecycle_changed', 'author_changed', 'metadata_changed', 'projects_changed', 'subscribers_changed'] as const;
+export const NOTIFICATION_LIMITS = { page: 100, scan: 1000, unreadObjects: 10000, unreadRevisions: 10000, readRows: 10000, recipients: 10000, projectRows: 20000 } as const;
+export const REVISION_NOTIFICATION_KINDS = ['created', 'source_updated', 'commented', 'replied', 'suggestion_applied', 'review_completed', 'reviewers_changed', 'lifecycle_changed', 'author_changed', 'metadata_changed', 'projects_changed', 'subscribers_changed'] as const;
+export const TASK_NOTIFICATION_KINDS = ['created', 'task_updated', 'task_commented', 'task_owner_changed', 'task_projects_changed', 'task_subscribers_changed', 'task_dependencies_changed', 'task_subtask_status_changed', 'task_merged', 'task_column_changed'] as const;
+export const NOTIFICATION_KINDS = [...REVISION_NOTIFICATION_KINDS, ...TASK_NOTIFICATION_KINDS.filter(kind => kind !== 'created')] as const;
 export type NotificationKind = typeof NOTIFICATION_KINDS[number];
-export interface NotificationEvent { id: string; revisionId: string; kind: NotificationKind; cause: { type: string; id: string }; actor: RevisionAuthor | null; createdAt: string; head: RevisionAuthorHead | null }
-export interface NotificationItem { id: string; event: NotificationEvent; revision: { id: string; title: string; kind: 'code' | 'paper' | 'document' }; read: boolean; version: number }
+export type NotificationContext = { kind: 'revision'; head: RevisionAuthorHead | null } | { kind: 'task'; taskVersion: number };
+export interface NotificationEvent { format: 'phabricator.notification-event.v2'; id: string; objectId: string; kind: NotificationKind; cause: { type: string; id: string }; actor: RevisionAuthor | null; createdAt: string; context: NotificationContext }
+export interface LegacyNotificationEvent { id: string; revisionId: string; kind: NotificationKind; cause: { type: string; id: string }; actor: RevisionAuthor | null; createdAt: string; head: RevisionAuthorHead | null }
+export interface NotificationItem { id: string; event: NotificationEvent; object: { id: string; title: string; kind: 'task' | 'code' | 'paper' | 'document' }; read: boolean; version: number }
 export interface NotificationSummary { principalId: string; horizon: string; unreadCount: number; readVersion: number; accessEpoch: number }
 export interface NotificationInbox extends NotificationSummary { items: NotificationItem[]; nextBefore: string | null }
 export interface NotificationQuery { filter?: 'all' | 'unread' | 'read'; before?: string; limit?: number }
-export type NotificationInput = { action: 'read' | 'unread'; notificationId: string; expectedVersion: number; expectedAccessEpoch: number } | { action: 'read_through'; horizon: string; expectedAccessEpoch: number } | { action: 'read_object'; revisionId: string; horizon: string; expectedAccessEpoch: number };
+export type NotificationInput = { action: 'read' | 'unread'; notificationId: string; expectedVersion: number; expectedAccessEpoch: number } | { action: 'read_through'; horizon: string; expectedAccessEpoch: number } | { action: 'read_object'; revisionId: string; horizon: string; expectedAccessEpoch: number } | { action: 'read_object'; objectId: string; horizon: string; expectedAccessEpoch: number };
 export interface NotificationReceipt { operationId: string; inputSha256: string; changed: boolean; accessEpoch: number }
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const keys = (v: Record<string, unknown>, allowed: string[]) => Object.keys(v).length === allowed.length && Object.keys(v).every(k => allowed.includes(k));
 const natural = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
 const token = (v: unknown): v is string => typeof v === 'string' && v.length >= 32 && v.length <= 2048 && /^[A-Za-z0-9_-]+$/.test(v);
+export function isNotificationObjectId(value: unknown): value is string { return isRevisionId(value) || typeof value === 'string' && /^T[1-9]\d{0,14}$/.test(value); }
+export function notificationReadObjectId(input: Extract<NotificationInput, { action: 'read_object' }>): string { return 'objectId' in input ? input.objectId : input.revisionId; }
 export function notificationInput(value: unknown): NotificationInput {
   if (!object(value) || !natural(value.expectedAccessEpoch)) throw new Error('Provide the inspected notification and access epoch.');
   if (value.action === 'read' || value.action === 'unread') {
@@ -25,6 +31,7 @@ export function notificationInput(value: unknown): NotificationInput {
   }
   if (value.action === 'read_through' && keys(value, ['action', 'horizon', 'expectedAccessEpoch']) && token(value.horizon)) return { action: value.action, horizon: value.horizon, expectedAccessEpoch: value.expectedAccessEpoch };
   if (value.action === 'read_object' && keys(value, ['action', 'revisionId', 'horizon', 'expectedAccessEpoch']) && isRevisionId(value.revisionId) && token(value.horizon)) return { action: value.action, revisionId: value.revisionId, horizon: value.horizon, expectedAccessEpoch: value.expectedAccessEpoch };
+  if (value.action === 'read_object' && keys(value, ['action', 'objectId', 'horizon', 'expectedAccessEpoch']) && isNotificationObjectId(value.objectId) && token(value.horizon)) return { action: value.action, objectId: value.objectId, horizon: value.horizon, expectedAccessEpoch: value.expectedAccessEpoch };
   throw new Error('Choose a notification read action and its inspected boundary.');
 }
 export function notificationQuery(value: unknown): Required<Pick<NotificationQuery, 'filter' | 'limit'>> & Pick<NotificationQuery, 'before'> {
@@ -33,11 +40,31 @@ export function notificationQuery(value: unknown): Required<Pick<NotificationQue
   if (!['all', 'unread', 'read'].includes(String(filter)) || !natural(limit) || limit < 1 || limit > NOTIFICATION_LIMITS.page || value.before !== undefined && !token(value.before)) throw new Error('Choose valid notification pagination.');
   return { filter: filter as 'all' | 'unread' | 'read', limit, ...(value.before === undefined ? {} : { before: value.before as string }) };
 }
+function eventFields(v: Record<string, unknown>): boolean {
+  return uuid(v.id) && NOTIFICATION_KINDS.includes(v.kind as NotificationKind) && object(v.cause) && keys(v.cause, ['type', 'id']) && typeof v.cause.type === 'string' && /^[a-z_]{1,40}$/.test(v.cause.type) && typeof v.cause.id === 'string' && v.cause.id.length > 0 && v.cause.id.length <= 240 && !v.cause.id.includes('\0') && (v.actor === null || isRevisionAuthor(v.actor)) && typeof v.createdAt === 'string' && Number.isFinite(Date.parse(v.createdAt));
+}
 export function isNotificationEvent(v: unknown): v is NotificationEvent {
-  return object(v) && keys(v, ['id', 'revisionId', 'kind', 'cause', 'actor', 'createdAt', 'head']) && uuid(v.id) && isRevisionId(v.revisionId) && NOTIFICATION_KINDS.includes(v.kind as NotificationKind) && object(v.cause) && keys(v.cause, ['type', 'id']) && typeof v.cause.type === 'string' && /^[a-z_]{1,40}$/.test(v.cause.type) && typeof v.cause.id === 'string' && v.cause.id.length > 0 && v.cause.id.length <= 240 && !v.cause.id.includes('\0') && (v.actor === null || isRevisionAuthor(v.actor)) && typeof v.createdAt === 'string' && Number.isFinite(Date.parse(v.createdAt)) && (v.head === null || isRevisionAuthorHead(v.head));
+  if (!object(v) || !keys(v, ['format', 'id', 'objectId', 'kind', 'cause', 'actor', 'createdAt', 'context']) || v.format !== 'phabricator.notification-event.v2' || !eventFields(v) || !object(v.context)) return false;
+  return v.context.kind === 'revision' && keys(v.context, ['kind', 'head']) && isRevisionId(v.objectId) && REVISION_NOTIFICATION_KINDS.includes(v.kind as typeof REVISION_NOTIFICATION_KINDS[number]) && (v.context.head === null || isRevisionAuthorHead(v.context.head))
+    || v.context.kind === 'task' && keys(v.context, ['kind', 'taskVersion']) && isNotificationObjectId(v.objectId) && (v.objectId as string).startsWith('T') && TASK_NOTIFICATION_KINDS.includes(v.kind as typeof TASK_NOTIFICATION_KINDS[number]) && natural(v.context.taskVersion) && v.context.taskVersion > 0;
+}
+/** Read projection only: never rewrite legacy event evidence or request bodies. */
+export function notificationEvent(v: unknown): NotificationEvent | null {
+  if (isNotificationEvent(v)) return v;
+  if (!object(v) || !keys(v, ['id', 'revisionId', 'kind', 'cause', 'actor', 'createdAt', 'head']) || !eventFields(v) || !isRevisionId(v.revisionId) || !REVISION_NOTIFICATION_KINDS.includes(v.kind as typeof REVISION_NOTIFICATION_KINDS[number]) || !(v.head === null || isRevisionAuthorHead(v.head))) return null;
+  const legacy = v as unknown as LegacyNotificationEvent;
+  return { format: 'phabricator.notification-event.v2', id: legacy.id, objectId: legacy.revisionId, kind: legacy.kind, cause: legacy.cause, actor: legacy.actor, createdAt: legacy.createdAt, context: { kind: 'revision', head: legacy.head } };
 }
 export function isNotificationItem(v: unknown): v is NotificationItem {
-  return object(v) && keys(v, ['id', 'event', 'revision', 'read', 'version']) && uuid(v.id) && isNotificationEvent(v.event) && object(v.revision) && keys(v.revision, ['id', 'title', 'kind']) && v.revision.id === v.event.revisionId && typeof v.revision.title === 'string' && v.revision.title.length <= 1000 && !v.revision.title.includes('\0') && ['code', 'paper', 'document'].includes(String(v.revision.kind)) && typeof v.read === 'boolean' && natural(v.version) && (v.version !== 0 || v.read === false);
+  return object(v) && keys(v, ['id', 'event', 'object', 'read', 'version']) && uuid(v.id) && isNotificationEvent(v.event) && object(v.object) && keys(v.object, ['id', 'title', 'kind']) && v.object.id === v.event.objectId && typeof v.object.title === 'string' && v.object.title.length <= 1000 && !v.object.title.includes('\0') && (v.event.context.kind === 'task' ? v.object.kind === 'task' : ['code', 'paper', 'document'].includes(String(v.object.kind))) && typeof v.read === 'boolean' && natural(v.version) && (v.version !== 0 || v.read === false);
+}
+/** Upgrade a validated schema31 offline item without changing its identity. */
+export function notificationItem(v: unknown): NotificationItem | null {
+  if (isNotificationItem(v)) return v;
+  if (!object(v) || !keys(v, ['id', 'event', 'revision', 'read', 'version']) || !object(v.event) || 'format' in v.event) return null;
+  const event = notificationEvent(v.event);
+  const result = { id: v.id, event, object: v.revision, read: v.read, version: v.version };
+  return isNotificationItem(result) ? result : null;
 }
 function summary(v: Record<string, unknown>, principalId?: string): boolean { return isRevisionAuthorId(v.principalId) && (principalId === undefined || v.principalId === principalId) && token(v.horizon) && natural(v.unreadCount) && natural(v.readVersion) && natural(v.accessEpoch); }
 export function isNotificationSummary(v: unknown, principalId?: string): v is NotificationSummary { return object(v) && keys(v, ['principalId', 'horizon', 'unreadCount', 'readVersion', 'accessEpoch']) && summary(v, principalId); }

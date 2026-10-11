@@ -6,18 +6,21 @@ import type { RevisionAuthorHead } from '../shared/revision-authorship.ts';
 import { isRevisionAuthorId } from '../shared/revision-authorship.ts';
 import { isRevisionId } from '../shared/revision-dependencies.ts';
 import { isRevisionMetadataAttribution } from '../shared/revision-metadata.ts';
-import { NOTIFICATION_LIMITS, isNotificationEvent, isNotificationItem, notificationInput, notificationQuery, validNotificationResult } from '../shared/notifications.ts';
-import type { NotificationEvent, NotificationInbox, NotificationInput, NotificationItem, NotificationKind, NotificationQuery, NotificationReceipt, NotificationSummary } from '../shared/notifications.ts';
+import { NOTIFICATION_LIMITS, isNotificationEvent, isNotificationItem, isNotificationObjectId, notificationEvent, notificationInput, notificationQuery, notificationReadObjectId, validNotificationResult } from '../shared/notifications.ts';
+import type { NotificationContext, NotificationEvent, NotificationInbox, NotificationInput, NotificationItem, NotificationKind, NotificationQuery, NotificationReceipt, NotificationSummary } from '../shared/notifications.ts';
 import { HttpError } from './validation.ts';
 
-export interface NotificationCause { revisionId: string; kind: NotificationKind; cause: { type: string; id: string }; attribution?: ActorAttribution; createdAt?: string; head?: RevisionAuthorHead }
+interface CauseFields { requireActorView?: boolean; kind: NotificationKind; cause: { type: string; id: string }; attribution?: ActorAttribution; createdAt?: string }
+export type NotificationCause = CauseFields & ({ revisionId: string; head?: RevisionAuthorHead } | { objectId: string; context?: { kind: 'task'; taskVersion: number } });
+interface CapturedCause extends CauseFields { objectId: string; context: NotificationContext }
 export type NotificationPublisher = (cause: NotificationCause) => void;
-export interface NotificationEligibility { eligible: (principalId: string) => boolean; canView: (revisionId: string, principalId: string) => boolean }
-interface Options { revision: (id: string) => { title: string; kind: NotificationItem['revision']['kind']; head: RevisionAuthorHead; broadcast: boolean }; recipients: (id: string) => { recipients: string[]; muted: string[] } }
+export interface NotificationEligibility { eligible: (principalId: string) => boolean; canView: (objectId: string, principalId: string) => boolean }
+interface Options { revision: (id: string) => { title: string; kind: 'code' | 'paper' | 'document'; head: RevisionAuthorHead; broadcast: boolean }; task?: (id: string) => { title: string; version: number }; recipients: (id: string) => { recipients: string[]; muted: string[] } }
 interface Delivery { id: string; sequence: number; event_id: string; principal_id: string; revision_id: string; read: number; version: number }
 interface ReadState { read: boolean; version: number }
-interface Effect { id: string; revisionId: string; before: ReadState; after: ReadState }
-export interface NotificationOperation { id: string; principalId: string; input: NotificationInput; inputSha256: string; retryKeySha256: string | null; attribution: ActorAttribution; beforeReadVersion: number; afterReadVersion: number; affected: Effect[]; affectedRevisionIds: string[]; createdAt: string; receipt: NotificationReceipt }
+interface Effect { id: string; objectId: string; before: ReadState; after: ReadState }
+export interface NotificationOperation { format: 'phabricator.notification-operation.v2'; id: string; principalId: string; input: NotificationInput; inputSha256: string; retryKeySha256: string | null; attribution: ActorAttribution; beforeReadVersion: number; afterReadVersion: number; affected: Effect[]; affectedObjectIds: string[]; createdAt: string; receipt: NotificationReceipt }
+interface LegacyNotificationOperation extends Omit<NotificationOperation, 'format' | 'affected' | 'affectedObjectIds'> { affected: { id: string; revisionId: string; before: ReadState; after: ReadState }[]; affectedRevisionIds: string[] }
 interface Boundary { kind: 'horizon' | 'cursor'; principalId: string; epoch: number; high: number; filter?: string; before?: number; readVersion?: number }
 const natural = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
@@ -33,6 +36,9 @@ export function notificationInputHash(input: NotificationInput): string { return
 let serial = 0;
 function scope<T>(db: DatabaseSync, work: () => T, write = false): T { const name = `notifications_${++serial}`; db.exec(`SAVEPOINT ${name}`); try { if (write) db.exec('UPDATE notification_read_state SET version=version WHERE 0'); const result = work(); db.exec(`RELEASE ${name}`); return result; } catch (error) { db.exec(`ROLLBACK TO ${name}; RELEASE ${name}`); throw error; } }
 export function initializeNotifications(db: DatabaseSync): void { initializeNotificationSchema(db, true); }
+/** Schema32 fences old binaries. The existing entity FK already accepts tasks;
+ * retaining the historical column name preserves all schema31 evidence bytes. */
+export function initializeNotificationTargets(db: DatabaseSync): void { initializeNotifications(db); }
 function initializeNotificationSchema(db: DatabaseSync, verifyExisting: boolean): void {
   scope(db, () => {
     if (verifyExisting) {
@@ -69,26 +75,38 @@ function initializeNotificationSchema(db: DatabaseSync, verifyExisting: boolean)
  * Store scope flushes after final creation policy configuration, before commit. */
 export class NotificationStore {
   private eligibility: NotificationEligibility | null = null;
-  private queues: NotificationCause[][] = [];
+  private queues: CapturedCause[][] = [];
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {}
   configure(eligibility: NotificationEligibility): void { if (this.eligibility) throw new Error('Notification eligibility is already configured.'); this.eligibility = eligibility; }
-  batch<T>(work: () => T): T { const queue: NotificationCause[] = []; this.queues.push(queue); try { const result = work(); this.queues.pop(); const parent = this.queues.at(-1); if (parent) parent.push(...queue); else for (const cause of queue) this.publish(cause); return result; } catch (error) { if (this.queues.at(-1) === queue) this.queues.pop(); throw error; } }
+  batch<T>(work: () => T): T { const queue: CapturedCause[] = []; this.queues.push(queue); try { const result = work(); this.queues.pop(); const parent = this.queues.at(-1); if (parent) parent.push(...queue); else for (const cause of queue) this.publish(cause); return result; } catch (error) { if (this.queues.at(-1) === queue) this.queues.pop(); throw error; } }
   flush(): void { const queue = this.queues.at(-1); if (queue) for (const cause of queue.splice(0)) this.publish(cause); }
-  emit: NotificationPublisher = cause => { if (!this.eligibility) return; const revision = this.options.revision(cause.revisionId); if (!revision.broadcast) return; const captured = { ...cause, head: cause.head ?? revision.head, createdAt: cause.createdAt ?? new Date().toISOString() }; const queue = this.queues.at(-1); if (queue) queue.push(captured); else this.publish(captured); };
+  private target(id: string): { object: NotificationItem['object']; context: NotificationContext; broadcast: boolean } {
+    if (isRevisionId(id)) { const revision = this.options.revision(id); return { object: { id, title: revision.title, kind: revision.kind }, context: { kind: 'revision', head: revision.head }, broadcast: revision.broadcast }; }
+    if (!isNotificationObjectId(id) || !this.options.task) throw unavailable();
+    const task = this.options.task(id); if (!natural(task.version) || task.version < 1) throw invalid();
+    return { object: { id, title: task.title, kind: 'task' }, context: { kind: 'task', taskVersion: task.version }, broadcast: true };
+  }
+  emit: NotificationPublisher = cause => {
+    if (!this.eligibility) return;
+    const objectId = 'revisionId' in cause ? cause.revisionId : cause.objectId, target = this.target(objectId);
+    if (!target.broadcast) return;
+    const context = 'revisionId' in cause ? { kind: 'revision' as const, head: cause.head ?? (target.context.kind === 'revision' ? target.context.head : null) } : cause.context ?? target.context;
+    const captured: CapturedCause = { objectId, ...(cause.requireActorView ? { requireActorView: true } : {}), kind: cause.kind, cause: { ...cause.cause }, ...(cause.attribution ? { attribution: { ...cause.attribution } } : {}), context, createdAt: cause.createdAt ?? new Date().toISOString() };
+    const queue = this.queues.at(-1); if (queue) queue.push(captured); else this.publish(captured);
+  };
   /** Suppress a nested source event when a suggestion supplies its own cause. */
   discard(causeType: string, causeId: string): void { for (const queue of this.queues) for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.cause.type === causeType && queue[i]!.cause.id === causeId) queue.splice(i, 1); }
   private epoch(): number { const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get() as { value: number }).value; if (!natural(epoch)) throw invalid(); return epoch; }
   private person(id: string): void { if (!isRevisionAuthorId(id) || !this.eligibility?.eligible(id)) throw unavailable(); }
   private visible(id: string, principalId: string): boolean { return !!this.eligibility?.eligible(principalId) && this.eligibility.canView(id, principalId); }
-  private publish(cause: NotificationCause): void {
-    if (!this.eligibility) return;
-    const revision = this.options.revision(cause.revisionId); if (!revision.broadcast) return;
-    if (this.database.prepare('SELECT 1 FROM notification_events WHERE revision_id=? AND cause_type=? AND cause_id=?').get(cause.revisionId, cause.cause.type, cause.cause.id)) return;
-    const event: NotificationEvent = { id: randomUUID(), revisionId: cause.revisionId, kind: cause.kind, cause: { ...cause.cause }, actor: cause.attribution ? { principalId: cause.attribution.principalId, displayName: cause.attribution.displayName } : null, createdAt: cause.createdAt ?? new Date().toISOString(), head: cause.head ?? revision.head };
+  private publish(cause: CapturedCause): void {
+    if (!this.eligibility || !this.target(cause.objectId).broadcast || cause.requireActorView && (!cause.attribution || !this.visible(cause.objectId, cause.attribution.principalId))) return;
+    if (this.database.prepare('SELECT 1 FROM notification_events WHERE revision_id=? AND cause_type=? AND cause_id=?').get(cause.objectId, cause.cause.type, cause.cause.id)) return;
+    const event: NotificationEvent = { format: 'phabricator.notification-event.v2', id: randomUUID(), objectId: cause.objectId, kind: cause.kind, cause: { ...cause.cause }, actor: cause.attribution ? { principalId: cause.attribution.principalId, displayName: cause.attribution.displayName } : null, createdAt: cause.createdAt ?? new Date().toISOString(), context: cause.context };
     if (!isNotificationEvent(event)) throw invalid();
-    const preferences = this.options.recipients(cause.revisionId), muted = new Set(preferences.muted), candidates = [...new Set(preferences.recipients)]; if (candidates.length > NOTIFICATION_LIMITS.recipients) throw limited();
-    const recipients = candidates.filter(id => id !== event.actor?.principalId && !muted.has(id) && this.visible(cause.revisionId, id));
-    this.database.prepare('INSERT INTO notification_events(id,revision_id,cause_type,cause_id,data) VALUES(?,?,?,?,?)').run(event.id, event.revisionId, event.cause.type, event.cause.id, JSON.stringify(event));
+    const preferences = this.options.recipients(cause.objectId), muted = new Set(preferences.muted), candidates = [...new Set(preferences.recipients)]; if (candidates.length > NOTIFICATION_LIMITS.recipients) throw limited();
+    const recipients = candidates.filter(id => id !== event.actor?.principalId && !muted.has(id) && this.visible(cause.objectId, id));
+    this.database.prepare('INSERT INTO notification_events(id,revision_id,cause_type,cause_id,data) VALUES(?,?,?,?,?)').run(event.id, event.objectId, event.cause.type, event.cause.id, JSON.stringify(event));
     for (const principalId of recipients) this.database.prepare('INSERT INTO notification_deliveries(id,event_id,principal_id,read,version) VALUES(?,?,?,0,0)').run(randomUUID(), event.id, principalId);
   }
   private secret(): Buffer { const row = this.database.prepare('SELECT secret FROM notification_cursor_secret WHERE id=1').get() as { secret: Uint8Array } | undefined; if (!row || row.secret.byteLength !== 32) throw invalid(); return Buffer.from(row.secret); }
@@ -99,14 +117,16 @@ export class NotificationStore {
   private high(principalId: string): number { return (this.database.prepare('SELECT coalesce(max(sequence),0) AS high FROM notification_deliveries WHERE principal_id=?').get(principalId) as { high: number }).high; }
   private generation(principalId: string): number { const row = this.database.prepare('SELECT version FROM notification_read_state WHERE principal_id=?').get(principalId) as { version: number } | undefined; const result = row?.version ?? 0, last = (this.database.prepare('SELECT coalesce(max(after_version),0) AS version FROM notification_operations WHERE principal_id=?').get(principalId) as { version: number }).version; if (!natural(result) || result !== last) throw invalid(); return result; }
   private unread(principalId: string, view: Map<string, boolean>): number {
-    const rows = this.database.prepare('SELECT e.revision_id,count(*) AS count FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.read=0 GROUP BY e.revision_id LIMIT ?').all(principalId, NOTIFICATION_LIMITS.unreadRevisions + 1) as { revision_id: string; count: number }[];
-    if (rows.length > NOTIFICATION_LIMITS.unreadRevisions) throw limited(); let count = 0;
+    const rows = this.database.prepare('SELECT e.revision_id,count(*) AS count FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.read=0 GROUP BY e.revision_id LIMIT ?').all(principalId, NOTIFICATION_LIMITS.unreadObjects + 1) as { revision_id: string; count: number }[];
+    if (rows.length > NOTIFICATION_LIMITS.unreadObjects) throw limited(); let count = 0;
     for (const row of rows) { if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id)) count += row.count; }
     if (!natural(count)) throw limited(); return count;
   }
   summary(principalId: string, accessEpoch: number): NotificationSummary { return scope(this.database, () => { this.person(principalId); if (accessEpoch !== this.epoch()) throw changed(); return { principalId, horizon: this.seal({ kind: 'horizon', principalId, epoch: accessEpoch, high: this.high(principalId) }), unreadCount: this.unread(principalId, new Map()), readVersion: this.generation(principalId), accessEpoch }; }); }
-  private delivery(id: string, principalId: string): Delivery { if (!uuid(id)) throw unavailable(); const row = this.database.prepare('SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.id=? AND d.principal_id=?').get(id, principalId) as unknown as Delivery | undefined; if (!row || !isRevisionId(row.revision_id)) throw unavailable(); return row; }
-  notificationRevisionId(principalId: string, id: string): string { this.person(principalId); return this.delivery(id, principalId).revision_id; }
+  private delivery(id: string, principalId: string): Delivery { if (!uuid(id)) throw unavailable(); const row = this.database.prepare('SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.id=? AND d.principal_id=?').get(id, principalId) as unknown as Delivery | undefined; if (!row || !isNotificationObjectId(row.revision_id)) throw unavailable(); return row; }
+  notificationObjectId(principalId: string, id: string): string { this.person(principalId); return this.delivery(id, principalId).revision_id; }
+  /** Legacy internal name retained for callers during the generic-target upgrade. */
+  notificationRevisionId(principalId: string, id: string): string { return this.notificationObjectId(principalId, id); }
   private readAt(row: Delivery, version = row.version): ReadState {
     if (!natural(version) || version > row.version) throw invalid(); if (version === 0) return { read: false, version: 0 };
     const state = this.database.prepare('SELECT before_read,after_read FROM notification_read_changes WHERE notification_id=? AND version=?').get(row.id, version) as { before_read: number; after_read: number } | undefined;
@@ -115,7 +135,7 @@ export class NotificationStore {
     return { read: !!state.after_read, version };
   }
   private readCurrent(row: Delivery): ReadState { const state = this.readAt(row); if (Number(state.read) !== row.read) throw invalid(); const latest = (this.database.prepare('SELECT coalesce(max(version),0) AS version FROM notification_read_changes WHERE notification_id=?').get(row.id) as { version: number }).version; if (latest !== row.version) throw invalid(); return state; }
-  private item(row: Delivery): NotificationItem { const stored = this.database.prepare('SELECT data,cause_type,cause_id FROM notification_events WHERE id=?').get(row.event_id) as { data: string; cause_type: string; cause_id: string }; const event = decode<NotificationEvent>(stored.data); if (!isNotificationEvent(event) || event.id !== row.event_id || event.revisionId !== row.revision_id || event.cause.type !== stored.cause_type || event.cause.id !== stored.cause_id) throw invalid(); const revision = this.options.revision(row.revision_id), result: NotificationItem = { id: row.id, event, revision: { id: row.revision_id, title: revision.title, kind: revision.kind }, ...this.readCurrent(row) }; if (!isNotificationItem(result)) throw invalid(); return result; }
+  private item(row: Delivery): NotificationItem { const stored = this.database.prepare('SELECT data,cause_type,cause_id FROM notification_events WHERE id=?').get(row.event_id) as { data: string; cause_type: string; cause_id: string }; const event = notificationEvent(decode<unknown>(stored.data)); if (!event || event.id !== row.event_id || event.objectId !== row.revision_id || event.cause.type !== stored.cause_type || event.cause.id !== stored.cause_id) throw invalid(); const result: NotificationItem = { id: row.id, event, object: this.target(row.revision_id).object, ...this.readCurrent(row) }; if (!isNotificationItem(result)) throw invalid(); return result; }
   list(principalId: string, input: NotificationQuery = {}, accessEpoch: number): NotificationInbox {
     return scope(this.database, () => {
       this.person(principalId); if (accessEpoch !== this.epoch()) throw changed(); let query: ReturnType<typeof notificationQuery>; try { query = notificationQuery(input); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid inbox query.'); }
@@ -139,16 +159,16 @@ export class NotificationStore {
       this.person(principalId); const epoch = this.epoch(); if (request.expectedAccessEpoch !== epoch) throw changed(); const rows: Delivery[] = [], view = new Map<string, boolean>();
       if (request.action === 'read' || request.action === 'unread') { const row = this.delivery(request.notificationId, principalId); if (!this.visible(row.revision_id, principalId)) throw unavailable(); if (this.readCurrent(row).version !== request.expectedVersion) throw changed(); rows.push(row); }
       else {
-        if (request.action === 'read_object' && !this.visible(request.revisionId, principalId)) throw unavailable();
+        if (request.action === 'read_object' && !this.visible(notificationReadObjectId(request), principalId)) throw unavailable();
         const boundary = this.unseal(('horizon' in request ? request.horizon : ''), 'horizon', principalId, epoch);
-        const candidates = this.database.prepare(`SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.sequence<=? AND d.read=0${request.action === 'read_object' ? ' AND e.revision_id=?' : ''} ORDER BY d.sequence LIMIT ?`).all(principalId, boundary.high, ...(request.action === 'read_object' ? [request.revisionId] : []), NOTIFICATION_LIMITS.readRows + 1) as unknown as Delivery[];
+        const candidates = this.database.prepare(`SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.sequence<=? AND d.read=0${request.action === 'read_object' ? ' AND e.revision_id=?' : ''} ORDER BY d.sequence LIMIT ?`).all(principalId, boundary.high, ...(request.action === 'read_object' ? [notificationReadObjectId(request)] : []), NOTIFICATION_LIMITS.readRows + 1) as unknown as Delivery[];
         if (candidates.length > NOTIFICATION_LIMITS.readRows) throw limited();
         for (const row of candidates) { if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id)) rows.push(row); }
       }
-      const affected = rows.map(row => { const before = this.readCurrent(row), desired = request.action !== 'unread'; return { id: row.id, revisionId: row.revision_id, before, after: { read: desired, version: before.version + Number(before.read !== desired) } }; });
+      const affected = rows.map(row => { const before = this.readCurrent(row), desired = request.action !== 'unread'; return { id: row.id, objectId: row.revision_id, before, after: { read: desired, version: before.version + Number(before.read !== desired) } }; });
       const changedValue = affected.some(row => row.before.read !== row.after.read), beforeReadVersion = this.generation(principalId), afterReadVersion = beforeReadVersion + Number(changedValue); if (!natural(afterReadVersion) || affected.some(row => !natural(row.after.version))) throw limited();
       const operationId = randomUUID(), inputSha256 = notificationInputHash(request), receipt: NotificationReceipt = { operationId, inputSha256, changed: changedValue, accessEpoch: epoch };
-      const operation: NotificationOperation = { id: operationId, principalId, input: request, inputSha256, retryKeySha256, attribution: { ...actor }, beforeReadVersion, afterReadVersion, affected, affectedRevisionIds: [...new Set([...affected.map(row => row.revisionId), ...(request.action === 'read_object' ? [request.revisionId] : [])])].sort(), createdAt: new Date().toISOString(), receipt };
+      const operation: NotificationOperation = { format: 'phabricator.notification-operation.v2', id: operationId, principalId, input: request, inputSha256, retryKeySha256, attribution: { ...actor }, beforeReadVersion, afterReadVersion, affected, affectedObjectIds: [...new Set([...affected.map(row => row.objectId), ...(request.action === 'read_object' ? [notificationReadObjectId(request)] : [])])].sort(), createdAt: new Date().toISOString(), receipt };
       this.database.prepare('INSERT INTO notification_operations(id,principal_id,input_sha256,before_version,after_version,data) VALUES(?,?,?,?,?,?)').run(operationId, principalId, inputSha256, beforeReadVersion, afterReadVersion, JSON.stringify(operation));
       for (const row of affected) if (row.before.read !== row.after.read) { this.database.prepare('INSERT INTO notification_read_changes(notification_id,version,operation_id,before_read,after_read) VALUES(?,?,?,?,?)').run(row.id, row.after.version, operationId, Number(row.before.read), Number(row.after.read)); this.database.prepare('UPDATE notification_deliveries SET read=?,version=? WHERE id=?').run(Number(row.after.read), row.after.version, row.id); }
       if (changedValue) this.database.prepare('INSERT INTO notification_read_state(principal_id,version) VALUES(?,?) ON CONFLICT(principal_id) DO UPDATE SET version=excluded.version').run(principalId, afterReadVersion);
@@ -158,21 +178,28 @@ export class NotificationStore {
   operationPrincipalId(id: string): string { if (!uuid(id)) throw invalid(); const row = this.database.prepare('SELECT principal_id FROM notification_operations WHERE id=?').get(id) as { principal_id: string } | undefined; if (!row || !isRevisionAuthorId(row.principal_id)) throw invalid(); return row.principal_id; }
   operation(id: string): NotificationOperation {
     return scope(this.database, () => {
-      const principalId = this.operationPrincipalId(id), row = this.database.prepare('SELECT rowid,input_sha256,before_version,after_version,data FROM notification_operations WHERE id=?').get(id) as { rowid: number; input_sha256: string; before_version: number; after_version: number; data: string }; const op = decode<NotificationOperation>(row.data);
+      const principalId = this.operationPrincipalId(id), row = this.database.prepare('SELECT rowid,input_sha256,before_version,after_version,data FROM notification_operations WHERE id=?').get(id) as { rowid: number; input_sha256: string; before_version: number; after_version: number; data: string }; const raw = decode<NotificationOperation | LegacyNotificationOperation>(row.data);
       try {
-        const input = parse(op.input); if (!op || Object.keys(op).sort().join(',') !== ['id','principalId','input','inputSha256','retryKeySha256','attribution','beforeReadVersion','afterReadVersion','affected','affectedRevisionIds','createdAt','receipt'].sort().join(',') || op.beforeReadVersion !== row.before_version || op.afterReadVersion !== row.after_version || op.beforeReadVersion !== (this.database.prepare('SELECT coalesce(max(after_version),0) AS version FROM notification_operations WHERE principal_id=? AND rowid<?').get(principalId,row.rowid) as {version:number}).version || op.id !== id || op.principalId !== principalId || !isDeepStrictEqual(input, op.input) || op.inputSha256 !== row.input_sha256 || op.inputSha256 !== notificationInputHash(input) || op.retryKeySha256 !== null && !digest(op.retryKeySha256) || !isRevisionMetadataAttribution(op.attribution) || op.attribution.principalId !== principalId || !Number.isFinite(Date.parse(op.createdAt)) || !Array.isArray(op.affected) || op.affected.length > NOTIFICATION_LIMITS.readRows || new Set(op.affected.map(e => e.id)).size !== op.affected.length || !natural(op.beforeReadVersion) || !natural(op.afterReadVersion)) throw invalid();
+        if (!raw || typeof raw !== 'object' || !Array.isArray(raw.affected)) throw invalid();
+        const legacy = !('format' in raw);
+        const wanted = ['id','principalId','input','inputSha256','retryKeySha256','attribution','beforeReadVersion','afterReadVersion','affected','createdAt','receipt', ...(legacy ? ['affectedRevisionIds'] : ['format','affectedObjectIds'])];
+        if (Object.keys(raw).sort().join(',') !== wanted.sort().join(',') || !legacy && raw.format !== 'phabricator.notification-operation.v2') throw invalid();
+        if (legacy && (raw.input.action === 'read_object' && 'objectId' in raw.input || !Array.isArray(raw.affectedRevisionIds) || !raw.affectedRevisionIds.every(isRevisionId))) throw invalid();
+        for (const effect of raw.affected) if (!effect || Object.keys(effect).sort().join(',') !== (legacy ? 'after,before,id,revisionId' : 'after,before,id,objectId') || legacy && !isRevisionId((effect as LegacyNotificationOperation['affected'][number]).revisionId)) throw invalid();
+        const op: NotificationOperation = legacy ? { format: 'phabricator.notification-operation.v2', id: raw.id, principalId: raw.principalId, input: raw.input, inputSha256: raw.inputSha256, retryKeySha256: raw.retryKeySha256, attribution: raw.attribution, beforeReadVersion: raw.beforeReadVersion, afterReadVersion: raw.afterReadVersion, affected: raw.affected.map(effect => ({ id: effect.id, objectId: effect.revisionId, before: effect.before, after: effect.after })), affectedObjectIds: raw.affectedRevisionIds, createdAt: raw.createdAt, receipt: raw.receipt } : raw;
+        const input = parse(op.input); if ( op.beforeReadVersion !== row.before_version || op.afterReadVersion !== row.after_version || op.beforeReadVersion !== (this.database.prepare('SELECT coalesce(max(after_version),0) AS version FROM notification_operations WHERE principal_id=? AND rowid<?').get(principalId,row.rowid) as {version:number}).version || op.id !== id || op.principalId !== principalId || !isDeepStrictEqual(input, op.input) || op.inputSha256 !== row.input_sha256 || op.inputSha256 !== notificationInputHash(input) || op.retryKeySha256 !== null && !digest(op.retryKeySha256) || !isRevisionMetadataAttribution(op.attribution) || op.attribution.principalId !== principalId || !Number.isFinite(Date.parse(op.createdAt)) || !Array.isArray(op.affected) || op.affected.length > NOTIFICATION_LIMITS.readRows || new Set(op.affected.map(e => e.id)).size !== op.affected.length || !natural(op.beforeReadVersion) || !natural(op.afterReadVersion)) throw invalid();
         let didChange = false; const expectedChanges = [];
         for (const effect of op.affected) {
-          if (!effect || Object.keys(effect).sort().join(',') !== 'after,before,id,revisionId' || !effect.before || !effect.after || Object.keys(effect.before).sort().join(',') !== 'read,version' || Object.keys(effect.after).sort().join(',') !== 'read,version') throw invalid();
+          if (!effect || Object.keys(effect).sort().join(',') !== 'after,before,id,objectId' || !effect.before || !effect.after || Object.keys(effect.before).sort().join(',') !== 'read,version' || Object.keys(effect.after).sort().join(',') !== 'read,version') throw invalid();
           const delivery = this.delivery(effect.id, principalId), before = this.readAt(delivery, effect.before.version), desired = input.action !== 'unread', after = { read: desired, version: before.version + Number(before.read !== desired) };
-          if (effect.revisionId !== delivery.revision_id || !isDeepStrictEqual(before, effect.before) || !isDeepStrictEqual(after, effect.after) || input.action === 'read_object' && effect.revisionId !== input.revisionId) throw invalid();
+          if (effect.objectId !== delivery.revision_id || !isDeepStrictEqual(before, effect.before) || !isDeepStrictEqual(after, effect.after) || input.action === 'read_object' && effect.objectId !== notificationReadObjectId(input)) throw invalid();
           if (before.read !== desired) { didChange = true; expectedChanges.push({ notification_id: effect.id, version: after.version, before_read: Number(before.read), after_read: Number(desired) }); }
         }
         if (input.action === 'read' || input.action === 'unread') { if (op.affected.length !== 1 || op.affected[0]!.id !== input.notificationId || op.affected[0]!.before.version !== input.expectedVersion) throw invalid(); }
         else { const horizon = this.unseal(('horizon' in input ? input.horizon : ''), 'horizon', principalId, input.expectedAccessEpoch); if (op.affected.some(effect => effect.before.read || this.delivery(effect.id, principalId).sequence > horizon.high)) throw invalid(); }
         const changes = this.database.prepare('SELECT notification_id,version,before_read,after_read FROM notification_read_changes WHERE operation_id=? ORDER BY notification_id').all(id);
         expectedChanges.sort((a, b) => a.notification_id.localeCompare(b.notification_id));
-        if (!isDeepStrictEqual(JSON.parse(JSON.stringify(changes)), expectedChanges) || op.afterReadVersion !== op.beforeReadVersion + Number(didChange) || op.afterReadVersion > this.generation(principalId) || !isDeepStrictEqual(op.affectedRevisionIds, [...new Set([...op.affected.map(e => e.revisionId), ...(input.action === 'read_object' ? [input.revisionId] : [])])].sort()) || !validNotificationResult(op.receipt) || !isDeepStrictEqual(op.receipt, { operationId: id, inputSha256: op.inputSha256, changed: didChange, accessEpoch: input.expectedAccessEpoch })) throw invalid();
+        if (!isDeepStrictEqual(JSON.parse(JSON.stringify(changes)), expectedChanges) || op.afterReadVersion !== op.beforeReadVersion + Number(didChange) || op.afterReadVersion > this.generation(principalId) || !isDeepStrictEqual(op.affectedObjectIds, [...new Set([...op.affected.map(e => e.objectId), ...(input.action === 'read_object' ? [notificationReadObjectId(input)] : [])])].sort()) || !validNotificationResult(op.receipt) || !isDeepStrictEqual(op.receipt, { operationId: id, inputSha256: op.inputSha256, changed: didChange, accessEpoch: input.expectedAccessEpoch })) throw invalid();
         return op;
       } catch (error) { if (error instanceof HttpError && error.code === 'NOTIFICATION_INVALID_RECEIPT') throw error; throw invalid(); }
     });

@@ -14,6 +14,8 @@ import { revisionMetadataInputHash } from './revision-metadata.ts';
 import { revisionProjectInputHash } from './revision-projects.ts';
 import type { RevisionProjectInput, RevisionProjectSnapshot, RevisionProjectHistory } from '../shared/revision-projects.ts';
 import type { NotificationReadInput, NotificationInbox, NotificationSummary } from '../shared/notifications.ts';
+import { notificationReadObjectId } from '../shared/notifications.ts';
+import type { TaskMuteInput, TaskMuteSnapshot, TaskMuteHistory } from '../shared/task-notifications.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -77,12 +79,28 @@ export class AccessLayer {
     return this.store.notifications.list(this.principal, query, this.policies.epoch());
   }
   notificationSummary(): NotificationSummary { return this.store.notifications.summary(this.principal, this.policies.epoch()); }
-  private requireNotificationRevision(id: string): void {
+  taskMute(id: string): TaskMuteSnapshot { this.require(id); return { ...this.store.taskNotifications.snapshot(id, this.principal), accessEpoch: this.policies.epoch() }; }
+  taskMuteHistory(id: string, query: { before?: number; limit?: number; expectedMuteVersion?: number }): TaskMuteHistory { this.require(id); return { ...this.store.taskNotifications.history(id, this.principal, query), accessEpoch: this.policies.epoch() }; }
+  presentTaskMute(id: string, input: TaskMuteInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
+    this.require(id);
+    const invalid = (): never => { throw new HttpError(409, 'This saved task mute receipt does not match the requested operation.', 'TASK_MUTE_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.taskId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.taskNotifications.operationPrincipalId(body.operationId) !== this.principal || this.store.taskNotifications.operationTaskId(body.operationId) !== id) return invalid();
+      operation = this.store.taskNotifications.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.taskId !== id || operation.principalId !== this.principal || operation.attribution.principalId !== this.principal || operation.retryKeySha256 !== retryKeySha256
+      || operation.inputSha256 !== createHash('sha256').update(JSON.stringify(input)).digest('hex') || !isDeepStrictEqual(operation.input, input) || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
+  }
+  private requireNotificationObject(id: string): void {
     if (!this.canView(id)) throw new HttpError(404, 'Notification is unavailable.', 'NOTIFICATION_UNAVAILABLE');
   }
   requireNotificationAction(input: NotificationReadInput): void {
-    if (input.action === 'read' || input.action === 'unread') this.requireNotificationRevision(this.store.notifications.notificationRevisionId(this.principal, input.notificationId));
-    else if (input.action === 'read_object') this.requireNotificationRevision(input.revisionId);
+    if (input.action === 'read' || input.action === 'unread') this.requireNotificationObject(this.store.notifications.notificationObjectId(this.principal, input.notificationId));
+    else if (input.action === 'read_object') this.requireNotificationObject(notificationReadObjectId(input));
   }
   presentNotificationRead(input: NotificationReadInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
     this.requireNotificationAction(input);
@@ -96,7 +114,7 @@ export class AccessLayer {
     } catch { return invalid(); }
     if (operation.principalId !== this.principal || operation.attribution.principalId !== this.principal || operation.retryKeySha256 !== retryKeySha256
       || operation.inputSha256 !== createHash('sha256').update(JSON.stringify(input)).digest('hex') || !isDeepStrictEqual(operation.input, input) || !isDeepStrictEqual(body, operation.receipt)) return invalid();
-    for (const id of operation.affectedRevisionIds) this.requireNotificationRevision(id);
+    for (const id of operation.affectedObjectIds) this.requireNotificationObject(id);
     return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionProjects(id: string): RevisionProjectSnapshot {

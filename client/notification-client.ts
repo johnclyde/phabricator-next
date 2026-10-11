@@ -1,9 +1,10 @@
-import { isNotificationInbox, isNotificationItem, isNotificationSummary, notificationInput, validNotificationResult, type NotificationInbox, type NotificationInput, type NotificationItem, type NotificationKind, type NotificationReceipt, type NotificationSummary } from '../shared/notifications';
+import { isNotificationInbox, isNotificationItem, isNotificationObjectId, isNotificationSummary, notificationInput, notificationItem, notificationReadObjectId, validNotificationResult, type NotificationInbox, type NotificationInput, type NotificationItem, type NotificationKind, type NotificationReceipt, type NotificationSummary } from '../shared/notifications';
 
 export type NotificationFilter = 'all' | 'unread' | 'read';
 export interface NotificationPage extends NotificationInbox { filter: NotificationFilter }
 export interface NotificationCache { summary: NotificationSummary; pages: NotificationPage[] }
-export interface NotificationIntent { id: string; principalId: string; body: NotificationInput; revisionId: string | null }
+export type NotificationIntent = { id: string; principalId: string; body: NotificationInput } & ({ objectId: string | null } | { revisionId: string | null });
+export const notificationIntentObjectId = (intent: NotificationIntent): string | null => 'objectId' in intent ? intent.objectId : intent.revisionId;
 export const NOTIFICATION_CACHE_LIMIT = 500;
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
 const uuid = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
@@ -16,8 +17,17 @@ export function notificationPage(value: unknown, principalId: string): value is 
   return new Set(items.map(item => item.id)).size === items.length && new Set(items.map(item => item.event.id)).size === items.length && items.every(item => filter === 'all' || item.read === (filter === 'read'));
 }
 export function notificationCache(value: unknown, principalId: string): NotificationCache | null {
-  if (!record(value) || Object.keys(value).length !== 2 || !isNotificationSummary(value.summary, principalId) || !Array.isArray(value.pages) || value.pages.length > 3 || !value.pages.every(page => notificationPage(page, principalId))) return null;
-  const pages = value.pages as NotificationPage[], summary = value.summary;
+  if (!record(value) || Object.keys(value).length !== 2 || !isNotificationSummary(value.summary, principalId) || !Array.isArray(value.pages) || value.pages.length > 3) return null;
+  // Schema31 reading snapshots are projected without rewriting their immutable
+  // event identities. Submitted requests take a separate, exact-preserving path.
+  const pages: NotificationPage[] = [];
+  for (const page of value.pages) {
+    if (!record(page) || !Array.isArray(page.items)) return null;
+    const projected = { ...page, items: page.items.map(notificationItem) };
+    if (!notificationPage(projected, principalId)) return null;
+    pages.push(projected);
+  }
+  const summary = value.summary;
   return new Set(pages.map(page => page.filter)).size === pages.length && pages.every(page => page.accessEpoch === summary.accessEpoch && page.readVersion === summary.readVersion) ? { summary, pages } : null;
 }
 export function mergeNotifications(previous: NotificationPage, next: NotificationPage): NotificationPage {
@@ -27,8 +37,10 @@ export function mergeNotifications(previous: NotificationPage, next: Notificatio
   return { ...next, horizon: previous.horizon, items: [...previous.items, ...next.items] };
 }
 export function notificationIntent(value: unknown, principalId: string): NotificationIntent | null {
-  if (!record(value) || Object.keys(value).length !== 4 || !uuid(value.id) || value.principalId !== principalId || !(value.revisionId === null || typeof value.revisionId === 'string' && /^[DPL]\d+$/.test(value.revisionId))) return null;
-  try { const body = notificationInput(value.body); return body.action === 'read_object' && body.revisionId !== value.revisionId || body.action === 'read_through' && value.revisionId !== null ? null : { id: value.id, principalId, body, revisionId: value.revisionId }; } catch { return null; }
+  if (!record(value) || Object.keys(value).length !== 4 || !uuid(value.id) || value.principalId !== principalId || ('objectId' in value) === ('revisionId' in value)) return null;
+  const legacy = 'revisionId' in value, objectId = legacy ? value.revisionId : value.objectId;
+  if (!(objectId === null || isNotificationObjectId(objectId) && (!legacy || /^[DPL]\d+$/.test(objectId)))) return null;
+  try { const body = notificationInput(value.body); if (body.action === 'read_object' && notificationReadObjectId(body) !== objectId || body.action === 'read_through' && objectId !== null) return null; return { id: value.id, principalId, body, ...(legacy ? { revisionId: objectId } : { objectId }) }; } catch { return null; }
 }
 export async function verifiedNotificationReceipt(value: unknown, intent: NotificationIntent): Promise<NotificationReceipt> {
   if (!validNotificationResult(value)) throw new Error('The notification receipt is invalid. Retain this exact request for recovery.');
@@ -36,4 +48,4 @@ export async function verifiedNotificationReceipt(value: unknown, intent: Notifi
   if (value.inputSha256 !== hash) throw new Error('The receipt belongs to a different notification request. Retry the original request.');
   return value;
 }
-export function notificationLabel(kind: NotificationKind): string { return ({ created: 'created this revision', source_updated: 'updated the source', commented: 'commented', replied: 'replied to a discussion', suggestion_applied: 'applied a suggestion', review_completed: 'completed a review', reviewers_changed: 'updated reviewers', lifecycle_changed: 'changed review status', author_changed: 'changed the current author', metadata_changed: 'edited revision details', projects_changed: 'changed project tags', subscribers_changed: 'changed followers' })[kind]; }
+export function notificationLabel(kind: NotificationKind, objectKind?: NotificationItem['object']['kind']): string { return ({ created: objectKind === 'task' ? 'created this task' : 'created this revision', task_updated: 'updated this task', task_commented: 'commented', task_owner_changed: 'changed the task owner', task_projects_changed: 'changed project tags', task_subscribers_changed: 'changed followers', task_dependencies_changed: 'changed task dependencies', task_subtask_status_changed: 'updated a subtask status', task_merged: 'merged duplicate tasks', task_column_changed: 'moved this task on a workboard', source_updated: 'updated the source', commented: 'commented', replied: 'replied to a discussion', suggestion_applied: 'applied a suggestion', review_completed: 'completed a review', reviewers_changed: 'updated reviewers', lifecycle_changed: 'changed review status', author_changed: 'changed the current author', metadata_changed: 'edited revision details', projects_changed: 'changed project tags', subscribers_changed: 'changed followers' })[kind]; }

@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { initializeNotifications, NotificationStore } from './notifications.ts';
 import { Auth } from './auth.ts';
 import { isNotificationInbox, isNotificationSummary, NOTIFICATION_LIMITS } from '../shared/notifications.ts';
+import type { NotificationEvent } from '../shared/notifications.ts';
 import type { ActorAttribution } from '../shared/types.ts';
 import type { RevisionSubscriptionAction, RevisionSubscriptionInput } from '../shared/revision-subscriptions.ts';
 import type { RevisionReviewerAction, RevisionReviewerInput } from '../shared/revision-reviewers.ts';
@@ -22,6 +23,7 @@ function follow(store: Store, id: string, action: RevisionSubscriptionAction = '
 function review(store: Store,id:string,action:RevisionReviewerAction,actor=bob,target?:ActorAttribution) { const s=store.revisionReviewers.snapshot(id),pins={message:'',expectedReviewerVersion:s.reviewers.version,expectedLifecycleVersion:s.lifecycle.version,expectedAuthorVersion:s.authorship.version,expectedVersion:s.head.number,expectedVersionId:s.head.versionId,expectedContentHash:s.head.contentHash,expectedAccessEpoch:epoch(store),expectedConfigId:s.configId,expectedEvidenceSha256:s.evidence.sha256};const input:RevisionReviewerInput=target?{action:action as 'add',reviewerId:target.principalId,...pins}:{action:action as 'accept',...pins};return store.revisionReviewers.mutate(id,input,actor,target&&ref(target)); }
 function source(store: Store,id:string) {const d=store.detail(id);return store.createVersion(id,{expectedVersion:d.revision.currentVersion,message:'Update source',files:[{path:'paper.tex',content:`version ${d.revision.currentVersion+1}\n`}]},alice);}
 function inbox(store:Store,person=bob) {return store.notifications.list(person.principalId,{},epoch(store));}
+const revisionHead = (event:NotificationEvent) => { assert.equal(event.context.kind,'revision'); return event.context.kind==='revision'?event.context.head:null; };
 const count = (store:Store, table:string) => Number(store.database.prepare(`SELECT count(*) AS count FROM ${table}`).get()!.count);
 
 test('post-change people recipients, object mute, active identities and current view drive complete durable delivery',()=>{const {store,hidden,disabled}=fixture();try{
@@ -40,7 +42,7 @@ test('current author and nonresigned reviewers receive changes; draft first broa
  const before=count(store,'notification_events');review(store,id,'accept',carol);assert.equal(count(store,'notification_events'),before+1);assert.equal(inbox(store,alice).items[0]!.event.kind,'reviewers_changed');
  const s=store.revisionAuthorship.snapshot(id);store.revisionAuthorship.mutate(id,{action:'assign',authorId:carol.principalId,message:'',expectedAuthorVersion:s.authorship.version,expectedReviewerVersion:s.reviewerVersion,expectedLifecycleVersion:s.lifecycleVersion,expectedVersion:s.head.number,expectedVersionId:s.head.versionId,expectedContentHash:s.head.contentHash,expectedAccessEpoch:epoch(store)},alice,ref(carol));
  assert.equal(count(store,'notification_events'),before+2,'author reviewer/lifecycle effects are grouped');assert.equal(inbox(store,carol).items[0]!.event.kind,'author_changed');
- const event=inbox(store).items[0]!.event;assert.equal(event.cause.type,'authorship');assert.equal(event.head!.versionId,s.head.versionId);assert.ok(!JSON.stringify(event).includes('original result'));
+ const event=inbox(store).items[0]!.event;assert.equal(event.cause.type,'authorship');assert.equal(revisionHead(event)!.versionId,s.head.versionId);assert.ok(!JSON.stringify(event).includes('original result'));
 }finally{store.close();}});
 
 test('tagged ancestor watchers override project silence; ordinary members do not route and object mute still wins',()=>{const {store}=fixture();try{
@@ -92,19 +94,19 @@ test('source-independent metadata/tags, human comments/replies and review eviden
  store.revisionProjects.mutate(id,{action:'set',projectIds:[],expectedProjectVersion:0,expectedAccessEpoch:epoch(store)},alice);assert.equal(count(store,'notification_events'),before+1,'tag noop silent');
  const project=store.createProject({name:'Topic'},alice);store.revisionProjects.mutate(id,{action:'add',projectIds:[project.id],expectedProjectVersion:0,expectedAccessEpoch:epoch(store)},alice);
  store.saveReview(id,1,{provider:'local',model:'checks',summary:'Exact local evidence',findings:[]},alice);
- assert.deepEqual(inbox(store).items.map(item=>item.event.kind),['review_completed','projects_changed','metadata_changed','replied','commented']);assert.ok(inbox(store).items.every(item=>item.revision.title==='Renamed'));assert.ok(!JSON.stringify(inbox(store)).includes('Private passage quote'));
+ assert.deepEqual(inbox(store).items.map(item=>item.event.kind),['review_completed','projects_changed','metadata_changed','replied','commented']);assert.ok(inbox(store).items.every(item=>item.object.title==='Renamed'));assert.ok(!JSON.stringify(inbox(store)).includes('Private passage quote'));
 }finally{store.close();}});
 
 test('suggestion application has one immutable cause rather than duplicate source and cascade notifications',()=>{const {store}=fixture();try{
  const d=create(store),id=d.revision.id;follow(store,id);const v=d.versions[0]!,comment=store.createComment(id,{versionId:v.id,body:'Replace',filePath:'paper.tex',passage:{start:0,end:8,quote:'original'},suggestion:{replacement:'improved'}},bob);const thread=store.detail(id).threads.find(t=>t.id===comment.threadId)!;const before=count(store,'notification_events');
  store.applySuggestion(id,comment.id,{expectedVersion:1,expectedVersionId:v.id,expectedContentHash:v.contentHash,expectedThreadVersion:thread.version},alice);
- assert.equal(count(store,'notification_events'),before+1);assert.equal(inbox(store).items[0]!.event.kind,'suggestion_applied');assert.equal(inbox(store).items[0]!.event.head!.number,2);
+ assert.equal(count(store,'notification_events'),before+1);assert.equal(inbox(store).items[0]!.event.kind,'suggestion_applied');assert.equal(revisionHead(inbox(store).items[0]!.event)!.number,2);
 }finally{store.close();}});
 
 test('bounded hidden paging can advance without exposing hidden IDs, and corruption of read provenance is rejected',()=>{const {store,hidden}=fixture();try{
  const visible=create(store).revision.id,secret=create(store).revision.id;follow(store,visible);follow(store,secret);source(store,visible);
  store.transaction(()=>{for(let i=0;i<NOTIFICATION_LIMITS.scan+1;i++)store.notifications.emit({revisionId:secret,kind:'source_updated',cause:{type:'test',id:randomUUID()},attribution:alice});});hidden.add(`${secret}:bob`);
- const page=inbox(store);assert.equal(page.items.length,0);assert.ok(page.nextBefore);assert.equal(page.unreadCount,1);assert.ok(!JSON.stringify(page).includes(JSON.stringify(secret)));const next=store.notifications.list('bob',{before:page.nextBefore!},epoch(store));assert.equal(next.items[0]!.event.revisionId,visible);
+ const page=inbox(store);assert.equal(page.items.length,0);assert.ok(page.nextBefore);assert.equal(page.unreadCount,1);assert.ok(!JSON.stringify(page).includes(JSON.stringify(secret)));const next=store.notifications.list('bob',{before:page.nextBefore!},epoch(store));assert.equal(next.items[0]!.event.objectId,visible);
  const item=next.items[0]!,receipt=store.notifications.mutate('bob',{action:'read',notificationId:item.id,expectedVersion:0,expectedAccessEpoch:epoch(store)},bob);store.database.exec('DROP TRIGGER notification_operations_no_update');const raw=JSON.parse(store.database.prepare('SELECT data FROM notification_operations WHERE id=?').get(receipt.operationId)!.data as string);raw.beforeReadVersion=100;raw.afterReadVersion=101;store.database.prepare('UPDATE notification_operations SET data=? WHERE id=?').run(JSON.stringify(raw),receipt.operationId);assert.throws(()=>store.notifications.operation(receipt.operationId),{code:'NOTIFICATION_INVALID_RECEIPT'});
 }finally{store.close();}});
 
@@ -112,16 +114,16 @@ test('bounded hidden paging can advance without exposing hidden IDs, and corrupt
 test('historical comments and replies preserve their exact anchor version while event order follows delivery sequence',()=>{const {store}=fixture();try{
  const d=create(store),id=d.revision.id;follow(store,id);const current=source(store,id),original=d.versions[0]!;
  const comment=store.createComment(id,{versionId:original.id,body:'Earlier source discussion'},alice);store.createReply(id,comment.threadId!,{viewedVersionId:current.versions.at(-1)!.id,body:'Still the original anchor'},alice);
- const anchored=inbox(store).items.slice(0,2);assert.deepEqual(anchored.map(i=>i.event.kind),['replied','commented']);for(const item of anchored)assert.deepEqual(item.event.head,{versionId:original.id,number:1,contentHash:original.contentHash});
- store.transaction(()=>store.notifications.emit({revisionId:id,kind:'metadata_changed',cause:{type:'test',id:'backdated-event'},attribution:alice,createdAt:'2001-01-01T00:00:00.000Z'}));const page=store.notifications.list('bob',{limit:1},epoch(store));assert.equal(page.items[0]!.event.cause.id,'backdated-event');const next=store.notifications.list('bob',{limit:1,before:page.nextBefore!},epoch(store));assert.equal(next.items[0]!.event.kind,'replied');assert.equal(next.items[0]!.event.head!.number,1);
+ const anchored=inbox(store).items.slice(0,2);assert.deepEqual(anchored.map(i=>i.event.kind),['replied','commented']);for(const item of anchored)assert.deepEqual(revisionHead(item.event),{versionId:original.id,number:1,contentHash:original.contentHash});
+ store.transaction(()=>store.notifications.emit({revisionId:id,kind:'metadata_changed',cause:{type:'test',id:'backdated-event'},attribution:alice,createdAt:'2001-01-01T00:00:00.000Z'}));const page=store.notifications.list('bob',{limit:1},epoch(store));assert.equal(page.items[0]!.event.cause.id,'backdated-event');const next=store.notifications.list('bob',{limit:1,before:page.nextBefore!},epoch(store));assert.equal(next.items[0]!.event.kind,'replied');assert.equal(revisionHead(next.items[0]!.event)!.number,1);
 }finally{store.close();}});
 
 
 test('complete unread counting and bulk read reject above explicit whole-query bounds without partial changes',()=>{
- const db=new DatabaseSync(':memory:');try{db.exec("CREATE TABLE entities(id TEXT PRIMARY KEY); CREATE TABLE policy_meta(name TEXT PRIMARY KEY,value INTEGER); INSERT INTO policy_meta VALUES('epoch',1)");initializeNotifications(db);const notifications=new NotificationStore(db,{revision:()=>({title:'Bound fixture',kind:'paper',head:{versionId:'fixture',number:1,contentHash:'a'.repeat(64)},broadcast:true}),recipients:()=>({recipients:['bob'],muted:[]})});notifications.configure({eligible:id=>id==='bob',canView:()=>true});
+ const db=new DatabaseSync(':memory:');try{db.exec("CREATE TABLE entities(id TEXT PRIMARY KEY); CREATE TABLE policy_meta(name TEXT PRIMARY KEY,value INTEGER); INSERT INTO policy_meta VALUES('epoch',1)");initializeNotifications(db);const notifications=new NotificationStore(db,{revision:()=>({title:'Bound fixture',kind:'paper',head:{versionId:'fixture',number:1,contentHash:'a'.repeat(64)},broadcast:true}),task:()=>({title:'Bound task',version:1}),recipients:()=>({recipients:['bob'],muted:[]})});notifications.configure({eligible:id=>id==='bob',canView:()=>true});
  const entity=db.prepare('INSERT INTO entities(id) VALUES(?)'),event=db.prepare('INSERT INTO notification_events(id,revision_id,cause_type,cause_id,data) VALUES(?,?,?,?,?)'),delivery=db.prepare('INSERT INTO notification_deliveries(id,event_id,principal_id,read,version) VALUES(?,?,?,0,0)');
- const add=(n:number)=>{const id=`P${n}`,eventId=randomUUID();entity.run(id);event.run(eventId,id,'test',String(n),JSON.stringify({id:eventId,revisionId:id,kind:'created',cause:{type:'test',id:String(n)},actor:null,createdAt:'2026-01-01T00:00:00Z',head:null}));delivery.run(randomUUID(),eventId,'bob');};
- db.exec('BEGIN');for(let n=1;n<=NOTIFICATION_LIMITS.unreadRevisions;n++)add(n);db.exec('COMMIT');const atLimit=notifications.summary('bob',1);assert.equal(atLimit.unreadCount,10000);add(10001);assert.throws(()=>notifications.summary('bob',1),{code:'NOTIFICATION_LIMIT'});
+ const add=(n:number)=>{const id=`${n%2?'T':'P'}${n}`,eventId=randomUUID();entity.run(id);event.run(eventId,id,'test',String(n),JSON.stringify({format:'phabricator.notification-event.v2',id:eventId,objectId:id,kind:'created',cause:{type:'test',id:String(n)},actor:null,createdAt:'2026-01-01T00:00:00Z',context:n%2?{kind:'task',taskVersion:1}:{kind:'revision',head:null}}));delivery.run(randomUUID(),eventId,'bob');};
+ db.exec('BEGIN');for(let n=1;n<=NOTIFICATION_LIMITS.unreadObjects;n++)add(n);db.exec('COMMIT');const atLimit=notifications.summary('bob',1);assert.equal(atLimit.unreadCount,10000);add(10001);assert.throws(()=>notifications.summary('bob',1),{code:'NOTIFICATION_LIMIT'});
  // A newly issued boundary covers the extra row. List/count is deliberately not
  // bypassed: use an individual read to make count admissible, get boundary, then
  // put that same row back to unread so bulk attempts the complete 10,001 rows.

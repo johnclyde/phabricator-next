@@ -1,9 +1,9 @@
 # Notifications
 
-NOTIFY-01 implements the native revision inbox described here. Broader
+NOTIFY-01 and NOTIFY-02 implement the native revision and task inbox described here. Broader
 notification parity remains tracked in [the roadmap](roadmap.md).
 
-The notification inbox is private to the current workspace person. Revision
+The notification inbox is private to the current workspace person. Revision and task
 changes create durable events and recipient records in the same transaction as
 the change. A failed source or policy write cannot leave a notification behind.
 Exact retries reuse the original change rather than sending it again.
@@ -41,11 +41,20 @@ changes, self subscription changes, dependency-only changes and discussion
 resolution alone remain quiet, following the relevant upstream transaction
 visibility rules.
 
+## Task delivery
+
+Task changes share the inbox with code, papers and Word. Events pin task versions;
+current owners, explicit followers and tagged-project/ancestor watchers receive
+visible changes. Private task mute suppresses all routes. Dependency, merge and
+workboard causes follow Maniphest's transaction rules. See [task notification
+contracts](task-notifications.md) for the precise delivery matrix, private mute
+API, recovery behavior and upstream evidence.
+
 ## Inbox and access
 
 The bell menu shows recent notifications and an unread badge. The full inbox has
 All, Unread and Read filters, newest first, with bounded pagination. Counts and
-rows include only revisions the viewer can currently read. An inaccessible
+rows include only objects the viewer can currently read. An inaccessible
 notification does not become an anonymous placeholder or contribute to a hidden
 count. Regaining access can make a previously delivered notification visible
 again; losing access does not rewrite its historical delivery.
@@ -58,21 +67,21 @@ rows and return at most 100 visible items (25 by default). A sparse page can
 contain no visible items while still offering an older-page cursor. Ordering
 follows durable delivery sequence, not the actor timestamp. Equivalent encrypted
 horizons need not have equal token text. Unread counts cover at most 10,000
-distinct candidate revisions; read-through actions consider at most 10,000
+distinct candidate objects; read-through actions consider at most 10,000
 unread delivery rows. Exceeding these complete-operation limits returns an
 explicit error. An unread count is never presented as complete after truncation.
 
 ## Read state and recovery
 
 Mark Read and Mark Unread change only the viewer's own notification. They require
-current View and write-scoped authority, not permission to edit the revision.
+current View and write-scoped authority, not permission to edit the object.
 Each row has independent read-state concurrency protection.
 
 Mark All Read uses the observed delivery boundary. It marks accessible unread
 notifications through that boundary and leaves later arrivals alone. Opening a
-successfully loaded revision online can mark that object's observed notifications
+successfully loaded revision or task online can mark that object's observed notifications
 read through the same boundary. Passive background fetching does not mark
-objects read, and opening a cached revision offline does not queue this action.
+objects read, and opening a cached object offline does not queue this action.
 
 Every write retains an exact intent and request ID. An immutable operation binds
 the recipient, original input, scoped retry identity and affected read states.
@@ -92,7 +101,9 @@ Paths are relative to the configured application mount.
 
 Individual actions supply `notificationId`, `expectedVersion` and
 `expectedAccessEpoch`. Read-through supplies `horizon` and the access epoch;
-object reading also supplies `revisionId`. The server determines the recipient
+object reading also supplies `objectId`. Legacy revision requests with
+`revisionId` remain valid and retain their exact digest; the two keys are mutually
+exclusive, and `revisionId` cannot name a task. The server determines the recipient
 from the authenticated request, never a caller-selected account.
 
 The CLI preserves exact intents without fetching replacement concurrency pins:
@@ -115,7 +126,7 @@ may cache up to 500 authorized notifications per filter on the device; password 
 pages only in the current tab. Workspace, person and mount boundaries prevent
 one session from inheriting another person's inbox. Access changes retire cached
 labels, counts and pending reads. An unavailable notification does not make its
-still-visible source revision unavailable.
+still-visible source object unavailable.
 
 Uncertain read-state writes remain explicit, recoverable requests. They are not
 replayed automatically on reconnect. Voice commands such as “show unread
@@ -128,7 +139,10 @@ Schema 31 adds six notification tables and immutable delivery/read-operation
 evidence without manufacturing historical
 delivery. Previous activity does not establish who followed an object or could
 read it at that earlier time. Existing source, policies, discussion, evidence and
-saved receipts remain unchanged.
+saved receipts remain unchanged. Schema 32 adds private task mute storage and
+generic task delivery without rewriting any schema-31 event, read proof or saved
+receipt. Legacy cache rows are strictly projected while pending legacy request
+bodies remain unchanged.
 
 Upstream comparison uses Phabricator
 [`5720a38`](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04):
@@ -143,7 +157,7 @@ Mail, live Aphlict-style push transport, mobile system notifications, notificati
 settings, project/package reviewer expansion, mentions, Herald, delivery for
 other applications and background build jobs, global Feed/Conduit compatibility,
 upstream history import and unbounded scale remain gaps. This does not establish
-full Notifications or Differential parity.
+full Notifications, Maniphest or Differential parity.
 
 ## Verification
 
@@ -168,7 +182,13 @@ requests never enter automatic reconnect replay. Client tests separately cover
 cache ownership, session replacement, independent invalidation and exact receipt
 validation.
 
-Release validation: strict typecheck and both root/subpath production builds passed.
+NOTIFY-01 release validation: strict typecheck and both root/subpath production builds passed.
 The full suite passed 1,382 tests, with nine optional TeX checks skipped and no
 failures. The browser matrix passed 116 unique desktop/mobile cases: 28 new
 notification cases and 88 surrounding workflow regressions.
+
+NOTIFY-02 adds verified task delivery and private mute. Its final suite passed
+1,428 tests with nine optional TeX checks skipped, alongside strict typecheck,
+both production mounts and 180 desktop/mobile browser scenarios. Legacy
+revision event, read-operation and pending-request compatibility remained intact.
+See [task notification verification](task-notifications.md#verification).

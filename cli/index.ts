@@ -26,6 +26,7 @@ import { revisionReviewersCommand } from './revision-reviewers';
 import { revisionSubscriptionsCommand } from './revision-subscriptions';
 import { revisionProjectsCommand } from './revision-projects';
 import { notificationsCommand } from './notifications';
+import { taskNotificationsCommand } from './task-notifications';
 import { revisionMetadataCommand } from './revision-metadata';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
@@ -42,6 +43,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- notifications [--filter all|unread|read] [--before CURSOR] [--limit N]
   npm run arc -- notification-count
   npm run arc -- mark-notifications --intent REQUEST.json [--request-id KEY]
+  npm run arc -- task-mute T1
+  npm run arc -- task-mute-history T1 [--before N] [--limit N] [--expected-mute-version N]
+  npm run arc -- set-task-mute T1 --intent REQUEST.json [--request-id KEY]
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
   npm run arc -- board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
@@ -269,7 +273,7 @@ async function main() {
       intent: { type: 'string' },
       draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, 'project-version': { type: 'string' }, 'subscription-version': { type: 'string' }, 'mute-version': { type: 'string' }, principal: { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
-      entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
+      entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' }, 'expected-mute-version': { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
       name: { type: 'string' }, author: { type: 'string' }, 'alt-text': { type: 'string' },
       object: { type: 'string' }, mode: { type: 'string' }, 'access-epoch': { type: 'string' },
@@ -329,6 +333,7 @@ async function main() {
   if (await revisionSubscriptionsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionProjectsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await notificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await taskNotificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

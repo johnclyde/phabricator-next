@@ -24,6 +24,8 @@ if (process.env.E2E_NOTIFICATION_FIXTURE === '1') {
   const contributor = await app.auth.createAccount({ username: 'notification-fixture', displayName: 'Fixture Contributor', password: 'test-only-local-notification-password' });
   const revision = app.store.createRevision({ title: 'Local durable notification fixture', kind: 'paper', testPlan: 'Verify cached inbox reads without sending an offline read action.', files: [{ path: 'paper.txt', content: 'Offline notification source.\n' }] }, author);
   app.store.createComment(revision.revision.id, { versionId: revision.versions[0]!.id, body: 'A disposable contributor comment.' }, { ...author, principalId: contributor.id, displayName: contributor.displayName, requestId: 'notification-offline-comment' });
+  const task = app.store.createTask({ title: 'Local durable task notification fixture', description: 'Offline task notification source.' }, { ...author, requestId: 'task-notification-offline-fixture' });
+  app.store.createTaskComment(task.id, { body: 'A disposable task contributor comment.' }, { ...author, principalId: contributor.id, displayName: contributor.displayName, requestId: 'task-notification-offline-comment' });
 }
 const passwordStore = createStore({ path: join(directory, 'password-workspace.sqlite') });
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });

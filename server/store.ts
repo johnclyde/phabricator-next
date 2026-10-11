@@ -1,4 +1,5 @@
-import { initializeNotifications, NotificationStore } from './notifications.ts';
+import { initializeNotifications, initializeNotificationTargets, NotificationStore } from './notifications.ts';
+import { initializeTaskNotifications, TaskNotificationsStore } from './task-notifications.ts';
 import { NOTIFICATION_LIMITS } from '../shared/notifications.ts';
 import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
@@ -183,6 +184,7 @@ export class Store {
   readonly revisionSubscriptions: RevisionSubscriptionStore;
   readonly revisionProjects: RevisionProjectStore;
   readonly notifications: NotificationStore;
+  readonly taskNotifications: TaskNotificationsStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -195,7 +197,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 31) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 32) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -468,6 +470,11 @@ export class Store {
       try { this.transaction(() => { initializeNotifications(this.database); this.database.exec('PRAGMA user_version = 31'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 32) {
+      try { this.transaction(() => { initializeNotificationTargets(this.database); initializeTaskNotifications(this.database); this.database.exec('PRAGMA user_version = 32'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.taskNotifications = new TaskNotificationsStore(this.database);
     this.revisionProjects = new RevisionProjectStore(this.database);
     this.revisionMetadata = new RevisionMetadataStore(this.database, options.revisionMetadata);
     this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
@@ -481,15 +488,22 @@ export class Store {
         if (!row || !['code', 'paper', 'document'].includes(row.kind)) throw new HttpError(404, 'Revision is unavailable.', 'OBJECT_UNAVAILABLE');
         return { title: this.revisionMetadata.state(id).title, kind: row.kind, head: this.revisionAuthorship.snapshot(id).head, broadcast: this.revisionLifecycle.state(id).reviewStarted };
       },
+      task: id => { const task = this.get<Task>('task', id); return { title: task.title, version: task.version }; },
       recipients: id => {
+        const task = id.startsWith('T') ? this.get<Task>('task', id) : null;
         const projects = new Set<string>(), watchers = new Set<string>(); let scanned = 0;
-        for (const tag of this.revisionProjects.state(id).projectIds) for (const project of [tag, ...ancestorIds(this.database, tag)]) projects.add(project);
+        for (const tag of task?.projectIds ?? this.revisionProjects.state(id).projectIds) for (const project of [tag, ...ancestorIds(this.database, tag)]) projects.add(project);
         for (const project of projects) {
           const rows = this.database.prepare("SELECT principal_id FROM project_relations WHERE project_id=? AND relation='watcher' AND active=1 LIMIT ?").all(project, NOTIFICATION_LIMITS.projectRows - scanned + 1) as { principal_id: string }[];
           scanned += rows.length; if (scanned > NOTIFICATION_LIMITS.projectRows) throw new HttpError(422, 'Project watcher routing exceeds the complete notification limit.', 'NOTIFICATION_LIMIT');
           for (const row of rows) watchers.add(row.principal_id);
         }
         // Upstream watcher routing overrides project silence; object mute still wins.
+        if (task) {
+          const rows = this.database.prepare("SELECT principal_id FROM task_subscriptions WHERE task_id=? AND state='subscribed' ORDER BY principal_id LIMIT ?").all(id, NOTIFICATION_LIMITS.recipients + 1) as { principal_id: string }[];
+          if (rows.length > NOTIFICATION_LIMITS.recipients) throw new HttpError(422, 'Task follower routing exceeds the complete notification limit.', 'NOTIFICATION_LIMIT');
+          return { recipients: [...rows.map(row => row.principal_id), ...(task.ownerId ? [task.ownerId] : []), ...watchers], muted: this.taskNotifications.mutedPeople(id) };
+        }
         return this.revisionSubscriptions.deliveryPreferences(id, [...watchers]);
       },
     });
@@ -658,7 +672,7 @@ export class Store {
     try {
       // Lock before loading task versions or traversing the dependency graph.
       this.database.prepare("UPDATE sequences SET value = value WHERE name = 'task'").run();
-      const result = this.workboards ? this.workboards.batch(work) : work(); this.database.exec('RELEASE task_write'); return result;
+      const result = this.notifications.batch(() => this.workboards ? this.workboards.batch(work) : work()); this.database.exec('RELEASE task_write'); return result;
     } catch (error) { this.database.exec('ROLLBACK TO task_write; RELEASE task_write'); throw error; }
   }
   private advanceTask(task: Task, now: string): Task {
@@ -727,7 +741,7 @@ export class Store {
       ? (this.database.prepare('SELECT task_id FROM task_dependencies WHERE dependency_id = ? ORDER BY task_id').all(task.id) as { task_id: string }[]).map(row => this.advanceTask(this.get<Task>('task', row.task_id), now)) : [];
     this.save('task', task);
     if (!current) for (const projectId of projectIds) this.database.prepare('INSERT INTO task_projects (task_id, project_id) VALUES (?, ?)').run(task.id, projectId);
-    this.appendTaskTransaction(task, current ? { kind: 'edit', changes } : { kind: 'create', snapshot: task }, attribution, now);
+    const transaction = this.appendTaskTransaction(task, current ? { kind: 'edit', changes } : { kind: 'create', snapshot: task }, attribution, now);
     this.event(task.id, current ? 'updated' : 'created', `${current ? 'Updated' : 'Created'} task ${task.title}.`, attribution);
     if (task.ownerId !== (current?.ownerId ?? null)) {
       const row = this.database.prepare("SELECT value FROM policy_meta WHERE name = 'epoch'").get() as { value: number };
@@ -738,9 +752,11 @@ export class Store {
     if (!current && task.authorId) this.changeTaskSubscription(task, task.authorId, 'subscribed', 'created', attribution, now);
     for (const parent of parents) {
       this.save('task', parent);
-      this.appendTaskTransaction(parent, { kind: 'dependency_status', dependencyStatus: { taskId: task.id, oldStatus: current!.status, newStatus: task.status } }, attribution, now);
+      const parentTransaction = this.appendTaskTransaction(parent, { kind: 'dependency_status', dependencyStatus: { taskId: task.id, oldStatus: current!.status, newStatus: task.status } }, attribution, now);
       this.event(parent.id, 'dependency_status_changed', 'A dependency changed status.', attribution);
+      this.notifications.emit({ objectId: parent.id, kind: 'task_subtask_status_changed', cause: { type: 'task_transaction', id: parentTransaction.id }, attribution, createdAt: now, requireActorView: true });
     }
+    this.notifications.emit({ objectId: task.id, kind: !current ? 'created' : changes.length === 1 && changes[0]!.field === 'ownerId' ? 'task_owner_changed' : 'task_updated', cause: { type: 'task_transaction', id: transaction.id }, attribution, createdAt: now });
     return task;
   }
   private taskProjectIds(value: unknown): string[] {
@@ -780,6 +796,7 @@ export class Store {
       for (const projectId of removed) this.appendTaskTransaction(task, { kind: 'project', project: { projectId, action: 'removed', operationId } }, attribution, now);
       for (const projectId of added) this.appendTaskTransaction(task, { kind: 'project', project: { projectId, action: 'added', operationId } }, attribution, now);
       this.event(id, 'projects_changed', 'Updated project tags.', attribution);
+      this.notifications.emit({ objectId: id, kind: 'task_projects_changed', cause: { type: 'task_projects', id: operationId }, attribution, createdAt: now });
       return this.taskDetail(id);
     });
   }
@@ -795,6 +812,8 @@ export class Store {
     for (const id of added) this.appendTaskTransaction(task,{kind:'project',project:{projectId:id,action:'added',operationId}},attribution,now);
     if (column) this.appendTaskTransaction(task,{kind:'column',column},attribution,now);
     this.event(task.id,column?'column_changed':'projects_changed',column?'Moved task on a workboard.':'Updated project tags.',attribution);
+    const changedColumn = column && !column.fromColumns.some(previous => previous.id === column.toColumn.id);
+    if (changedColumn || removed.length || added.length) this.notifications.emit({ objectId: task.id, kind: changedColumn ? 'task_column_changed' : 'task_projects_changed', cause: { type: 'task_workboard', id: operationId }, attribution, createdAt: now });
     return task;
   }
   taskHistory(id: string, before?: number, limit = 50, visible?: (id: string) => boolean): TaskHistory {
@@ -919,6 +938,7 @@ export class Store {
       UNION SELECT json_extract(data, '$.ownerId') FROM entities WHERE id IN (${parameters})
     ) WHERE principal_id IS NOT NULL ORDER BY principal_id`);
     for (const row of recipients.iterate(...ids, ...ids, ...ids) as Iterable<{ principal_id: string }>) this.changeTaskSubscription(target, row.principal_id, 'subscribed', 'merged', attribution, now);
+    for (const objectId of [targetId, ...ids]) this.notifications.emit({ objectId, kind: 'task_merged', cause: { type: 'task_merge', id: operationId }, attribution, createdAt: now });
   }
   createTaskComment(id: string, input: unknown, attribution?: ActorAttribution): TaskTransaction {
     return this.taskMutation(() => {
@@ -931,6 +951,7 @@ export class Store {
       }
       const transaction = this.appendTaskTransaction(task, { kind: 'comment', comment: body }, attribution);
       this.event(id, 'commented', 'Commented on this task.', attribution);
+      this.notifications.emit({ objectId: id, kind: 'task_commented', cause: { type: 'task_transaction', id: transaction.id }, attribution, createdAt: transaction.createdAt });
       return transaction;
     });
   }
@@ -965,8 +986,9 @@ export class Store {
     if (!Number.isSafeInteger(version) || version < 1) throw new HttpError(409, 'This membership has reached the supported version limit.');
     this.database.prepare(`INSERT INTO task_subscriptions (task_id, principal_id, state, version, updated_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(task_id, principal_id) DO UPDATE SET state = excluded.state, version = excluded.version, updated_at = excluded.updated_at`).run(task.id, principalId, state, version, now);
-    this.appendTaskTransaction(task, { kind: 'subscription', subscription: { principalId, oldState: current.state, newState: state, membershipVersion: version, reason } }, attribution, now);
+    const transaction = this.appendTaskTransaction(task, { kind: 'subscription', subscription: { principalId, oldState: current.state, newState: state, membershipVersion: version, reason } }, attribution, now);
     this.event(task.id, 'subscription_changed', 'Updated task subscription preferences.', attribution);
+    if (reason === 'explicit' && attribution?.principalId !== principalId) this.notifications.emit({ objectId: task.id, kind: 'task_subscribers_changed', cause: { type: 'task_transaction', id: transaction.id }, attribution, createdAt: now });
     return this.subscriptionForTask(task, principalId);
   }
   updateTaskSubscription(id: string, input: unknown, attribution: ActorAttribution): TaskSubscriptionStatus {
@@ -1005,10 +1027,12 @@ export class Store {
       else this.database.prepare('DELETE FROM task_dependencies WHERE task_id = ? AND dependency_id = ?').run(id, dependencyId);
       this.save('task', task); this.save('task', other);
       const change = action === 'add' ? 'added' : 'removed';
-      this.appendTaskTransaction(task, { kind: 'dependency', dependency: { taskId: other.id, action: change, direction: 'depends_on' } }, attribution, now);
-      this.appendTaskTransaction(other, { kind: 'dependency', dependency: { taskId: task.id, action: change, direction: 'blocks' } }, attribution, now);
+      const transaction = this.appendTaskTransaction(task, { kind: 'dependency', dependency: { taskId: other.id, action: change, direction: 'depends_on' } }, attribution, now);
+      const inverse = this.appendTaskTransaction(other, { kind: 'dependency', dependency: { taskId: task.id, action: change, direction: 'blocks' } }, attribution, now);
       this.event(task.id, `dependency_${change}`, `${action === 'add' ? 'Added' : 'Removed'} a task dependency.`, attribution);
       this.event(other.id, `dependency_${change}`, `${action === 'add' ? 'Added' : 'Removed'} a task blocked by this task.`, attribution);
+      this.notifications.emit({ objectId: task.id, kind: 'task_dependencies_changed', cause: { type: 'task_transaction', id: transaction.id }, attribution, createdAt: now });
+      this.notifications.emit({ objectId: other.id, kind: 'task_dependencies_changed', cause: { type: 'task_transaction', id: inverse.id }, attribution, createdAt: now });
       return this.taskDetail(id);
     });
   }

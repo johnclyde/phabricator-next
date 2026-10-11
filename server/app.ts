@@ -36,6 +36,7 @@ import { revisionSubscriptionInput } from '../shared/revision-subscriptions.ts';
 import { revisionProjectInput } from '../shared/revision-projects.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { notificationReadInput } from '../shared/notifications.ts';
+import { taskMuteInput } from '../shared/task-notifications.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -294,6 +295,18 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const taskMute = method === 'POST' ? /^\/api\/tasks\/(T[1-9]\d{0,14})\/mute$/.exec(path) : null;
+    if (taskMute) {
+      const id = taskMute[1]!, authorize = () => { auth.revalidate(context, 'write'); access.require(id); };
+      store.read(authorize);
+      if (!rawKey) throw new HttpError(400, 'Task mute changes require an Idempotency-Key.');
+      let data;
+      try { data = taskMuteInput(input); } catch { throw new HttpError(400, 'Provide a task mute action and exact preference and access versions.'); }
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex'), fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.taskNotifications.mutate(id, context.principalId, data, actor, retryKeySha256) }), authorize, response => access.presentTaskMute(id, data, response, retryKeySha256));
+    }
     if (method === 'POST' && path === '/api/notifications/read') {
       store.read(() => auth.revalidate(context, 'write'));
       if (!rawKey) throw new HttpError(400, 'Notification read changes require an Idempotency-Key.');
@@ -777,6 +790,14 @@ export function createApp(options: AppOptions = {}): App {
             const filter = url.searchParams.get('filter') ?? 'all', before = url.searchParams.get('before'), limit = url.searchParams.get('limit');
             if (!['all', 'unread', 'read'].includes(filter) || before !== null && (!before.length || before.length > 4096) || limit !== null && (!/^[1-9]\d*$/.test(limit) || !Number.isSafeInteger(Number(limit)) || Number(limit) > 100)) throw new HttpError(400, 'Choose a valid notification filter, cursor and page limit.');
             send(res, 200, count ? access.notificationSummary() : access.notifications({ filter: filter as 'all' | 'unread' | 'read', ...(before === null ? {} : { before }), ...(limit === null ? {} : { limit: Number(limit) }) })); return;
+          }
+          const taskMute = /^\/api\/tasks\/(T[1-9]\d{0,14})\/mute(?:\/(history))?$/.exec(path);
+          if (taskMute) {
+            const id = taskMute[1]!; access.require(id);
+            const allowed = taskMute[2] ? ['before', 'limit', 'expectedMuteVersion'] : [];
+            if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Use unique supported task mute history parameters.');
+            const number = (key: string): number | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)) || (key !== 'expectedMuteVersion' && Number(value) < 1) || key === 'limit' && Number(value) > 100) throw new HttpError(400, 'Choose valid task mute history pagination.'); return Number(value); };
+            send(res, 200, taskMute[2] ? access.taskMuteHistory(id, { before: number('before'), limit: number('limit'), expectedMuteVersion: number('expectedMuteVersion') }) : access.taskMute(id)); return;
           }
           const revisionProjects = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/projects(?:\/(history))?$/.exec(path);
           if (revisionProjects) {
