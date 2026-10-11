@@ -19,6 +19,7 @@ import { citationCommand } from './citations';
 import { pasteCommand } from './pastes';
 import { docxCommand } from './docx';
 import { docxDiscussionCommand } from './docx-discussion';
+import { revisionDependenciesCommand } from './revision-dependencies';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
@@ -46,6 +47,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
   npm run arc -- export P2 [--version 1]
+  npm run arc -- revision-dependencies P2 --direction parents|children [--after ID] [--limit N] [--relationship-version N]
+  npm run arc -- revision-dependency-history P2 [--before N] [--limit N] [--relationship-version N]
+  npm run arc -- edit-revision-dependencies P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- builds P2 [--before N] [--limit N] [--json]
   npm run arc -- compile P2 --version-id ID --content-hash SHA256 --entrypoint main.tex --toolchain-id SHA256 [--request-id KEY] [--json]
   npm run arc -- build P2 BUILD_ID [--json]
@@ -232,6 +236,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
+      direction: { type: 'string' }, 'relationship-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -286,6 +291,7 @@ async function main() {
   if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await docxCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await docxDiscussionCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionDependenciesCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

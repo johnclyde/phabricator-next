@@ -1,4 +1,6 @@
 import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
+import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
+import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
 import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
 import type { WikiConduitMethod, WikiConduitReceipt } from '../shared/wiki-conduit.ts';
 import { isDeepStrictEqual } from 'node:util';
@@ -39,6 +41,11 @@ export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
 export interface StoreOptions { path?: string }
 type JsonRow = { data: string };
+
+export function parseRevisionDependencyInput(input: unknown): RevisionDependencyInput {
+  try { return revisionDependencyInput(input); }
+  catch { throw new HttpError(400, 'Choose parent or child revisions, 1–64 distinct changes, and exact relationship and access versions.'); }
+}
 
 export function threadPreferenceInput(input: unknown): SetThreadPreferenceInput {
   const data = object(input, ['collapsed', 'expectedVersion']);
@@ -149,6 +156,7 @@ export class Store {
   readonly files: FileStore;
   readonly pastes: PasteStore;
   readonly citationEvidence: CitationEvidenceStore;
+  readonly revisionDependencies: RevisionDependencyStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -161,7 +169,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 23) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 24) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -402,6 +410,11 @@ export class Store {
     }
     if(version<22){try{this.transaction(()=>{initializeWikiSearch(this.database);this.database.exec('PRAGMA user_version = 22');});}catch(error){this.database.close();throw error;}}
     if(version<23){try{this.transaction(()=>{initializeWikiConduit(this.database);this.database.exec('PRAGMA user_version = 23');});}catch(error){this.database.close();throw error;}}
+    if (version < 24) {
+      try { this.transaction(() => { initializeRevisionDependencies(this.database); this.database.exec('PRAGMA user_version = 24'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.revisionDependencies = new RevisionDependencyStore(this.database);
     this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;

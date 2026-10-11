@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
+import { readRequestIntent } from './request-intent';
 import type { PaperCLI } from './paper-builds';
 import type { DocxInspection } from '../shared/docx';
 import { DOCX_LIMITS } from '../shared/docx';
@@ -14,15 +14,7 @@ const record = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 export async function readDocxIntent(path: string): Promise<Record<string, unknown>> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const info = await handle.stat(); const max = 256 * 1024;
-    if (!info.isFile() || info.size > max) throw new Error('Word request files must be regular files no larger than 256 KiB.');
-    const bytes = Buffer.alloc(max + 1); let length = 0;
-    while (length < bytes.length) { const result = await handle.read(bytes, length, bytes.length - length, null); if (!result.bytesRead) break; length += result.bytesRead; }
-    if (length > max) throw new Error('The Word request file exceeds 256 KiB.');
-    return record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length))));
-  } finally { await handle.close(); }
+  return readRequestIntent(path, 'Word request');
 }
 
 /** Explicit immutable intents survive retries; no command silently selects the latest head. */

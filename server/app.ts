@@ -28,6 +28,7 @@ import { PaperBuildService, type PaperRunner } from './paper-builds.ts';
 import { canonicalWikiPath } from '../shared/wiki.ts';
 import { conduitRequest } from './conduit.ts';
 import { wikiDocumentQuery } from './wiki-query.ts';
+import { parseRevisionDependencyInput } from './store.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -290,6 +291,8 @@ export function createApp(options: AppOptions = {}): App {
     if (path.startsWith('/api/files') && !rawKey) throw new HttpError(400, 'File mutations require an Idempotency-Key.');
     const citationEvidence = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+)\/retract)?$/.exec(path) : null;
     if (citationEvidence && !rawKey) throw new HttpError(400, 'Citation evidence mutations require an Idempotency-Key.');
+    const dependencies = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies$/.exec(path) : null;
+    if (dependencies && !rawKey) throw new HttpError(400, 'Dependency changes require an Idempotency-Key.');
     let versionImportRepository: string | undefined;
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
@@ -311,7 +314,7 @@ export function createApp(options: AppOptions = {}): App {
     // Preserve legacy local retries, while every authenticated principal has a
     // separate durable replay namespace. Authorization always precedes replay.
     const key = rawKey && (context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`);
-    const fingerprint = createHash('sha256').update(JSON.stringify([method, path, input])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([method, path, dependencies ? parseRevisionDependencyInput(input) : input])).digest('hex');
     if (key) {
       const replay = store.read(() => { authorize(); const saved = store.replay(key, fingerprint); return saved ? present(saved) : undefined; });
       if (replay) return replay;
@@ -411,6 +414,13 @@ export function createApp(options: AppOptions = {}): App {
         return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis, attribution) }), authorize, present);
       }
       return store.mutate(key, fingerprint, () => {
+        if (dependencies) {
+          const change = parseRevisionDependencyInput(input);
+          if (change.expectedAccessEpoch !== policies.epoch()) throw new HttpError(409, 'Access changed. Review the current revision audience before changing dependencies.', 'ACCESS_EPOCH_CHANGED');
+          const receipt = store.revisionDependencies.mutate(dependencies[1]!, change, attribution);
+          for (const id of [dependencies[1]!, ...change.add, ...change.remove]) store.event(id, 'dependencies_changed', 'Updated revision dependencies.', attribution);
+          return { status: 200, body: receipt };
+        }
         if (citationEvidence) {
           const id = citationEvidence[1]!;
           if (citationEvidence[2]) return { status: 200, body: store.citationEvidence.retract(id, citationEvidence[2], input, attribution) };
@@ -629,6 +639,22 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const dependencies = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies(\/history)?$/.exec(path);
+          if (dependencies) {
+            const id = dependencies[1]!; access.require(id);
+            const history = Boolean(dependencies[2]);
+            const allowed = history ? ['before', 'limit', 'expectedRelationshipVersion'] : ['direction', 'after', 'limit', 'expectedRelationshipVersion'];
+            if ([...url.searchParams.keys()].some(name => !allowed.includes(name) || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Invalid dependency page parameters.');
+            const number = (name: string, zero = false): number | undefined => {
+              const value = url.searchParams.get(name); if (value === null) return undefined;
+              if (!(zero ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(value) || !Number.isSafeInteger(Number(value))) throw new HttpError(400, 'Invalid dependency page parameters.');
+              return Number(value);
+            };
+            const query = { limit: number('limit'), expectedRelationshipVersion: number('expectedRelationshipVersion', true) };
+            const page = history ? store.revisionDependencies.history(id, { ...query, before: number('before') }, peer => access.canView(peer))
+              : store.revisionDependencies.page(id, { ...query, direction: choice(url.searchParams.get('direction'), 'direction', ['parents', 'children']), ...(url.searchParams.has('after') ? { after: url.searchParams.get('after')! } : {}) }, peer => access.canView(peer));
+            send(res, 200, { ...page, accessEpoch: policies.epoch() }); return;
+          }
           const docxDownload = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/([^/]+)\/download$/.exec(path);
           if (docxDownload) {
             const id = docxDownload[1]!; access.require(id);

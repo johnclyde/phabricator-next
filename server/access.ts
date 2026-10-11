@@ -1,5 +1,7 @@
 import type { AuthContext } from '../shared/auth.ts';
 import { isDeepStrictEqual } from 'node:util';
+import { revisionDependencyInputHash } from './revision-dependencies.ts';
+import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
 import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
@@ -378,6 +380,10 @@ export class AccessLayer {
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    if (method === 'POST' && /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/dependencies$/.test(path)) {
+      const change = parseRevisionDependencyInput(input);
+      for (const id of [...change.add, ...change.remove]) if (!this.canView(id)) throw new HttpError(404, 'Revision reference is unavailable.', 'REVISION_DEPENDENCY_UNAVAILABLE');
+    }
     if (method === 'POST' && path === '/api/documents') this.wikiCreationDestination(record(input)?.slug ?? record(input)?.title);
     if (method === 'POST' && /^\/api\/documents\/W\d+\/move$/.test(path)) {
       const data = parseWikiMoveInput(input);
@@ -678,6 +684,23 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    const dependencies = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies$/.exec(path) : null;
+    if (dependencies) {
+      this.authorize(method, path, mutationInput);
+      const input = parseRevisionDependencyInput(mutationInput);
+      const invalid = (): never => { throw new HttpError(409, 'This saved dependency receipt does not match the requested operation.', 'REVISION_DEPENDENCY_INVALID_RECEIPT'); };
+      if (!body || response.status !== 200 || typeof body.operationId !== 'string' || body.revisionId !== dependencies[1]) return invalid();
+      let operation;
+      try {
+        if (this.store.revisionDependencies.receiptRevisionId(body.operationId) !== dependencies[1]) return invalid();
+        operation = this.store.revisionDependencies.receipt(body.operationId);
+      } catch { return invalid(); }
+      const { accessEpoch: _epoch, ...saved } = body;
+      if (operation.revisionId !== dependencies[1] || operation.attribution.principalId !== this.principal
+        || operation.inputSha256 !== revisionDependencyInputHash(input) || !isDeepStrictEqual(operation.input, input)
+        || !isDeepStrictEqual(saved, operation.receipt)) return invalid();
+      return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
+    }
     const wikiLifecycle = method === 'POST' ? /^\/api\/documents\/W\d+\/(drafts|publish|delete)$/.exec(path) : null;
     if (wikiLifecycle) {
       const invalid = (): never => { throw new HttpError(409, 'This saved wiki lifecycle receipt does not match the requested operation.', 'WIKI_RECEIPT_MISMATCH'); };

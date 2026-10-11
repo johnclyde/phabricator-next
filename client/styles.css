@@ -888,3 +888,27 @@
   .repository-blame-line > button { min-height: 44px; width: 145px; gap: 6px; padding-inline: 8px; }
   .repository-blame-line > pre { display: flex; align-items: center; }
 }
+.revision-dependencies { min-width: 0; overflow-wrap: anywhere; }
+.revision-dependencies > .panel-heading { gap: 12px; flex-wrap: wrap; }
+.revision-dependency-lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.revision-dependencies h3 { font-size: 14px; margin: 12px 0; }
+.revision-dependencies ul { list-style: none; margin: 0; padding: 0; }
+.revision-dependencies li { border-bottom: 1px solid #dce5ed; padding: 12px 0; }
+.revision-dependency-lists li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.revision-dependency-lists li > a { flex-basis: 100%; overflow-wrap: anywhere; }
+.revision-dependencies small { display: block; color: #60798b; margin-top: 5px; }
+.revision-dependency-editor, .revision-dependency-recovery { border-top: 1px solid #dce5ed; margin-top: 20px; padding-top: 12px; }
+.revision-dependencies fieldset { min-width: 0; max-height: 300px; overflow: auto; margin: 12px 0; border: 1px solid #dce5ed; padding: 10px 14px; }
+.revision-dependencies .checkbox { align-items: flex-start; gap: 10px; }
+.revision-dependencies .checkbox input { flex: 0 0 auto; margin-top: 5px; }
+.revision-dependency-selected p { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.revision-dependency-history { margin-top: 20px; }
+.revision-dependency-history summary { cursor: pointer; padding: 12px 0; font-weight: 600; }
+.revision-dependency-history ol { margin: 0; padding-left: 20px; }
+@media (max-width: 700px) {
+  .revision-dependency-lists { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .revision-dependencies .button, .revision-dependencies .text-button, .revision-dependencies .checkbox, .revision-dependency-history summary { min-height: 44px; }
+  .revision-dependency-lists li > a { min-height: 44px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .revision-dependencies .file-actions { align-items: stretch; }
+  .revision-dependencies .file-actions > .button { flex: 0 1 auto; }
+}

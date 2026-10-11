@@ -1,6 +1,7 @@
 import Files from './Files';
 import Pastes from './Pastes';
 import DocxWorkspace, { DocxImport } from './DocxWorkspace';
+import RevisionDependencies from './RevisionDependencies';
 import type { DocxPassageInput } from '../shared/docx-discussion';
 import VersionEditor, { versionDraftChanged, type VersionDraft } from './VersionEditor';
 import { RevisionAssets } from './RevisionAssets';
@@ -383,6 +384,7 @@ function RevisionPage({ id, state, online, mutate, navigate, notify, manageAcces
     {comparisonWarning && <p className="info-strip" role="status">{comparisonWarning}</p>}
     {!current && <div className="banner warning">You are viewing version {version.number}. The current version is {revision.currentVersion}. Your selected comparison stays fixed until you change it.</div>}
     <div className="revision-layout"><div className="main-column"><Panel title="Summary"><div className="revision-summary">{revision.summary || 'No summary provided.'}</div></Panel>
+    <RevisionDependencies id={id} state={state} online={online} canEdit={canEdit} refreshWorkspace={refreshWorkspace}/>
     <Panel title={revision.kind === 'code' ? 'Changes' : 'Draft comparison'} icon={revision.kind === 'code' ? Code2 : FileText} extra={<div className="small-actions"><button className="text-button" disabled={!current || !!busy || !canEdit} onClick={() => { selectionGeneration.current++; setEditing(!editing); }}>{editing ? 'Close editor' : 'Edit & add version'}</button><button className="text-button" onClick={() => download(new Blob([currentFile?.content || ''], { type: 'text/plain' }), (currentFile?.path || 'source.txt').split('/').pop()!)} disabled={!currentFile}><FileCode2 size={14}/>Download source</button></div>}>
       <ComparisonPicker detail={detail} selection={selection!} change={changeSelection} current={() => showCurrent()}/>
       <Comparison change={changeSelection} canComment={canInteract} onLine={chooseLine} selectedLine={line} key={JSON.stringify(selection)} revisionId={id} base={base} target={version} selection={selection!} register={registerComparison}>{currentFile && !canRenderReviewSource(currentFile.content) ? <p className="info-strip">This target source exceeds the inline display limit. Download its exact source to read it; inline source comments and structure are unavailable for this file.</p> : selection!.view === 'structure' ? <PaperStructure content={currentFile?.content || ''}/> : currentFile ? <SourcePassages key={`${version.id}:${effectivePath}`} content={currentFile.content} canComment={canInteract} selectedLine={line} onLine={chooseLine} onPassage={choosePassage}/> : <p className="info-strip">This file is absent from the selected target. Its deletion is visible in Changes; new source comments cannot attach to the deleted side.</p>}</Comparison>
