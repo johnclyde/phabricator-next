@@ -137,8 +137,8 @@ actors and system agents.
 
 The [mute controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/subscriptions/controller/PhabricatorSubscriptionsMuteController.php)
 maintains an independent self-only preference. Upstream hides these changes from
-ordinary transaction history. Native mute preferences must remain private and
-must not be presented as working notification delivery before delivery exists.
+ordinary transaction history. Native mute preferences remain private and now suppress every recipient path in
+the [revision notification inbox](notifications.md).
 
 ## Implementation boundary
 
@@ -148,7 +148,8 @@ receipts, independent preference versions, current authority checks, mobile
 controls and retained offline intents extend the archived behavior. Historical
 comments are not backfilled into invented subscription history.
 
-Notification delivery, activity-feed publication, inbound/outbound mail, service account kinds,
+NOTIFY-01 adds revision inbox delivery for people followers and tagged-project
+watchers. Activity-feed publication, inbound/outbound mail, service account kinds,
 project/package subscribers, mentions, Herald, subscription-driven policies,
 Conduit subscription edits, bulk set/import and upstream history import remain
 separate parity gaps. See [the internal tracker](roadmap.md) and
@@ -169,5 +170,5 @@ Client tests cover private viewer identity, cached pages, distinct public/privat
 history, late reads, quota failures, session replacement, action-specific draft
 holds and exact request cleanup. Browser scenarios exercise text and Word,
 Following filters and voice commands, offline drafts, permission loss and lost
-responses while preserving a newer action draft. These checks do not test or
-claim notification delivery.
+responses while preserving a newer action draft. These following checks are separate from the
+[notification delivery verification](notifications.md#verification).

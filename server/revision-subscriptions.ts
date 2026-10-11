@@ -1,3 +1,4 @@
+import type { NotificationPublisher } from './notifications.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -52,6 +53,8 @@ export function initializeRevisionSubscriptions(db: DatabaseSync): void {
 /** The caller owns current VIEW/action authority and validates new people. Mute
  * reads and receipts must only be presented to their authenticated principal. */
 export class RevisionSubscriptionStore {
+  private notificationPublisher?: NotificationPublisher;
+  connectNotifications(publisher: NotificationPublisher): void { if (this.notificationPublisher) throw new Error('Notifications already connected.'); this.notificationPublisher = publisher; }
   constructor(private readonly database: DatabaseSync, private readonly authorship: RevisionAuthorshipStore, private readonly reviewers: RevisionReviewerStore) {}
   private requireRevision(id: string): void {
     if (!isRevisionId(id) || !this.database.prepare("SELECT 1 FROM entities WHERE id=? AND kind='revision' AND json_extract(data,'$.id')=?").get(id, id)) throw new HttpError(404, 'Revision subscriptions are unavailable.', 'REVISION_SUBSCRIPTION_UNAVAILABLE');
@@ -109,6 +112,20 @@ export class RevisionSubscriptionStore {
   status(id: string, principalId: string): RevisionSubscriptionStatus { return scope(this.database, () => this.decorate(this.explicit(id, principalId), this.roles(id))); }
   person(id: string, principalId: string): Omit<RevisionSubscriptionPerson, 'accessEpoch'> { return scope(this.database, () => { const roles = this.roles(id); return { status: this.decorate(this.explicit(id, principalId), roles), authorVersion: roles.authorVersion, reviewerVersion: roles.reviewerVersion, roleDigest: roleDigest(roles) }; }); }
   effective(id: string, principalId: string): boolean { return this.status(id, principalId).following; }
+  /** Internal delivery selection. Mute preferences never enter public read models. */
+  deliveryPreferences(id: string, extra: readonly string[] = []): { recipients: string[]; muted: string[] } {
+    return scope(this.database, () => {
+      const roles = this.roles(id), rows = this.database.prepare('SELECT principal_id FROM revision_subscriptions WHERE revision_id=? LIMIT ?').all(id, REVISION_SUBSCRIPTION_LIMITS.people + 1) as { principal_id: string }[];
+      if (rows.length > REVISION_SUBSCRIPTION_LIMITS.people || extra.length > 10000) throw limited();
+      const recipients = new Set(extra);
+      for (const row of rows) if (this.explicit(id, row.principal_id).state === 'subscribed') recipients.add(row.principal_id);
+      if (roles.author) recipients.add(roles.author.principalId);
+      for (const reviewer of roles.reviewers) recipients.add(reviewer.principalId);
+      if (recipients.size > 10000) throw limited();
+      const ids = [...recipients].sort();
+      return { recipients: ids, muted: ids.filter(person => this.mute(id, person).muted) };
+    });
+  }
   private muteTransactionAt(id: string, principalId: string, version: number): RevisionMuteTransaction {
     const row = this.database.prepare('SELECT id,operation_id,data FROM revision_mute_transactions WHERE revision_id=? AND principal_id=? AND version=?').get(id, principalId, version) as { id: string; operation_id: string; data: string } | undefined;
     if (!row) throw invalid(); const t = decode<RevisionMuteTransaction>(row.data);
@@ -196,7 +213,7 @@ export class RevisionSubscriptionStore {
         const t = receipt.transaction; this.database.prepare('INSERT INTO revision_mute_transactions(id,revision_id,principal_id,version,operation_id,data) VALUES(?,?,?,?,?,?)').run(t.id, id, actor.principalId, t.version, operationId, JSON.stringify(t));
         this.database.prepare('INSERT INTO revision_mutes(revision_id,principal_id,version,data) VALUES(?,?,?,?) ON CONFLICT(revision_id,principal_id) DO UPDATE SET version=excluded.version,data=excluded.data').run(id, actor.principalId, receipt.mute.version, JSON.stringify(receipt.mute));
       }
-      return receipt;
+      if (receipt.kind === 'subscription' && receipt.changed && request.principalId !== actor.principalId) this.notificationPublisher?.({ revisionId: id, kind: 'subscribers_changed', cause: { type: 'subscriptions', id: operationId }, attribution: actor }); return receipt;
     }, true);
   }
   /** Only actual enabled accounts or the local workspace identity are people.

@@ -1,3 +1,4 @@
+import type { NotificationPublisher } from './notifications.ts';
 import { isRevisionStatus } from '../shared/revision-status.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -75,6 +76,8 @@ export function initializeRevisionAuthorship(db: DatabaseSync): void {
 /** Storage boundary: the caller checks current revision authority and validates
  * an assignment target as an active workspace principal before calling mutate. */
 export class RevisionAuthorshipStore {
+  private notificationPublisher?: NotificationPublisher;
+  connectNotifications(publisher: NotificationPublisher): void { if (this.notificationPublisher) throw new Error('Notifications already connected.'); this.notificationPublisher = publisher; }
   constructor(private readonly database: DatabaseSync, private readonly closeOnAccept = false, private readonly reviewerChanged?: (id: string, previous: RevisionAuthor | null, author: RevisionAuthor, actor: ActorAttribution, operationId: string) => void) {}
   private requireRevision(id: string): void {
     if (!isRevisionId(id) || !this.database.prepare("SELECT 1 FROM entities WHERE id=? AND kind='revision'").get(id)) throw unavailable();
@@ -166,7 +169,7 @@ export class RevisionAuthorshipStore {
       if (!this.reviewerChanged) throw invalid();
       this.reviewerChanged(id, authorship.author, author, actor, operationId);
       this.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run();
-      return receipt;
+      this.notificationPublisher?.({ revisionId: id, kind: 'author_changed', cause: { type: 'authorship', id: operationId }, attribution: actor }); return receipt;
     }, true);
   }
   operationRevisionId(id: string): string {

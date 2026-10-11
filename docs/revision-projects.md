@@ -136,7 +136,8 @@ includes archived projects with a status label. The
 [project search extension](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/project/engineextension/PhabricatorProjectsSearchEngineExtension.php)
 adds tag constraints and project attachments.
 
-Project-driven notification delivery, Herald, project/package reviewer groups,
+Existing tagged-project and ancestor people watchers now receive visible revision
+updates through the [notification inbox](notifications.md). Herald, project/package reviewer groups,
 subscription inheritance, generic bulk editing, revision workboard cards, full
 saved-query logic, Conduit/Arcanist field interoperability and upstream history
 import and unlimited tag scale remain parity gaps. Repository reassignment also

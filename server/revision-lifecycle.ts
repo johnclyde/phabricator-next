@@ -1,3 +1,4 @@
+import type { NotificationPublisher } from './notifications.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -79,6 +80,8 @@ export function revisionLifecycleConfigHash(config: RevisionLifecycleConfig): st
 /** Caller authorizes current View/Edit; this storage boundary also checks the
  * current author role, source and lifecycle pins under the same writer lock. */
 export class RevisionLifecycleStore {
+  private notificationPublisher?: NotificationPublisher;
+  connectNotifications(publisher: NotificationPublisher): void { if (this.notificationPublisher) throw new Error('Notifications already connected.'); this.notificationPublisher = publisher; }
   private reviewers?: RevisionReviewerStore;
   readonly config: RevisionLifecycleConfig;
   readonly configId: string;
@@ -204,7 +207,7 @@ export class RevisionLifecycleStore {
       const receipt: RevisionLifecycleReceipt = { revisionId: id, operationId, inputSha256, transaction, accessEpoch: epoch };
       const operation: RevisionLifecycleOperation = { id: operationId, revisionId: id, input: request, inputSha256, attribution: { ...actor }, before: lifecycle, after, authorship, config: this.config, evidence: snapshot.evidence, reviewProofs: this.evidence(id, head).proofs, receipt, reviewers: reviewResult.proof };
       this.database.prepare('INSERT INTO revision_lifecycle_operations(id,revision_id,input_sha256,data) VALUES(?,?,?,?)').run(operationId, id, inputSha256, JSON.stringify(operation));
-      this.append(lifecycle, after, transaction); return receipt;
+      this.append(lifecycle, after, transaction); this.notificationPublisher?.({ revisionId: id, kind: 'lifecycle_changed', cause: { type: 'lifecycle', id: operationId }, attribution: actor }); return receipt;
     }, true);
   }
   sourceUpdated(id: string, actor?: ActorAttribution): void {

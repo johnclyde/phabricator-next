@@ -116,8 +116,8 @@ fields, which the native action routes preserve.
 Explicit source/configuration/access pins, bounded corpus sizes and exact retry
 receipts are native extensions. Custom fields/forms, translated or custom corpus
 labels, Remarkup rendering, full commit-message parsing, repository
-reassignment, activity-feed publication, notifications, Conduit metadata edits and upstream
-history import remain gaps. [Revision project tags](revision-projects.md) and [revision following](revision-subscriptions.md) have separate contracts. This slice does not establish Differential parity.
+reassignment, activity-feed publication, Conduit metadata edits and upstream
+history import remain gaps. [Revision project tags](revision-projects.md) and [revision following](revision-subscriptions.md) have separate contracts. Metadata updates also reach the [revision notification inbox](notifications.md). This slice does not establish Differential parity.
 
 ## Verification
 

@@ -35,6 +35,7 @@ import { revisionReviewerInput, type RevisionReviewerConfig } from '../shared/re
 import { revisionSubscriptionInput } from '../shared/revision-subscriptions.ts';
 import { revisionProjectInput } from '../shared/revision-projects.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
+import { notificationReadInput } from '../shared/notifications.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -160,6 +161,10 @@ export function createApp(options: AppOptions = {}): App {
   if (options.seed !== false) seedDemo(store);
   const policies = new PolicyStore(store.database, { principalExists: id =>
     (auth.mode === 'local' && id === `local:${auth.workspaceId}`) || Boolean(store.database.prepare('SELECT id FROM auth_accounts WHERE id = ?').get(id)),
+  });
+  store.notifications.configure({
+    eligible: principalId => auth.mode === 'local' && principalId === `local:${auth.workspaceId}` || Boolean(store.database.prepare('SELECT 1 FROM auth_accounts WHERE id=? AND disabled=0').get(principalId)),
+    canView: (revisionId, principalId) => policies.access(revisionId, principalId).view,
   });
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
@@ -289,6 +294,18 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    if (method === 'POST' && path === '/api/notifications/read') {
+      store.read(() => auth.revalidate(context, 'write'));
+      if (!rawKey) throw new HttpError(400, 'Notification read changes require an Idempotency-Key.');
+      let data;
+      try { data = notificationReadInput(input); } catch { throw new HttpError(400, 'Provide an exact notification read action, observed version or horizon, and access epoch.'); }
+      const authorize = () => { auth.revalidate(context, 'write'); access.requireNotificationAction(data); };
+      store.read(authorize);
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex'), fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.notifications.mutate(context.principalId, data, actor, retryKeySha256) }), authorize, response => access.presentNotificationRead(data, response, retryKeySha256));
+    }
     const revisionProject = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/projects$/.exec(path) : null;
     if (revisionProject) {
       const id = revisionProject[1]!;
@@ -754,6 +771,13 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          if (path === '/api/notifications' || path === '/api/notifications/count') {
+            const count = path.endsWith('/count'), allowed = count ? [] : ['filter', 'before', 'limit'];
+            if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Choose unique supported notification parameters.');
+            const filter = url.searchParams.get('filter') ?? 'all', before = url.searchParams.get('before'), limit = url.searchParams.get('limit');
+            if (!['all', 'unread', 'read'].includes(filter) || before !== null && (!before.length || before.length > 4096) || limit !== null && (!/^[1-9]\d*$/.test(limit) || !Number.isSafeInteger(Number(limit)) || Number(limit) > 100)) throw new HttpError(400, 'Choose a valid notification filter, cursor and page limit.');
+            send(res, 200, count ? access.notificationSummary() : access.notifications({ filter: filter as 'all' | 'unread' | 'read', ...(before === null ? {} : { before }), ...(limit === null ? {} : { limit: Number(limit) }) })); return;
+          }
           const revisionProjects = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/projects(?:\/(history))?$/.exec(path);
           if (revisionProjects) {
             const id = revisionProjects[1]!; access.require(id);

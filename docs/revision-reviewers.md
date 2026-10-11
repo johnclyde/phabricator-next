@@ -164,7 +164,8 @@ Behavior is based on Phabricator
 
 This slice covers people acting as themselves. Project and Owners-package
 reviewers, acting for a collective reviewer, force acceptance, Herald assignment,
-notifications, Conduit interoperability and upstream migration remain gaps.
+Conduit interoperability and upstream migration remain gaps. People reviewer
+updates now reach the [revision notification inbox](notifications.md).
 Upstream sticky acceptance is deliberately replaced by exact-source acceptance;
 new content requires a new applicable decision. The native current-evidence error
 veto and explicit concurrency/receipt checks are additional safeguards. Full

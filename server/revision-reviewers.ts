@@ -1,3 +1,4 @@
+import type { NotificationPublisher } from './notifications.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -110,6 +111,8 @@ function applyMember(snapshot: Core, input: RevisionReviewerInput, actor: ActorA
 
 /** Current policy and active membership targets are authorized by the API; this engine owns exact pins and atomic proof. */
 export class RevisionReviewerStore {
+  private notificationPublisher?: NotificationPublisher;
+  connectNotifications(publisher: NotificationPublisher): void { if (this.notificationPublisher) throw new Error('Notifications already connected.'); this.notificationPublisher = publisher; }
   readonly config: RevisionReviewerConfig;
   constructor(private readonly database: DatabaseSync, private readonly lifecycle: RevisionLifecycleStore, configuration: Partial<RevisionReviewerConfig> = {}) {
     const config = { ...DEFAULT_REVISION_REVIEWER_CONFIG, ...configuration };
@@ -177,7 +180,7 @@ export class RevisionReviewerStore {
       const receipt: RevisionReviewerReceipt = { revisionId: id, operationId, inputSha256, transaction, accessEpoch: epoch };
       const operation: RevisionReviewerOperation = { id: operationId, revisionId: id, input: request, inputSha256, attribution: { ...actor }, before, after, reviewProofs: this.lifecycle.reviewEvidence(id, before.head).proofs, receipt };
       this.database.prepare('INSERT INTO revision_reviewer_operations(id,revision_id,input_sha256,data) VALUES(?,?,?,?)').run(operationId, id, inputSha256, JSON.stringify(operation));
-      this.append(before.reviewers, after, transaction, operationId, before.lifecycle.version); return receipt;
+      this.append(before.reviewers, after, transaction, operationId, before.lifecycle.version); this.notificationPublisher?.({ revisionId: id, kind: 'reviewers_changed', cause: { type: 'reviewers', id: operationId }, attribution: actor }); return receipt;
     }, true);
   }
   private automatic(id: string, before: RevisionReviewerState, after: RevisionReviewerState, action: RevisionReviewerTransaction['action'], source: RevisionAuthorHead, fromStatus: RevisionStatus, toStatus: RevisionStatus, lifecycleVersion: number, actor: ActorAttribution | undefined, causeId: string, now: string, beforeLifecycleVersion: number, force = false, transactionId = randomUUID()): void {

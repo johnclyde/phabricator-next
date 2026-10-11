@@ -135,7 +135,8 @@ also removes the new author from reviewers, adds the former author and
 recalculates review state. These effects now apply to new handoffs in the
 [named-reviewer workflow](revision-reviewers.md); migration does not fabricate
 reviewer effects for older handoffs. Model/check evidence remains separate from
-personal decisions. Collective reviewers, notifications, profile handles and
+personal decisions. [Revision notifications](notifications.md) now deliver handoff
+updates. Collective reviewers, profile handles and
 PHIDs/Conduit author edits remain explicit parity gaps.
 
 The [revision lifecycle](revision-lifecycle.md) now provides explicit author actions and operator close-on-accept semantics. Stack v3 binds lifecycle versions and this terminal-status configuration in its canonical identity.

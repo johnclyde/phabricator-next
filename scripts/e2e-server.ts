@@ -19,6 +19,12 @@ if (process.env.E2E_REAL_TEX === '1' && !paperRunner) throw new Error('Real TeX 
 mkdirSync(resolve('.data'), { recursive: true });
 writeFileSync(fixturePath, JSON.stringify({ barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit, importNextCommit: gitFixture.importNextCommit, importEqualCommit: gitFixture.importEqualCommit, comparisonBase: comparisonFixture.base, comparisonTarget: comparisonFixture.target, blame: blameFixture }));
 const app = createApp({ paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+if (process.env.E2E_NOTIFICATION_FIXTURE === '1') {
+  const author = { principalId: `local:${app.auth.workspaceId}`, displayName: 'Local reader', credentialId: null, requestId: 'notification-offline-fixture' };
+  const contributor = await app.auth.createAccount({ username: 'notification-fixture', displayName: 'Fixture Contributor', password: 'test-only-local-notification-password' });
+  const revision = app.store.createRevision({ title: 'Local durable notification fixture', kind: 'paper', testPlan: 'Verify cached inbox reads without sending an offline read action.', files: [{ path: 'paper.txt', content: 'Offline notification source.\n' }] }, author);
+  app.store.createComment(revision.revision.id, { versionId: revision.versions[0]!.id, body: 'A disposable contributor comment.' }, { ...author, principalId: contributor.id, displayName: contributor.displayName, requestId: 'notification-offline-comment' });
+}
 const passwordStore = createStore({ path: join(directory, 'password-workspace.sqlite') });
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });
 for (const account of authAccounts) await provisioner.createAccount(account);

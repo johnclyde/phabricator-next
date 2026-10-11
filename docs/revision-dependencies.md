@@ -181,8 +181,11 @@ mutable ownership, transfer history and commandeering; author profile handles
 remain unfinished.
 
 Summary-derived "Depends on" parsing,
-revision PHIDs and Conduit edge/edit/query interoperability, notifications,
+revision PHIDs and Conduit edge/edit/query interoperability,
 reviewer assignments and their transfer effects, and working-copy/landing orchestration remain gaps.
 This dependency workflow does not establish full Differential parity.
 
 The [revision lifecycle](revision-lifecycle.md) now provides explicit author actions and operator close-on-accept semantics. Stack v3 binds lifecycle versions and this terminal-status configuration in its canonical identity.
+
+Dependency-only edits remain silent in the [revision notification inbox](notifications.md),
+matching the pinned upstream transaction visibility rule.

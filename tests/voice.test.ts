@@ -58,3 +58,13 @@ test('revision project commands filter visible lists without changing project ta
   for (const command of ['add Research to P2', 'remove project tags from D1', 'replace all paper tags', 'show papers in project', 'open drafts in all projects and delete them']) assert.equal(parseCommand(command).type, 'unknown');
   assert.deepEqual(parseCommand('show tasks in project Research'), { type: 'taskProjectFilter', project: 'Research' });
 });
+
+
+test('notification commands select a private inbox without marking messages read', () => {
+  for (const command of ['notifications', 'Open the notifications.', 'go to notification inbox']) assert.deepEqual(parseCommand(command), { type: 'notificationFilter', filter: 'all' });
+  for (const filter of ['all', 'unread', 'read']) {
+    for (const command of [`show ${filter} notifications`, `open the ${filter} notification inbox`]) assert.deepEqual(parseCommand(command), { type: 'notificationFilter', filter });
+  }
+  for (const command of ['mark all notifications read', 'clear notifications', 'delete notifications', 'open notifications and mark them read', 'read all notifications aloud', 'read notifications', 'open Bob notifications']) assert.equal(parseCommand(command).type, 'unknown');
+  assert.deepEqual(parseCommand('open outbox'), { type: 'navigate', view: 'outbox' });
+});

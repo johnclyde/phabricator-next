@@ -1,3 +1,5 @@
+import { initializeNotifications, NotificationStore } from './notifications.ts';
+import { NOTIFICATION_LIMITS } from '../shared/notifications.ts';
 import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
 import { RevisionStackStore } from './revision-stack.ts';
@@ -35,7 +37,7 @@ import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repo
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
 import { initializePolicies, registerDefaultPolicy, upgradeProjectPolicies } from './policy.ts';
 import { initializeProjects, ProjectStore } from './projects.ts';
-import { initializeProjectHierarchy } from './project-graph.ts';
+import { initializeProjectHierarchy, ancestorIds } from './project-graph.ts';
 import { normalizeProjectTags } from '../shared/project-hierarchy.ts';
 import type { ProjectChildPreview, ProjectKind, ProjectDetail, ProjectHistory, ProjectMembersPage, ProjectPreferences, ProjectWatchersPage } from '../shared/projects.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
@@ -180,6 +182,7 @@ export class Store {
   readonly revisionMetadata: RevisionMetadataStore;
   readonly revisionSubscriptions: RevisionSubscriptionStore;
   readonly revisionProjects: RevisionProjectStore;
+  readonly notifications: NotificationStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -192,7 +195,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 30) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 31) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -461,6 +464,10 @@ export class Store {
       try { this.transaction(() => { initializeRevisionProjects(this.database); this.database.exec('PRAGMA user_version = 30'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 31) {
+      try { this.transaction(() => { initializeNotifications(this.database); this.database.exec('PRAGMA user_version = 31'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.revisionProjects = new RevisionProjectStore(this.database);
     this.revisionMetadata = new RevisionMetadataStore(this.database, options.revisionMetadata);
     this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
@@ -468,6 +475,25 @@ export class Store {
     this.revisionLifecycle.connectReviewers(this.revisionReviewers);
     this.revisionAuthorship = new RevisionAuthorshipStore(this.database, this.revisionLifecycle.config.closeOnAccept, (id, previous, author, actor, operationId) => this.revisionReviewers.authorChanged(id, previous, author, actor, operationId));
     this.revisionSubscriptions = new RevisionSubscriptionStore(this.database, this.revisionAuthorship, this.revisionReviewers);
+    this.notifications = new NotificationStore(this.database, {
+      revision: id => {
+        const row = this.database.prepare("SELECT json_extract(data,'$.kind') AS kind FROM entities WHERE id=? AND kind='revision'").get(id) as { kind: Revision['kind'] } | undefined;
+        if (!row || !['code', 'paper', 'document'].includes(row.kind)) throw new HttpError(404, 'Revision is unavailable.', 'OBJECT_UNAVAILABLE');
+        return { title: this.revisionMetadata.state(id).title, kind: row.kind, head: this.revisionAuthorship.snapshot(id).head, broadcast: this.revisionLifecycle.state(id).reviewStarted };
+      },
+      recipients: id => {
+        const projects = new Set<string>(), watchers = new Set<string>(); let scanned = 0;
+        for (const tag of this.revisionProjects.state(id).projectIds) for (const project of [tag, ...ancestorIds(this.database, tag)]) projects.add(project);
+        for (const project of projects) {
+          const rows = this.database.prepare("SELECT principal_id FROM project_relations WHERE project_id=? AND relation='watcher' AND active=1 LIMIT ?").all(project, NOTIFICATION_LIMITS.projectRows - scanned + 1) as { principal_id: string }[];
+          scanned += rows.length; if (scanned > NOTIFICATION_LIMITS.projectRows) throw new HttpError(422, 'Project watcher routing exceeds the complete notification limit.', 'NOTIFICATION_LIMIT');
+          for (const row of rows) watchers.add(row.principal_id);
+        }
+        // Upstream watcher routing overrides project silence; object mute still wins.
+        return this.revisionSubscriptions.deliveryPreferences(id, [...watchers]);
+      },
+    });
+    for (const domain of [this.revisionProjects, this.revisionMetadata, this.revisionAuthorship, this.revisionLifecycle, this.revisionReviewers, this.revisionSubscriptions]) domain.connectNotifications(this.notifications.emit);
     this.revisionDependencies = new RevisionDependencyStore(this.database, id => this.revisionMetadata.state(id));
     this.revisionStack = new RevisionStackStore(this.database, id => this.revisionMetadata.state(id), this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
@@ -492,7 +518,7 @@ export class Store {
     catch (error) { this.database.exec('ROLLBACK'); throw error; }
   }
   mutate(key: string | undefined, fingerprint: string, work: () => MutationResponse, authorize?: () => void, present?: (response: MutationResponse, replayed: boolean) => MutationResponse): MutationResponse {
-    return this.transaction(() => {
+    return this.transaction(() => this.notifications.batch(() => {
       // Credential revocation in another process may commit while BEGIN waits.
       // Check authority after acquiring the write lock and before replay/writes.
       authorize?.();
@@ -501,12 +527,13 @@ export class Store {
         if (existing) return present ? present(existing, true) : existing;
       }
       const response = work();
+      this.notifications.flush();
       if (key) {
         this.revisionProjects.captureResponse(key, fingerprint, response);
         this.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(key, fingerprint, response.status, JSON.stringify(response.body), new Date().toISOString());
       }
       return present ? present(response, false) : response;
-    });
+    }));
   }
   replay(key: string, fingerprint: string): MutationResponse | undefined {
     const row = this.database.prepare('SELECT fingerprint, status, body FROM idempotency WHERE key = ?').get(key) as { fingerprint: string; status: number; body: string } | undefined;
@@ -1306,6 +1333,14 @@ export class Store {
   documentDetail(id: string): WikiDetail {
     const document=this.get<WikiDocument>('document',id);return {document,head:this.rawWikiVersion(document.publication!.headVersionId),lifecycle:this.documentTransactions(id),history:this.documentHistory(id),activity:this.activities(id)};
   }
+  private notificationVersionHead(id: string, versionId: string) {
+    const row = this.database.prepare("SELECT number,json_extract(data,'$.contentHash') AS contentHash FROM versions WHERE revision_id=? AND id=?").get(id, versionId) as { number: number; contentHash: string } | undefined;
+    if (!row) throw new HttpError(409, 'Notification source identity is unavailable.', 'NOTIFICATION_INVALID_RECEIPT');
+    return { versionId, number: row.number, contentHash: row.contentHash };
+  }
+  private notifyRevisionSource(id: string, kind: 'created' | 'source_updated', attribution?: ActorAttribution): void {
+    const head = this.revisionAuthorship.snapshot(id).head; this.notifications.emit({ revisionId: id, kind, cause: { type: 'source', id: head.versionId }, attribution });
+  }
   createRevision(input: unknown, attribution?: ActorAttribution): RevisionDetail {
     return this.discussionMutation(() => this.createRevisionRecord(input, attribution));
   }
@@ -1360,7 +1395,7 @@ export class Store {
       this.save('revision', revision); this.attachDocxSource(revision.id, data.sourceFile, data.shareSource, actor);
       this.saveDocxVersion(revision, source, bytes, 'Imported Word document', actor, { kind: 'import', inputSha256: docxOperationHash(data) });
       this.revisionMetadata.ensure(revision.id, metadata); this.revisionProjects.ensure(revision.id, projectIds);
-      this.event(revision.id, 'created', 'Imported Word document as version 1.', actor);
+      this.event(revision.id, 'created', 'Imported Word document as version 1.', actor); this.notifyRevisionSource(revision.id, 'created', actor);
       return this.detail(revision.id);
     });
   }
@@ -1396,7 +1431,7 @@ export class Store {
       revision.currentVersion++; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.attachDocxSource(id, data.sourceFile, data.shareSource, actor);
       this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'reimport', inputSha256: docxOperationHash(data) });
-      this.event(id, 'version_created', `Imported Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
+      this.event(id, 'version_created', `Imported Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor); this.notifyRevisionSource(id, 'source_updated', actor);
       return this.detail(id);
     });
   }
@@ -1418,7 +1453,7 @@ export class Store {
       if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
       revision.currentVersion++; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'replace', inputSha256: docxOperationHash(data) });
-      this.event(id, 'version_created', `Edited Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
+      this.event(id, 'version_created', `Edited Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor); this.notifyRevisionSource(id, 'source_updated', actor);
       return this.detail(id);
     });
   }
@@ -1465,7 +1500,7 @@ export class Store {
       const { source, gitSource } = this.verifiedGitSnapshot(revision.repositoryId!, data.commitId, snapshot);
       revision.currentVersion += 1; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveVersion(revision, source, data.message, attribution, gitSource);
-      this.event(id, 'version_created', `Imported Git commit ${gitSource.commitId} as version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution);
+      this.event(id, 'version_created', `Imported Git commit ${gitSource.commitId} as version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); this.notifyRevisionSource(id, 'source_updated', attribution);
       return this.detail(id);
     });
   }
@@ -1479,7 +1514,7 @@ export class Store {
     const now = new Date().toISOString();
     const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: metadata.title, summary: metadata.summary, kind, status: data.draft ? 'draft' : 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: projectIds[0] ?? null, currentVersion: 1, createdAt: now, updatedAt: now };
     this.save('revision', revision); this.shareSourceAssets(revision.id, assets, [], data.shareAssets, attribution);
-    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.revisionMetadata.ensure(revision.id, metadata); this.revisionProjects.ensure(revision.id, projectIds); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
+    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.revisionMetadata.ensure(revision.id, metadata); this.revisionProjects.ensure(revision.id, projectIds); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); this.notifyRevisionSource(revision.id, 'created', attribution); return this.detail(revision.id);
   }
   private sourceAssets(source: SourceFile[], input: unknown, previous: RevisionAsset[]): RevisionAsset[] {
     const resolved = this.files.resolveAssets(input);
@@ -1526,7 +1561,7 @@ export class Store {
       this.shareSourceAssets(id, assets, current.assets ?? [], data.shareAssets, attribution);
       if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'This revision has reached the supported version limit.');
       revision.currentVersion += 1; revision.updatedAt = new Date().toISOString();
-      this.save('revision', revision); this.saveVersion(revision, source, message, attribution, undefined, assets); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); return this.detail(id);
+      this.save('revision', revision); this.saveVersion(revision, source, message, attribution, undefined, assets); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); this.notifyRevisionSource(id, 'source_updated', attribution); return this.detail(id);
     });
   }
   updateRevision(id: string, input: unknown, attribution?: ActorAttribution): Revision {
@@ -1624,7 +1659,7 @@ export class Store {
       const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
       this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, id, commentId, JSON.stringify(thread));
       this.revisionSubscriptions.commented(id, comment.id, attribution);
-      this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); return comment;
+      this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); this.notifications.emit({ revisionId: id, kind: 'commented', cause: { type: 'comment', id: comment.id }, attribution, createdAt: comment.createdAt, head: { versionId: version.id, number: version.number, contentHash: version.contentHash } }); return comment;
     });
   }
   private discussionMutation<T>(work: () => T): T {
@@ -1633,7 +1668,7 @@ export class Store {
       // A no-op write acquires the SQLite writer lock before thread versions
       // are read, including direct Store callers outside an API transaction.
       this.database.prepare("UPDATE sequences SET value = value WHERE name = 'revision'").run();
-      const result = work(); this.database.exec('RELEASE discussion_write'); return result;
+      const result = this.notifications.batch(work); this.database.exec('RELEASE discussion_write'); return result;
     } catch (error) { this.database.exec('ROLLBACK TO discussion_write; RELEASE discussion_write'); throw error; }
   }
   private commentVersion(id: string, value: unknown): RevisionVersion {
@@ -1700,7 +1735,7 @@ export class Store {
       const updated = this.advanceThread(thread, comment.createdAt);
       this.insertComment(comment); this.saveThread(updated);
       this.revisionSubscriptions.commented(id, comment.id, attribution);
-      this.event(id, 'replied', `Replied to a discussion while viewing version ${viewedVersion.number}.`, attribution);
+      this.event(id, 'replied', `Replied to a discussion while viewing version ${viewedVersion.number}.`, attribution); this.notifications.emit({ revisionId: id, kind: 'replied', cause: { type: 'comment', id: comment.id }, attribution, createdAt: comment.createdAt, head: this.notificationVersionHead(id, comment.versionId) });
       return comment;
     });
   }
@@ -1759,7 +1794,7 @@ export class Store {
       };
       this.saveThread(nextThread);
       this.database.prepare('INSERT INTO suggestion_applications (id, revision_id, comment_id, thread_id, from_version_id, to_version_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)').run(application.id, id, comment.id, thread.id, from.id, to.id, JSON.stringify(application));
-      this.event(id, 'suggestion_applied', `Applied a suggested replacement from version ${from.number} as version ${to.number}. Discussion status is unchanged.`, attribution);
+      this.event(id, 'suggestion_applied', `Applied a suggested replacement from version ${from.number} as version ${to.number}. Discussion status is unchanged.`, attribution); this.notifications.discard('source', to.id); this.notifications.emit({ revisionId: id, kind: 'suggestion_applied', cause: { type: 'suggestion', id: application.id }, attribution, createdAt: application.createdAt });
       return this.detail(id);
     });
   }
@@ -1774,7 +1809,7 @@ export class Store {
     if (detail.revision.status === 'accepted' && analysis.findings.some(finding => finding.severity === 'error')) {
       this.event(id, 'acceptance_invalidated', `New review errors invalidated acceptance of version ${expectedVersion}.`, attribution);
     }
-    this.event(id, 'reviewed', `${analysis.provider === 'local' ? 'Local checks' : 'AI review'} completed for version ${expectedVersion}: ${analysis.findings.length} findings.`, attribution); return review;
+    this.event(id, 'reviewed', `${analysis.provider === 'local' ? 'Local checks' : 'AI review'} completed for version ${expectedVersion}: ${analysis.findings.length} findings.`, attribution); this.notifications.emit({ revisionId: id, kind: 'review_completed', cause: { type: 'review', id: review.id }, attribution, createdAt: review.createdAt }); return review;
     });
   }
   detail(id: string): RevisionDetail {

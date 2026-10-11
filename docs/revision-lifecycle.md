@@ -159,6 +159,7 @@ People acting as themselves now have membership, accept/request-changes/resign
 decisions, blocking review, self-accept configuration and reviewer-state
 reassessment, including author handoff effects. See [reviewer contracts](revision-reviewers.md).
 Collective reviewers, force acceptance, Harbormaster publication,
-subscribers/notifications, commit-driven closure, Conduit edits, imported
-lifecycle history and landing remain gaps. Exact-version acceptance deliberately
+commit-driven closure, Conduit edits, imported
+lifecycle history and landing remain gaps. [Revision following](revision-subscriptions.md) and [inbox delivery](notifications.md)
+now respect draft broadcast state. Exact-version acceptance deliberately
 replaces upstream sticky acceptance. Full Differential parity is not claimed.

@@ -25,6 +25,7 @@ import { revisionLifecycleCommand } from './revision-lifecycle';
 import { revisionReviewersCommand } from './revision-reviewers';
 import { revisionSubscriptionsCommand } from './revision-subscriptions';
 import { revisionProjectsCommand } from './revision-projects';
+import { notificationsCommand } from './notifications';
 import { revisionMetadataCommand } from './revision-metadata';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
@@ -38,6 +39,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] [--project ID|NAME ...] FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
+  npm run arc -- notifications [--filter all|unread|read] [--before CURSOR] [--limit N]
+  npm run arc -- notification-count
+  npm run arc -- mark-notifications --intent REQUEST.json [--request-id KEY]
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
   npm run arc -- board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
@@ -254,7 +258,7 @@ async function main() {
       revision: { type: 'string' }, message: { type: 'string' }, provider: { type: 'string', default: 'local' },
       server: { type: 'string', default: process.env.PHABRICATOR_URL || 'http://127.0.0.1:4310' },
       version: { type: 'string' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
-      status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' },
+      status: { type: 'string' }, order: { type: 'string' }, limit: { type: 'string' }, filter: { type: 'string' },
       project: { type: 'string', multiple: true }, owner: { type: 'string' }, unassigned: { type: 'boolean' }, subscribed: { type: 'boolean' },
       joined: { type: 'boolean' }, watching: { type: 'boolean' },
       'show-hidden': { type: 'boolean' },
@@ -324,6 +328,7 @@ async function main() {
   if (await revisionReviewersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionSubscriptionsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionProjectsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await notificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

@@ -1,3 +1,4 @@
+import type { NotificationPublisher } from './notifications.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -47,6 +48,8 @@ export function initializeRevisionMetadata(db: DatabaseSync): void {
 /** Current object/Space/repository/File authority belongs to the caller. This
  * engine records exact metadata, configuration and immutable source identities. */
 export class RevisionMetadataStore {
+  private notificationPublisher?: NotificationPublisher;
+  connectNotifications(publisher: NotificationPublisher): void { if (this.notificationPublisher) throw new Error('Notifications already connected.'); this.notificationPublisher = publisher; }
   readonly config: Readonly<RevisionMetadataConfig>;
   readonly configId: string;
   constructor(private readonly database: DatabaseSync, configuration: Partial<RevisionMetadataConfig> = {}) {
@@ -127,7 +130,7 @@ export class RevisionMetadataStore {
         this.database.prepare('INSERT INTO revision_metadata_transactions(id,revision_id,version,operation_id,data) VALUES(?,?,?,?,?)').run(transaction.id, id, after.version, operationId, JSON.stringify(transaction));
         this.database.prepare('UPDATE revision_metadata SET version=?,data=? WHERE revision_id=?').run(after.version, JSON.stringify(after), id);
       }
-      return receipt;
+      if (changed) this.notificationPublisher?.({ revisionId: id, kind: 'metadata_changed', cause: { type: 'metadata', id: operationId }, attribution: actor }); return receipt;
     }, true);
   }
   operationRevisionId(id: string): string { if (!uuid(id)) throw invalid(); const row = this.database.prepare('SELECT revision_id FROM revision_metadata_operations WHERE id=?').get(id) as { revision_id: string } | undefined; if (!row || !isRevisionId(row.revision_id)) throw invalid(); return row.revision_id; }

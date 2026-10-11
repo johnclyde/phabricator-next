@@ -289,7 +289,7 @@ test('schema 8 migration recovers only proven original authors, preserves task v
   const directory = mkdtempSync(join(tmpdir(), 'phab-membership-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaSeven(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 30);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 31);
     old.tasks.forEach(({ projectId: _legacyProject, ...task }, index) => assert.deepEqual(store.taskDetail(task.id).task, { ...task, projectIds: [], ownerId: null, authorId: index === 0 ? alice.principalId : null }));
     const historyBytes = () => (store.database.prepare('SELECT data FROM task_transactions ORDER BY rowid').all() as { data: string }[]).map(row => row.data);
     assert.deepEqual(historyBytes(), old.histories);

@@ -1,3 +1,4 @@
+import type { NotificationPublisher } from './notifications.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -49,6 +50,8 @@ export function initializeRevisionProjects(db: DatabaseSync): void {
 /** Source and selected-project authority are checked by the caller under the
  * same writer transaction. Tags never confer access or change source evidence. */
 export class RevisionProjectStore {
+  private notificationPublisher?: NotificationPublisher;
+  connectNotifications(publisher: NotificationPublisher): void { if (this.notificationPublisher) throw new Error('Notifications already connected.'); this.notificationPublisher = publisher; }
   constructor(private readonly database: DatabaseSync) {}
   private entity(id: string): Record<string, unknown> {
     if (!isRevisionId(id)) throw unavailable(); const row = this.database.prepare("SELECT data FROM entities WHERE id=? AND kind='revision'").get(id) as { data: string } | undefined;
@@ -171,7 +174,7 @@ export class RevisionProjectStore {
       const operation: RevisionProjectOperation = { id: operationId, revisionId: id, input: request, inputSha256, retryKeySha256, before, hierarchy, attribution: { ...actor }, createdAt, receipt };
       this.database.prepare('INSERT INTO revision_project_operations(id,revision_id,input_sha256,data) VALUES(?,?,?,?)').run(operationId, id, inputSha256, JSON.stringify(operation));
       if (transaction) { this.database.prepare('INSERT INTO revision_project_transactions(id,revision_id,version,operation_id,data) VALUES(?,?,?,?,?)').run(transaction.id, id, after.version, operationId, JSON.stringify(transaction)); this.database.prepare('UPDATE revision_projects SET version=?,data=? WHERE revision_id=?').run(after.version, JSON.stringify(after), id); }
-      return receipt;
+      if (changed) this.notificationPublisher?.({ revisionId: id, kind: 'projects_changed', cause: { type: 'projects', id: operationId }, attribution: actor }); return receipt;
     }, true);
   }
   operationRevisionId(id: string): string { if (!uuid(id)) throw invalid(); const row = this.database.prepare('SELECT revision_id FROM revision_project_operations WHERE id=?').get(id) as { revision_id: string } | undefined; if (!row || !isRevisionId(row.revision_id)) throw invalid(); return row.revision_id; }

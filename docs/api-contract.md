@@ -6,6 +6,8 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 
 - `GET /api/health` → `{ok:true}`
 - `GET /api/state` → AppState; includes visible objects and filtered recent activity, visible Spaces, a member directory, object access descriptions, access epoch, currentPrincipalId, visible followingTaskIds, visible followingRevisionIds and creation capability
+- `GET /api/notifications?filter=all|unread|read&before=OPAQUE&limit=N` → private `NotificationInbox`; `GET /api/notifications/count` → visible unread count and observed horizon. Read-scoped authority and current revision View apply.
+- `POST /api/notifications/read` → content-free immutable receipt for `read`, `unread`, `read_through` or `read_object`; requires write-scoped authority, Idempotency-Key and access/read pins, never revision Edit. Automatic object-read marking is an explicit foreground POST, not a GET side effect. See [notification limits and recovery](notifications.md).
 - `POST /api/tasks` TaskInput → Task with `projectIds`; creation accepts `projectIds` or the legacy scalar `projectId` alias, never both; `PATCH /api/tasks/:id` UpdateTaskInput (expectedVersion required; project fields use the separate tag action) → Task or a content-free TaskAccessLostAcknowledgement after a fresh owner change removes the caller’s view access
 - `POST /api/tasks/:id/projects` TaskProjectsInput → TaskDetail; add/remove explicit tags or deliberately replace all tags, including omitted hidden associations; current task version and edit access, selected project visibility, local-mode offline replay supported
 - `GET /api/tasks/:id` → TaskDetail; current fields, first history page, visible dependencies, duplicate relationships and inverse links

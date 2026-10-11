@@ -13,6 +13,7 @@ import type { RevisionSubscriptionInput, RevisionSubscriptionSnapshot, RevisionS
 import { revisionMetadataInputHash } from './revision-metadata.ts';
 import { revisionProjectInputHash } from './revision-projects.ts';
 import type { RevisionProjectInput, RevisionProjectSnapshot, RevisionProjectHistory } from '../shared/revision-projects.ts';
+import type { NotificationReadInput, NotificationInbox, NotificationSummary } from '../shared/notifications.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -71,6 +72,32 @@ export class AccessLayer {
   revision(id: string): RevisionDetail {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  notifications(query: { filter?: 'all' | 'unread' | 'read'; before?: string; limit?: number }): NotificationInbox {
+    return this.store.notifications.list(this.principal, query, this.policies.epoch());
+  }
+  notificationSummary(): NotificationSummary { return this.store.notifications.summary(this.principal, this.policies.epoch()); }
+  private requireNotificationRevision(id: string): void {
+    if (!this.canView(id)) throw new HttpError(404, 'Notification is unavailable.', 'NOTIFICATION_UNAVAILABLE');
+  }
+  requireNotificationAction(input: NotificationReadInput): void {
+    if (input.action === 'read' || input.action === 'unread') this.requireNotificationRevision(this.store.notifications.notificationRevisionId(this.principal, input.notificationId));
+    else if (input.action === 'read_object') this.requireNotificationRevision(input.revisionId);
+  }
+  presentNotificationRead(input: NotificationReadInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
+    this.requireNotificationAction(input);
+    const invalid = (): never => { throw new HttpError(409, 'This saved notification receipt does not match the requested operation.', 'NOTIFICATION_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.notifications.operationPrincipalId(body.operationId) !== this.principal) return invalid();
+      operation = this.store.notifications.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.principalId !== this.principal || operation.attribution.principalId !== this.principal || operation.retryKeySha256 !== retryKeySha256
+      || operation.inputSha256 !== createHash('sha256').update(JSON.stringify(input)).digest('hex') || !isDeepStrictEqual(operation.input, input) || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    for (const id of operation.affectedRevisionIds) this.requireNotificationRevision(id);
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionProjects(id: string): RevisionProjectSnapshot {
     this.require(id);
