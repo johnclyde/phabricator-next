@@ -5,13 +5,13 @@ import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } 
 import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion } from '../shared/types.ts';
-import { canonicalWikiPath, wikiAncestors, wikiReference, WIKI_WRITE_PATH_MAX_LENGTH, type WikiHierarchy, type WikiPathResult, type WikiMovePreview, type WikiMoveReceipt } from '../shared/wiki.ts';
+import { canonicalWikiPath, wikiAncestors, wikiReference, WIKI_WRITE_PATH_MAX_LENGTH, type WikiHierarchy, type WikiPathResult, type WikiMovePreview, type WikiMoveReceipt, type WikiLifecycleHistory, type WikiLifecycleReceipt } from '../shared/wiki.ts';
 import type { ProjectCapability, ObjectAccess, Space } from '../shared/policy.ts';
 import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseWikiMoveInput, wikiMoveInputHash, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
+import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseWikiMoveInput, wikiMoveInputHash, parseWikiDraftInput, parseWikiPublishInput, parseWikiDeleteInput, parseWikiEditInput, parseWikiRestoreInput, wikiLifecycleInputHash, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 import { validatePasteContent, type PasteDetail, type PasteListQuery, type PastePage } from '../shared/pastes.ts';
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
@@ -83,6 +83,9 @@ export class AccessLayer {
   documentVersion(id: string, version: number): WikiVersion {
     this.require(id); return this.redact({ ...this.store.documentVersion(id, version), accessEpoch: this.policies.epoch() });
   }
+  documentTransactions(id: string, options: { before?: number; limit?: number } = {}): WikiLifecycleHistory {
+    this.require(id); return this.redact({ ...this.store.documentTransactions(id, options), accessEpoch: this.policies.epoch() });
+  }
   private wikiPath(value: unknown): string {
     if (typeof value !== 'string') throw new HttpError(400, 'Provide a wiki path.');
     try { return canonicalWikiPath(value); } catch { throw new HttpError(400, 'Provide a valid bounded wiki path.'); }
@@ -151,7 +154,9 @@ export class AccessLayer {
     const sourceVersionId = this.store.documentVersion(id, source.version).id;
     const expectedAccessEpoch = this.policies.epoch();
     return { source: wikiReference(source), sourceVersionId, destination: destination ? wikiReference(destination) : null, destinationPath: path, destinationSpaceId, expectedAccessEpoch,
-      defaultInput: { destinationPath: path, expectedVersion: source.version, expectedSourceVersionId: sourceVersionId, expectedDestinationId: destination?.id ?? null, expectedDestinationVersion: destination?.version ?? 0, expectedAccessEpoch, message: '' } };
+      defaultInput: { destinationPath: path, expectedVersion: source.version, expectedSourceVersionId: sourceVersionId, expectedDestinationId: destination?.id ?? null, expectedDestinationVersion: destination?.version ?? 0, expectedAccessEpoch,
+        ...(source.publication ? { expectedPublicationRevision: source.publication.revision, expectedPublishedVersionId: source.publication.publishedVersionId } : {}),
+        ...(destination?.publication ? { expectedDestinationPublicationRevision: destination.publication.revision, expectedDestinationPublishedVersionId: destination.publication.publishedVersionId } : {}), message: '' } };
   }
   project(id: string): ProjectDetail {
     this.require(id); const detail = this.store.projectDetail(id, this.principal);
@@ -293,6 +298,15 @@ export class AccessLayer {
       if (Array.isArray(item)) return item.map(visit);
       const object = record(item);
       if (!object) return item;
+      let hideWikiMoveDigest = false;
+      if ((object.kind === 'move_to' || object.kind === 'move_away') && typeof object.inputSha256 === 'string') {
+        try {
+          const number = record(record(object.after)?.publication)?.headVersion;
+          if (typeof object.documentId !== 'string' || typeof number !== 'number') throw new Error('Invalid move reference.');
+          const move = this.store.documentVersion(object.documentId, number).move;
+          hideWikiMoveDigest = !move || !this.canView(move.sourceId) || !this.canView(move.destinationId);
+        } catch { hideWikiMoveDigest = true; }
+      }
       if (object.field === 'projectId') {
         const change = { ...object };
         for (const name of ['oldValue', 'newValue'] as const) {
@@ -303,7 +317,8 @@ export class AccessLayer {
         return change;
       }
       return Object.fromEntries(Object.entries(object).map(([key, child]) => [key,
-        key === 'movedToId' && typeof child === 'string' && !this.canView(child) ? null
+        key === 'inputSha256' && hideWikiMoveDigest ? null
+          : key === 'movedToId' && typeof child === 'string' && !this.canView(child) ? null
           : key === 'move' && record(child) && typeof record(child)!.sourceId === 'string' && typeof record(child)!.destinationId === 'string' && (!this.canView(record(child)!.sourceId as string) || !this.canView(record(child)!.destinationId as string)) ? undefined
           : key === 'projectIds' && Array.isArray(child) ? child.filter(id => typeof id === 'string' && this.canView(id))
           : (key === 'projectId' || key === 'repositoryId') && typeof child === 'string' && !this.canView(child) ? null : visit(child),
@@ -656,6 +671,63 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    const wikiLifecycle = method === 'POST' ? /^\/api\/documents\/W\d+\/(drafts|publish|delete)$/.exec(path) : null;
+    if (wikiLifecycle) {
+      const invalid = (): never => { throw new HttpError(409, 'This saved wiki lifecycle receipt does not match the requested operation.', 'WIKI_RECEIPT_MISMATCH'); };
+      const kind = wikiLifecycle[1] === 'drafts' ? 'draft' : wikiLifecycle[1] === 'publish' ? 'publish' : 'delete';
+      const input = kind === 'draft' ? parseWikiDraftInput(mutationInput) : kind === 'publish' ? parseWikiPublishInput(mutationInput) : parseWikiDeleteInput(mutationInput);
+      const transaction = record(body?.transaction);
+      if (!target || !body || typeof transaction?.id !== 'string') return invalid();
+      let expected: WikiLifecycleReceipt;
+      try { expected = this.store.wikiLifecycleReceipt(target.id, transaction.id); } catch { return invalid(); }
+      const { accessEpoch: _epoch, ...saved } = body;
+      if (!isDeepStrictEqual(saved, expected) || expected.transaction.kind !== kind
+        || expected.transaction.attribution?.principalId !== this.principal
+        || expected.transaction.inputSha256 !== wikiLifecycleInputHash(kind, input)
+        || expected.transaction.before?.publication.revision !== input.expectedPublicationRevision
+        || expected.transaction.before.publication.headVersion !== input.expectedVersion
+        || expected.transaction.before.publication.headVersionId !== input.expectedHeadVersionId
+        || expected.transaction.before.publication.publishedVersionId !== input.expectedPublishedVersionId) return invalid();
+      return { status: response.status, body: this.redact({ ...expected, accessEpoch: this.policies.epoch() }) };
+    }
+    const wikiWrite = method === 'POST' && path === '/api/documents' ? 'create'
+      : method === 'PUT' && /^\/api\/documents\/W\d+$/.test(path) ? 'edit'
+        : method === 'POST' && /^\/api\/documents\/W\d+\/restore$/.test(path) ? 'restore' : null;
+    if (wikiWrite && target && body) {
+      const invalid = (): never => { throw new HttpError(409, 'This saved wiki content receipt does not match the requested operation.', 'WIKI_RECEIPT_MISMATCH'); };
+      const publication = record(body.publication);
+      if (publication) {
+        if (typeof publication.revision !== 'number') return invalid();
+        let expected: WikiLifecycleReceipt;
+        try {
+          const transaction = this.store.documentTransaction(target.id, publication.revision);
+          expected = this.store.wikiLifecycleReceipt(target.id, transaction.id);
+        } catch { return invalid(); }
+        const { accessEpoch: _epoch, ...saved } = body;
+        const input = wikiWrite === 'create' ? this.creationInput(mutationInput).content
+          : wikiWrite === 'edit' ? parseWikiEditInput(mutationInput) : parseWikiRestoreInput(mutationInput);
+        if (!isDeepStrictEqual(saved, expected.document) || expected.transaction.attribution?.principalId !== this.principal
+          || !(expected.transaction.kind === wikiWrite || wikiWrite === 'edit' && expected.transaction.kind === 'draft')
+          || expected.transaction.inputSha256 !== wikiLifecycleInputHash(wikiWrite, input)) return invalid();
+        return { status: response.status, body: this.redact({ ...expected.document, accessEpoch: this.policies.epoch() }) };
+      }
+      // Preserve pre-publication receipts without letting a new receipt strip
+      // its publication evidence and fall back to the legacy presentation path.
+      if (typeof body.version !== 'number') return invalid();
+      let version: WikiVersion;
+      try { version = this.store.documentVersion(target.id, body.version); } catch { return invalid(); }
+      if (this.store.database.prepare("SELECT 1 FROM wiki_transactions WHERE document_id=? AND json_extract(data,'$.newVersionId')=? AND json_extract(data,'$.kind')<>'legacy'").get(target.id, version.id)) return invalid();
+      const current = this.store.documentDetail(target.id).document;
+      const canonical = { id: target.id, title: version.title, slug: version.slug, content: version.content, version: version.number,
+        createdAt: current.createdAt, updatedAt: version.createdAt, ...(version.location ? { location: version.location } : {}) };
+      const { accessEpoch: _epoch, ...saved } = body;
+      const input = record(wikiWrite === 'create' ? this.creationInput(mutationInput).content : mutationInput);
+      if (!isDeepStrictEqual(saved, canonical) || !input
+        || (version.attribution && version.attribution.principalId !== this.principal)
+        || (wikiWrite === 'create' ? version.number !== 1 : typeof input.expectedVersion !== 'number' || version.number !== input.expectedVersion + 1)
+        || (wikiWrite === 'restore' && version.restoredFrom !== input.version)
+        || (wikiWrite !== 'restore' && (typeof input.title !== 'string' || version.title !== input.title || version.content !== input.content))) return invalid();
+    }
     if (method === 'POST' && /^\/api\/documents\/W\d+\/move$/.test(path)) {
       const invalid = (): never => { throw new HttpError(409, 'This saved wiki move receipt does not match the requested operation.', 'WIKI_RECEIPT_MISMATCH'); };
       const input = parseWikiMoveInput(mutationInput);

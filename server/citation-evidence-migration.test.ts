@@ -20,7 +20,7 @@ function schema16(path: string) {
   store.createComment(paper.revision.id, { versionId: paper.versions[0]!.id, body: 'Historical review comment' }, actor);
   const definitions = store.database.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name='entities' AND type IN ('index','trigger') AND name!='paste_identity_no_update' AND sql IS NOT NULL ORDER BY type,name").all() as { sql: string }[];
   store.database.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
-    DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete;
+    DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete;
     DROP TRIGGER paste_identity_no_update; DROP TABLE paste_transactions; DROP TABLE paste_versions;
     DROP TABLE citation_evidence_retractions; DROP TABLE citation_evidence;
     CREATE TABLE entities_v16(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('project','repository','revision','task','document','file')),data TEXT NOT NULL CHECK(json_valid(data)));
@@ -41,7 +41,7 @@ test('schema 16 upgrade adds empty evidence tables and preserves all existing so
   const directory = mkdtempSync(join(tmpdir(), 'citation-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema16(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 20);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 21);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) {

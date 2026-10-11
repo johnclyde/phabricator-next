@@ -120,7 +120,7 @@ test('validation rejects unsafe files, anchors, unknown properties, and stale wi
     const update = { title: 'Notes', slug: '/', content: '# Revised', expectedVersion: 1 };
     assert.equal((await app.request(`/api/documents/${document.id}`, 'PUT', update)).status, 200);
     assert.equal((await app.request(`/api/documents/${document.id}`, 'PUT', update)).status, 409);
-    assert.equal((await app.request('/api/documents', 'POST', { title: 'Collision', slug: '/', content: '' })).status, 409);
+    assert.equal((await app.request('/api/documents', 'POST', { title: 'Collision', slug: '/', content: 'Document content' })).status, 409);
     state = (await app.request<AppState>('/api/state')).body; assert.equal(state.documents.length, 1); assert.equal(state.documents[0]!.version, 2);
   } finally { await app.close(); }
 });

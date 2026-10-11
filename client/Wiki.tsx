@@ -5,11 +5,13 @@ import type { AppState, WikiDetail, WikiDocument, WikiHistory, WikiVersion } fro
 import { isNetworkError, type MutationMethod } from './offline';
 import { useWorkspace } from './SessionGate';
 import { AccessSummary } from './Access';
-import { mergeWikiHistory } from './wiki-history';
+import { mergeWikiHistory, mergeWikiLifecycle } from './wiki-history';
 import { WikiMoveDialog, WikiNavigation } from './WikiNavigation';
 import { wikiHref } from './wiki-client';
 import { canonicalWikiPath } from '../shared/wiki';
 import DraftAvailability from './DraftAvailability';
+import { exportWikiDraft, useWikiAction, WikiActionDialog, WikiEditor } from './WikiLifecycle';
+import type { WikiLifecycleHistory } from '../shared/wiki';
 
 type WikiMutation = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
 type WikiTab = 'document' | 'compare' | 'history';
@@ -17,11 +19,12 @@ function date(value: string): string { return new Date(value).toLocaleString(); 
 function author(version: WikiVersion): string { return version.author || 'Unknown (legacy snapshot)'; }
 
 /** Phriction's source history is immutable; viewing an old version never edits it. */
-export default function Wiki({ id, currentVersion, online, state, manageAccess, mutate, edit, create, refreshWorkspace }: {
+export default function Wiki({ id, currentVersion, publicationRevision, online, state, manageAccess, mutate, edit, create, refreshWorkspace }: {
   create: (path: string) => void;
   refreshWorkspace: () => Promise<void>;
   id: string;
   currentVersion?: number;
+  publicationRevision?: number;
   online: boolean;
   state: AppState;
   manageAccess: () => void;
@@ -31,6 +34,9 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   const { readStored, writeStored, request, durable, assertActive, unavailableObject, onTaskSnapshotChange, session, savedDraftRecords } = useWorkspace();
   const [detail, setDetail] = useState<WikiDetail | null>(() => readStored(`wiki:${id}`, null));
   const [moving, setMoving] = useState(false);
+  const [editor, setEditor] = useState<WikiDetail | null>(null);
+  const [operation, setOperation] = useState<{ kind: 'publish' | 'delete' | 'restore'; detail: WikiDetail; target: WikiVersion | null } | null>(null);
+  const [lifecyclePaging, setLifecyclePaging] = useState(false);
   const [tab, setTab] = useState<WikiTab>('document');
   const [selected, setSelected] = useState<number | null>(null);
   const [compareWith, setCompareWith] = useState<number | null>(null);
@@ -40,6 +46,7 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   const inFlight = useRef(new Map<number, Promise<WikiVersion | null>>());
   const loadGeneration = useRef(0);
   const pageGeneration = useRef(0);
+  const lifecyclePageGeneration = useRef(0);
   const mounted = useRef(true);
   const [versionErrors, setVersionErrors] = useState<Record<number, string>>({});
   const [error, setError] = useState('');
@@ -48,7 +55,7 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   const [loading, setLoading] = useState(true);
   const [paging, setPaging] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; pageGeneration.current += 1; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; pageGeneration.current += 1; lifecyclePageGeneration.current += 1; }; }, []);
 
   const saveVersion = useCallback((version: WikiVersion) => {
     if (unavailableObject(id)) return;
@@ -64,13 +71,15 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
       const next = await request<WikiDetail>(`/api/documents/${id}`);
       if (generation !== loadGeneration.current) return null;
       setDetail(current => {
-        const merged = { ...next, history: mergeWikiHistory(next.document.version, next.history, current?.document.id === id ? current.history : undefined) };
+        const merged = { ...next, ...(next.lifecycle && next.document.publication ? { lifecycle: mergeWikiLifecycle(next.document.publication.revision, next.lifecycle, current?.document.id === id ? current.lifecycle : undefined) } : {}), history: mergeWikiHistory(next.document.version, next.history, current?.document.id === id ? current.history : undefined) };
         if (!writeStored(`wiki:${id}`, merged)) setStorageWarning('Browser storage is unavailable. This history was not saved for offline reading.');
         return merged;
       });
       setSnapshot(false); setError('');
-      const current = next.history.versions.find(version => version.number === next.document.version);
+      const published = next.document.publication?.publishedVersion ?? next.document.version;
+      const current = next.history.versions.find(version => version.number === published);
       if (current) saveVersion({ ...current, content: next.document.content });
+      if (next.head) saveVersion(next.head);
       return next;
     } catch (failure) {
       if (generation !== loadGeneration.current) return null;
@@ -84,9 +93,9 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   useEffect(() => {
     void load();
     return () => { loadGeneration.current += 1; };
-  }, [load, currentVersion, online]);
-  useEffect(() => { const clear = () => { loadGeneration.current++; pageGeneration.current++; setPaging(false); loaded.current = {}; inFlight.current.clear(); setVersions({}); setDetail(null); queueMicrotask(() => { if (mounted.current) void load(); }); }; const off = onTaskSnapshotChange(clear); const focus = () => void load(); window.addEventListener('focus', focus); return () => { off(); window.removeEventListener('focus', focus); }; }, [load]);
-  // A null selection follows the current head. An explicitly chosen immutable
+  }, [load, currentVersion, publicationRevision, online]);
+  useEffect(() => { const clear = () => { loadGeneration.current++; pageGeneration.current++; lifecyclePageGeneration.current++; setPaging(false); setLifecyclePaging(false); loaded.current = {}; inFlight.current.clear(); setVersions({}); setDetail(null); queueMicrotask(() => { if (mounted.current) void load(); }); }; const off = onTaskSnapshotChange(clear); const focus = () => void load(); window.addEventListener('focus', focus); return () => { off(); window.removeEventListener('focus', focus); }; }, [load]);
+  // A null selection follows the published content pointer. An explicitly chosen immutable
   // version remains selected when workspace discovery or a background edit
   // changes the head; only the reader's action should leave that version.
 
@@ -113,10 +122,11 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
     return result;
   }, [id, saveVersion]);
 
-  const number = selected ?? detail?.document.version ?? 1;
+  const published = detail?.document.publication?.publishedVersion ?? detail?.document.version ?? 1;
+  const number = selected ?? published;
   const first = detail?.history.firstAvailableVersion ?? 1;
   const last = detail?.document.version ?? 1;
-  const baseline = compareWith ?? Math.max(first, last - 1);
+  const baseline = compareWith ?? (number !== published ? published : Math.max(first, number - 1));
   const valid = (value: number) => Number.isSafeInteger(value) && value >= first && value <= last;
   const validNumber = valid(number), validBaseline = valid(baseline);
   useEffect(() => {
@@ -155,28 +165,44 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
   const access = detail && state.accessEpoch >= (detail.accessEpoch ?? -1) ? state.access[id] : detail?.access;
   const active = !detail?.document.location || detail.document.location.status === 'active';
   const canEdit = Boolean(access?.capabilities.edit);
-  const restore = async () => {
-    if (!canEdit || !detail || !version || !online || snapshot || version.number === detail.document.version) return;
-    if (!window.confirm(`Restore version ${version.number} of “${version.title}” as a new version? ${active ? 'The current title and content will be replaced.' : 'This reactivates the original path. The destination document remains unchanged.'} The current path and every historical version will be kept.`)) return;
-    setRestoring(true); setError('');
-    try {
-      await mutate<WikiDocument>(`/api/documents/${id}/restore`, 'POST', { version: version.number, expectedVersion: detail.document.version }, `Version ${version.number} restored as a new document version`, false);
-      assertActive(); setSelected(null); setTab('document'); await load();
-    } catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not restore this version.'); }
-    finally { setRestoring(false); }
+  const action = useWikiAction(id, online, async () => { await refreshWorkspace(); await load(); });
+  useEffect(() => {
+    const completed = action.completed;
+    if (!completed || readStored(completed.intent.draftKey, null) !== null) return;
+    // Access changes may retire the mounted dialog before its save promise resolves.
+    // Complete it here, while leaving any newer retained draft untouched.
+    if (completed.intent.kind === 'edit' || completed.intent.kind === 'draft') {
+      setEditor(current => current && completed.intent.draftKey === `wiki-edit:${id}:${current.head!.id}:${current.document.publication!.revision}` ? null : current);
+      setSelected(completed.document.version); setTab('document');
+    } else {
+      setOperation(current => current && completed.intent.draftKey === `wiki-action:${id}:${current.detail.document.publication!.revision}:${current.kind}:${current.target?.id || 'current'}` ? null : current);
+      if (completed.intent.kind === 'restore') { setSelected(null); setTab('document'); }
+    }
+  }, [action.completed]);
+  const olderLifecycle = async () => {
+    if (!detail?.lifecycle?.nextBefore || lifecyclePaging) return;
+    const generation = ++lifecyclePageGeneration.current; setLifecyclePaging(true);
+    try { const page = await request<WikiLifecycleHistory>(`/api/documents/${id}/transactions?before=${detail.lifecycle.nextBefore}&limit=20`); if (generation !== lifecyclePageGeneration.current) return; setDetail(current => { if (!current?.lifecycle) return current; const next = { ...current, lifecycle: mergeWikiLifecycle(current.document.publication!.revision, page, current.lifecycle) }; writeStored(`wiki:${id}`, next); return next; }); }
+    catch (failure) { if (generation === lifecyclePageGeneration.current) setError(failure instanceof Error ? failure.message : 'Could not load publication history.'); }
+    finally { if (generation === lifecyclePageGeneration.current) setLifecyclePaging(false); }
   };
 
-  if (!detail) return <section className="panel wiki-page"><div className="panel-heading"><h2><BookOpen size={17}/>Document history</h2><a href="#wiki">All documents</a></div><div className="wiki-status">{error ? <p role="alert">{error}</p> : <p>Loading document…</p>}<button className="button" disabled={loading} onClick={() => void load()}>Retry</button></div></section>;
+  if (!detail) return <>{action.recovery}<section className="panel wiki-page"><div className="panel-heading"><h2><BookOpen size={17}/>Document history</h2><a href="#wiki">All documents</a></div><div className="wiki-status">{error ? <p role="alert">{error}</p> : <p>Loading document…</p>}<button className="button" disabled={loading} onClick={() => void load()}>Retry</button></div></section></>;
 
   const unavailable = (value: number) => !valid(value) ? `Choose a version between ${first} and ${last}.` : versionErrors[value] || `Loading version ${value}…`;
   return <div className="wiki-page">
     <a className="back-link" href="#wiki"><ArrowLeft size={14}/>All documents</a>{detail.hierarchy && <WikiNavigation refreshWorkspace={refreshWorkspace} path={detail.document.location?.path || canonicalWikiPath(detail.document.slug)} hierarchy={detail.hierarchy} online={online} create={create}/>}
-    <div className="page-heading wiki-page-heading"><div><h1><span className="object-id">{id}</span> {detail.document.title}</h1><p>{detail.document.slug} · Current version {detail.document.version}</p></div><div className="file-actions"><button className="button" disabled={!online || snapshot || loading || (!(canEdit && active) && !readStored(`wiki-request:${id}`, null))} onClick={() => setMoving(true)}>Move Document</button><button className="button primary" disabled={!online || snapshot || loading || !canEdit} onClick={() => edit(detail.document)}><Pencil size={15}/>{active ? 'Edit Document' : 'Recreate Here'}</button></div></div>
+    <div className="page-heading wiki-page-heading"><div><h1><span className="object-id">{id}</span> {detail.document.title}</h1><p>{detail.document.slug} · Published version {published} · Latest content {detail.document.version}</p></div><div className="file-actions"><button className="button" disabled={!online || snapshot || loading || (!(canEdit && active) && !readStored(`wiki-request:${id}`, null))} onClick={() => setMoving(true)}>Move Document</button><button className="button primary" disabled={loading || !canEdit || !detail.head || !detail.document.publication} onClick={() => setEditor(detail)}><Pencil size={15}/>{active ? 'Edit Document' : 'Recreate Here'}</button>{active && <button className="button" disabled={!online || snapshot || loading || !canEdit || !detail.document.publication || action.busy || Boolean(action.pending)} onClick={() => setOperation({ kind: 'delete', detail, target: null })}>Delete Document</button>}</div></div>
+    {action.recovery}
+    {published < last && canEdit && <div className="banner warning">This document has unpublished draft changes. <button className="text-button" onClick={() => { setSelected(last); setTab('document'); }}>View Draft Version</button></div>}
+    {detail.document.location?.status === 'deleted' && <section className="panel card-body wiki-moved"><h2>Document Deleted</h2><p>The document identity is deleted. History and child documents remain. Recreate this page or restore nonempty earlier content to reactivate it.</p></section>}
+    {editor?.head && canEdit && <DraftAvailability draftKey={`wiki-edit:${id}:${editor.head.id}:${editor.document.publication!.revision}`}><WikiEditor error={action.error} detail={editor} online={online} busy={action.busy} pending={Boolean(action.pending)} send={action.send} close={saved => { setEditor(null); if (saved) { setSelected(saved.version); setTab('document'); } }}/></DraftAvailability>}
+    {operation && canEdit && <DraftAvailability draftKey={`wiki-action:${id}:${operation.detail.document.publication!.revision}:${operation.kind}:${operation.target?.id || 'current'}`}><WikiActionDialog error={action.error} {...operation} online={online} busy={action.busy} pending={Boolean(action.pending)} send={action.send} close={saved => { if (saved && operation.kind === 'restore') { setSelected(null); setTab('document'); } setOperation(null); }}/></DraftAvailability>}
     {detail.document.location?.status === 'moved' && <section className="panel card-body wiki-moved"><h2>This Document Has Moved</h2>{detail.hierarchy?.movedTo ? <p>Continue at <a href={wikiHref(detail.hierarchy.movedTo.path)}>{detail.hierarchy.movedTo.title} ({detail.hierarchy.movedTo.id})</a>.</p> : <p>The destination is unavailable.</p>}<p>The original history remains here. Child documents keep their existing paths.</p></section>}
-    {savedDraftRecords(`draft:document:${id}:`).length > 0 && !active && <section className="panel card-body"><h2>Retained Source Drafts</h2><p>Unsaved drafts remain attached to this original document. They have not moved to the destination.</p>{savedDraftRecords(`draft:document:${id}:`).map(item => <button key={item.key} className="button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' })), link = document.createElement('a'); link.href = url; link.download = `${id}-retained-draft.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}>Export {item.key.split(':').at(-1)} Draft</button>)}</section>}
+    {savedDraftRecords(`draft:document:${id}:`).length > 0 && <section className="panel card-body"><h2>Retained Source Drafts</h2><p>Unsaved drafts remain attached to this original document. They have not moved to the destination.</p>{savedDraftRecords(`draft:document:${id}:`).map(item => <button key={item.key} className="button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' })), link = document.createElement('a'); link.href = url; link.download = `${id}-retained-draft.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}>Export {item.key.split(':').at(-1)} Draft</button>)}</section>}
     {moving && <DraftAvailability draftKey={`wiki-move:${id}`}><WikiMoveDialog refreshWorkspace={refreshWorkspace} detail={detail} online={online} close={() => setMoving(false)} saved={async () => { await refreshWorkspace(); await load(); }}/></DraftAvailability>}
     <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/>
-    {snapshot && <div className="banner warning"><WifiOff size={16}/><span>{durable ? 'Saved document snapshot. Only versions opened on this device are available offline. Reconnect before editing or restoring.' : 'Connection interrupted. Loaded versions are kept only in this session. Reconnect before editing or restoring.'}</span></div>}
+    {snapshot && <div className="banner warning"><WifiOff size={16}/><span>{durable ? 'Saved document snapshot. Only versions opened on this device are available offline. Local drafts remain editable. Reconnect before saving or publishing.' : 'Connection interrupted. Loaded versions are kept only in this session. Local drafts remain editable. Reconnect before saving or publishing.'}</span></div>}
     {storageWarning && <div className="banner warning" role="status">{storageWarning}</div>}
     {error && <div className="banner error" role="alert"><span>{error}</span><button onClick={() => void load()} disabled={loading}>Reload document</button></div>}
     {first > 1 && <div className="info-strip wiki-history-gap">Retained history starts at version {first}. Earlier versions were not stored by the previous application and cannot be recovered here.</div>}
@@ -191,11 +217,11 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
       {tab !== 'history' && <div className="wiki-controls">
         <label>Version to inspect<input type="number" min={first} max={last} step="1" value={number} onChange={event => setSelected(Number(event.target.value))}/></label>
         {tab === 'compare' && <><label>Compare with version<input type="number" min={first} max={last} step="1" value={baseline} onChange={event => setCompareWith(Number(event.target.value))}/></label><div className="segmented" aria-label="Comparison style"><button aria-pressed={diffMode === 'words'} className={diffMode === 'words' ? 'selected' : ''} onClick={() => setDiffMode('words')}>Words</button><button aria-pressed={diffMode === 'lines'} className={diffMode === 'lines' ? 'selected' : ''} onClick={() => setDiffMode('lines')}>Lines</button></div></>}
-        {number !== last && <button className="text-button" onClick={() => setSelected(null)}>Current version</button>}
+        {selected !== null && <button className="text-button" onClick={() => setSelected(null)}>Published Version</button>}{number !== last && <button className="text-button" onClick={() => setSelected(last)}>Latest Content</button>}
       </div>}
       {tab === 'document' && (version && validNumber ? <>
-        <div className="wiki-version-heading"><div><span className={`badge ${number === last ? 'badge-accepted' : 'badge-draft'}`}>{number === last ? 'Current' : 'Historical'} · Version {number}</span><h2>{version.title}</h2><p>{version.slug} · {author(version)} · {date(version.createdAt)}</p>{version.message && <p className="wiki-edit-summary">{version.message}</p>}{version.kind === 'legacy' && <p>This snapshot predates recorded authorship and full history.</p>}</div>{number !== last && <button className="button" disabled={!online || snapshot || restoring || loading || !canEdit} onClick={() => void restore()}><RotateCcw size={15}/>{restoring ? 'Restoring…' : 'Restore as new version'}</button>}</div>
-        {active || number !== last ? <pre className="wiki-content">{version.content}</pre> : <p className="info-strip">Choose an earlier version to inspect this document’s original source.</p>}
+        <div className="wiki-version-heading"><div><span className={`badge ${number === published ? 'badge-accepted' : 'badge-draft'}`}>{number === published ? 'Published' : number > published ? 'Unpublished Draft' : 'Historical'} · Version {number}</span><h2>{version.title}</h2><p>{version.slug} · {author(version)} · {date(version.createdAt)}</p>{version.message && <p className="wiki-edit-summary">{version.message}</p>}{version.kind === 'legacy' && <p>This snapshot predates recorded authorship and full history.</p>}</div><div className="file-actions">{number !== published && <button className="button primary" disabled={!online || snapshot || action.busy || loading || !canEdit || !detail.document.publication || Boolean(action.pending)} onClick={() => setOperation({ kind: 'publish', detail, target: version })}>{number > published ? 'Publish Draft' : 'Publish Older Version'}</button>}{(number !== last || !active) && version.content.length > 0 && <button className="button" disabled={!online || snapshot || action.busy || loading || !canEdit || !detail.document.publication || Boolean(action.pending)} onClick={() => setOperation({ kind: 'restore', detail, target: version })}><RotateCcw size={15}/>Restore as new version</button>}</div></div>
+        {version.kind === 'delete' || version.kind === 'move_away' ? <p className="info-strip">This version is a {version.kind === 'delete' ? 'deleted-page' : 'moved-page'} marker. Choose another version to inspect its source.</p> : <pre className="wiki-content">{version.content}</pre>}{number > published && <p className="info-strip">This saved draft is visible to everyone who can read the document.</p>}
       </> : <p className="wiki-status" role="status">{unavailable(number)}</p>)}
       {tab === 'compare' && (version && before && validNumber && validBaseline ? <div className="wiki-comparison">
         <div className="wiki-comparison-heading"><strong>Version {baseline} → Version {number}</strong><span>{before.title === version.title ? version.title : `${before.title} → ${version.title}`}</span>{before.slug !== version.slug && <span>Slug: {before.slug} → {version.slug}</span>}</div>
@@ -204,11 +230,13 @@ export default function Wiki({ id, currentVersion, online, state, manageAccess, 
         {before.content === version.content && <p className="wiki-status">No content changes between these versions.</p>}
       </div> : <div className="wiki-status" role="status">{(!version || !validNumber) && <p>{unavailable(number)}</p>}{(!before || !validBaseline) && <p>{unavailable(baseline)}</p>}</div>)}
       {tab === 'history' && <div className="wiki-history">
-        <p className="info-strip">Every saved edit keeps an immutable version. Restoring adds a new version and preserves the current slug.</p>
-        <ol>{detail.history.versions.map(item => <li key={item.id}><button className="wiki-history-entry" onClick={() => { setSelected(item.number); setTab('document'); }}><span className="version-marker" aria-hidden="true">{item.number}</span><span><strong>Version {item.number} · {item.title}</strong><small>{item.message || (item.kind === 'create' ? 'Document created' : item.kind === 'legacy' ? 'Retained legacy snapshot' : 'Document edited')}</small><small>{item.author || 'Unknown author'} · {date(item.createdAt)}{item.restoredFrom !== null ? ` · Restored from version ${item.restoredFrom}` : ''}</small></span></button></li>)}</ol>
+        <p className="info-strip">Every saved edit keeps an immutable content version. Publishing selects an existing version; restoring adds a new active version at this path.</p>
+        <ol>{detail.history.versions.map(item => <li key={item.id}><button className="wiki-history-entry" onClick={() => { setSelected(item.number); setTab('document'); }}><span className="version-marker" aria-hidden="true">{item.number}</span><span><strong>Version {item.number} · {item.title}</strong><small>{item.message || (item.kind === 'create' ? 'Document created' : item.kind === 'legacy' ? 'Retained legacy snapshot' : item.kind === 'draft' ? 'Saved draft' : item.kind === 'delete' ? 'Document deleted' : 'Document edited')}</small><small>{item.author || 'Unknown author'} · {date(item.createdAt)}{item.restoredFrom !== null ? ` · Restored from version ${item.restoredFrom}` : ''}</small></span></button></li>)}</ol>
         {detail.history.nextBefore !== null && <div className="wiki-status"><button className="button" disabled={paging || !online || snapshot} onClick={() => void older()}>{paging ? 'Loading history…' : 'Load older history'}</button>{(!online || snapshot) && <p>Reconnect to load history not yet saved on this device.</p>}</div>}
       </div>}
     </section>
+    {detail.lifecycle && <section className="panel wiki-activity"><div className="panel-heading"><h2>Publication & Lifecycle History</h2></div><ol>{detail.lifecycle.transactions.map(item => <li key={item.id}><p><strong>{item.kind === 'publish' ? 'Published existing content' : item.kind === 'draft' ? 'Saved draft' : item.kind === 'delete' ? 'Deleted document' : item.kind === 'restore' ? 'Restored content' : item.kind.replaceAll('_', ' ')}</strong> · Published version {item.after.publication.publishedVersion} · Latest content {item.after.publication.headVersion}</p>{item.message && <p>{item.message}</p>}<small>{item.actor || 'Unknown author'} · {date(item.createdAt)}</small><button className="text-button" onClick={() => { setSelected(item.after.publication.publishedVersion); setTab('document'); }}>Inspect Published Version {item.after.publication.publishedVersion}</button></li>)}</ol>{detail.lifecycle.nextBefore !== null && <div className="card-body"><button className="button" disabled={!online || snapshot || lifecyclePaging} onClick={() => void olderLifecycle()}>Load Earlier Publication History</button></div>}</section>}
+    {([...savedDraftRecords(`wiki-edit:${id}:`), ...savedDraftRecords(`wiki-action:${id}:`)]).length > 0 && <section className="panel card-body"><h2>Retained Local Wiki Drafts</h2><p>Each local draft keeps its original content and publication versions.</p>{[...savedDraftRecords(`wiki-edit:${id}:`), ...savedDraftRecords(`wiki-action:${id}:`)].map(item => <button className="button" key={item.key} onClick={() => exportWikiDraft(item)}>Export {item.key.startsWith('wiki-edit:') ? 'Local Edit' : 'Action Message'}</button>)}</section>}
     {detail.activity.length > 0 && <section className="panel wiki-activity"><div className="panel-heading"><h2>Document activity</h2></div><ol>{detail.activity.map(item => <li key={item.id}><p>{item.detail}</p><small>{item.actor} · {date(item.createdAt)}</small></li>)}</ol></section>}
   </div>;
 }

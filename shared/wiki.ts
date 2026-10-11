@@ -8,7 +8,7 @@ export interface WikiAncestor { path: string; document: WikiReference | null }
 export interface WikiChildren { documents: WikiReference[]; missingPaths?: string[]; nextAfter: string | null }
 export interface WikiHierarchy { ancestors: WikiAncestor[]; children: WikiChildren; movedTo: WikiReference | null }
 export interface WikiPathResult { path: string; document: WikiReference | null; hierarchy: WikiHierarchy; canCreate: boolean; creationBlockedReason: string | null; defaultAccess: { spaceId: string; view: Audience; edit: Audience; interact: Audience } | null; accessEpoch: number }
-export interface WikiMoveInput { destinationPath: string; expectedVersion: number; expectedSourceVersionId: string; expectedDestinationId: string | null; expectedDestinationVersion: number; expectedAccessEpoch: number; message?: string }
+export interface WikiMoveInput { destinationPath: string; expectedVersion: number; expectedSourceVersionId: string; expectedDestinationId: string | null; expectedDestinationVersion: number; expectedAccessEpoch: number; expectedPublicationRevision?:number; expectedPublishedVersionId?:string; expectedDestinationPublicationRevision?:number; expectedDestinationPublishedVersionId?:string; message?: string }
 export interface WikiMovePreview { source: WikiReference; sourceVersionId: string; destination: WikiReference | null; destinationPath: string; destinationSpaceId: string; expectedAccessEpoch: number; defaultInput: WikiMoveInput }
 export interface WikiMoveReceipt { source: WikiDocument; destination: WikiDocument; sourceVersionId: string; destinationVersionId: string; operationId: string; accessEpoch?: number }
 export interface WikiMoveProvenance { operationId: string; sourceId: string; destinationId: string; inputSha256: string }
@@ -36,3 +36,15 @@ export function wikiReference(document: WikiDocument): WikiReference {
   const location = document.location ?? { path: canonicalWikiPath(document.slug), status: 'active' as const, movedToId: null };
   return { id: document.id, title: document.title, path: location.path, status: location.status, version: document.version };
 }
+
+/** Content head never moves backward; publication revision also advances for pointer-only changes. */
+export interface WikiPublication { revision:number; headVersion:number; headVersionId:string; publishedVersion:number; publishedVersionId:string }
+export interface WikiLifecyclePins { expectedVersion:number; expectedHeadVersionId:string; expectedPublishedVersionId:string; expectedPublicationRevision:number; expectedAccessEpoch:number }
+export interface WikiDraftInput extends WikiLifecyclePins { title:string; content:string; message?:string }
+export interface WikiPublishInput extends WikiLifecyclePins { targetVersionId:string; message?:string }
+export interface WikiDeleteInput extends WikiLifecyclePins { message?:string }
+export type WikiLifecycleKind = 'legacy'|'create'|'edit'|'draft'|'restore'|'publish'|'delete'|'move_to'|'move_away';
+export interface WikiLifecycleSnapshot { publication:WikiPublication; location:WikiLocation; updatedAt:string }
+export interface WikiLifecycleTransaction { id:string; documentId:string; sequence:number; kind:WikiLifecycleKind; actor:string|null; attribution?:import('./types').ActorAttribution; createdAt:string; message:string; inputSha256:string|null; before:WikiLifecycleSnapshot|null; after:WikiLifecycleSnapshot; newVersionId:string|null }
+export interface WikiLifecycleHistory { transactions:WikiLifecycleTransaction[]; nextBefore:number|null; firstAvailableSequence:number|null; accessEpoch?:number }
+export interface WikiLifecycleReceipt { document:WikiDocument; transaction:WikiLifecycleTransaction; accessEpoch?:number }

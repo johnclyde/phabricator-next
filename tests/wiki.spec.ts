@@ -35,7 +35,7 @@ test('wiki edits compare and restore without rewriting history', async ({ page, 
   await page.getByRole('button', { name: 'Edit Document', exact: true }).click();
   await dialog.getByRole('textbox', { name: /^Content/ }).fill('The manuscript needs a precise introduction.');
   await dialog.getByRole('textbox', { name: /^Edit summary/ }).fill('Make the requirement precise');
-  await dialog.getByRole('button', { name: 'Save Changes', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Save and Publish', exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
   await page.getByRole('tab', { name: 'Compare', exact: true }).click();
@@ -46,8 +46,8 @@ test('wiki edits compare and restore without rewriting history', async ({ page, 
   await page.getByRole('tab', { name: 'Document', exact: true }).click();
   await page.getByLabel('Version to inspect', { exact: true }).fill('1');
   await expect(page.locator('.wiki-content')).toHaveText('The manuscript needs a short introduction.');
-  page.once('dialog', confirmation => void confirmation.accept());
   await page.getByRole('button', { name: 'Restore as new version', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Restore as New Version', exact: true }).click();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('3');
   await page.reload();
   await expect(page.locator('.wiki-content')).toHaveText('The manuscript needs a short introduction.');
@@ -76,7 +76,7 @@ test('wiki offline history distinguishes cached and unopened versions', async ({
   await page.getByLabel('Version to inspect', { exact: true }).fill('1');
   await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
   await expect(page.getByRole('button', { name: 'Restore as new version', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Edit Document', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Edit Document', exact: true })).toBeEnabled();
   await page.getByLabel('Version to inspect', { exact: true }).fill('2');
   await expect(page.getByText('Version 2 has not been saved on this device. Reconnect to read it.', { exact: true })).toBeVisible();
   await context.setOffline(false);
@@ -107,9 +107,9 @@ test('late workspace discovery and newer edits preserve an explicitly selected h
     const update = await request.put(new URL(`api/documents/${document.id}`, baseURL!).href, { data: { title: document.title, slug: document.slug, content: 'A new current head', expectedVersion: 3 } });
     expect(update.ok()).toBe(true);
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await expect(page.getByText(`${document.slug} · Current version 4`, { exact: true })).toBeVisible();
+    await expect(page.getByText(`${document.slug} · Published version 4 · Latest content 4`, { exact: true })).toBeVisible();
     await expect(selection).toHaveValue('1'); await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
-    await page.getByRole('button', { name: 'Current version', exact: true }).click();
+    await page.getByRole('button', { name: 'Published Version', exact: true }).click();
     await expect(selection).toHaveValue('4'); await expect(page.locator('.wiki-content')).toHaveText('A new current head');
   } finally { held = false; release(); }
 });
@@ -182,7 +182,7 @@ test('a pending wiki history page survives a newer head and leaves a large inter
     }
     holdInitialHead = false;
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await expect(page.getByText(`${document.slug} · Current version 48`, { exact: true })).toBeVisible();
+    await expect(page.getByText(`${document.slug} · Published version 48 · Latest content 48`, { exact: true })).toBeVisible();
     release();
     await expect(page.locator('.wiki-history-entry')).toHaveCount(43);
     const fillGap = page.waitForResponse(response => response.url().endsWith(`/api/documents/${document.id}/history?before=29&limit=20`));
@@ -191,7 +191,7 @@ test('a pending wiki history page survives a newer head and leaves a large inter
     await expect(page.getByRole('button', { name: 'Load older history', exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: /^Version 1 ·/ }).click();
     await expect(page.locator('.wiki-content')).toHaveText('Original retained content');
-    await expect(page.getByText(`${document.slug} · Current version 48`, { exact: true })).toBeVisible();
+    await expect(page.getByText(`${document.slug} · Published version 48 · Latest content 48`, { exact: true })).toBeVisible();
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
 });
 

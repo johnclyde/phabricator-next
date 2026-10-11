@@ -23,7 +23,7 @@ async function start(options: AppOptions = {}) {
   const provisioner = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
   const alice = await provisioner.createAccount({ username: 'alice', displayName: 'Alice Writer', password: 'Alice test password sufficiently long' });
   const bob = await provisioner.createAccount({ username: 'bob', displayName: 'Bob Reviewer', password: 'Bob test password sufficiently long' });
-  if (!store.documentAtPath('/')) store.createDocument({ title: 'Wiki root', slug: '/', content: '' });
+  if (!store.documentAtPath('/')) store.createDocument({ title: 'Wiki root', slug: '/', content: 'Document content' });
   const app = createApp({ ...options, store, seed: false, authMode: 'password' });
   const tokens = {
     alice: app.auth.createToken(alice.id, { name: 'Alice test access', scopes: ['read', 'write', 'review:local', 'review:hosted'] }).token,
@@ -114,9 +114,9 @@ test('hidden and missing objects have indistinguishable history, source, export 
     denied(await app.request('bob', `/api/revisions/${revision.revision.id}/reviews`, 'POST', { provider: 'openai', expectedVersion: 1 }), 404);
     denied(await app.request('bob', `/api/documents/${document.id}/restore`, 'POST', { version: 1, expectedVersion: 1 }), 404);
     assert.equal(transmissions, 0);
-    const hiddenSlug = await app.request('bob', '/api/documents', 'POST', { title: 'Collision', slug: 'private-slug', content: '' });
-    await app.create<WikiDocument>('bob', '/api/documents', { title: 'Visible wiki', slug: 'visible-slug', content: '' });
-    const visibleSlug = await app.request('bob', '/api/documents', 'POST', { title: 'Collision', slug: 'visible-slug', content: '' });
+    const hiddenSlug = await app.request('bob', '/api/documents', 'POST', { title: 'Collision', slug: 'private-slug', content: 'Document content' });
+    await app.create<WikiDocument>('bob', '/api/documents', { title: 'Visible wiki', slug: 'visible-slug', content: 'Document content' });
+    const visibleSlug = await app.request('bob', '/api/documents', 'POST', { title: 'Collision', slug: 'visible-slug', content: 'Document content' });
     assert.equal(hiddenSlug.status, 409);
     assert.deepEqual(hiddenSlug, visibleSlug);
     assert.equal(hiddenSlug.body.error, 'This wiki path is unavailable.');

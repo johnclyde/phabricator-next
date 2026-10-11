@@ -225,7 +225,7 @@ export function createApp(options: AppOptions = {}): App {
     const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace)$/.exec(path) : null;
     if ((docxCreate || docxWrite) && closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
     if ((docxCreate || docxWrite) && !rawKey) throw new HttpError(400, 'Word document mutations require an Idempotency-Key.');
-    if (method === 'POST' && /^\/api\/documents\/W\d+\/move$/.test(path) && !rawKey) throw new HttpError(400, 'Wiki moves require an Idempotency-Key.');
+    if (method === 'POST' && /^\/api\/documents\/W\d+\/(?:move|drafts|publish|delete)$/.test(path) && !rawKey) throw new HttpError(400, 'Wiki lifecycle operations require an Idempotency-Key.');
     const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
     if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
     if (/^\/api\/pastes(?:\/|$)/.test(path) && !rawKey) throw new HttpError(400, 'Paste mutations require an Idempotency-Key.');
@@ -451,6 +451,13 @@ export function createApp(options: AppOptions = {}): App {
         if (paste && method === 'POST' && paste[2]) return { status: 201, body: store.pastes.comment(paste[1]!, input, attribution) };
         const document = /^\/api\/documents\/(W\d+)$/.exec(path);
         if (method === 'PUT' && document) return { status: 200, body: store.updateDocument(document[1]!, input, attribution) };
+        const wikiLifecycle = /^\/api\/documents\/(W\d+)\/(drafts|publish|delete)$/.exec(path);
+        if (method === 'POST' && wikiLifecycle) {
+          const id = wikiLifecycle[1]!;
+          const receipt = wikiLifecycle[2] === 'drafts' ? store.draftDocument(id, input, attribution)
+            : wikiLifecycle[2] === 'publish' ? store.publishDocument(id, input, attribution) : store.deleteDocument(id, input, attribution);
+          return { status: 200, body: receipt };
+        }
         const wikiMove = /^\/api\/documents\/(W\d+)\/move$/.exec(path);
         if (method === 'POST' && wikiMove) {
           const receipt = store.moveDocument(wikiMove[1]!, input, attribution);
@@ -802,7 +809,7 @@ export function createApp(options: AppOptions = {}): App {
             if ([...url.searchParams.keys()].some(name => name !== 'path') || url.searchParams.getAll('path').length !== 1) throw new HttpError(400, 'Provide one destination path.');
             send(res, 200, access.wikiMovePreview(wikiMovePreview[1]!, url.searchParams.get('path')!)); return;
           }
-          const document = /^\/api\/documents\/(W\d+)(?:\/(history)|\/versions\/([^/]+))?$/.exec(path);
+          const document = /^\/api\/documents\/(W\d+)(?:\/(history|transactions)|\/versions\/([^/]+))?$/.exec(path);
           if (document) {
             access.require(document[1]!);
             const positiveParameter = (value: string, name: string): number => {
@@ -814,10 +821,11 @@ export function createApp(options: AppOptions = {}): App {
                 if (!['before', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'History accepts only one before cursor and one limit.');
               }
               const before = url.searchParams.get('before'); const limit = url.searchParams.get('limit');
-              send(res, 200, access.documentHistory(document[1]!, {
+              const options = {
                 ...(before === null ? {} : { before: positiveParameter(before, 'before') }),
                 ...(limit === null ? {} : { limit: positiveParameter(limit, 'limit') }),
-              })); return;
+              };
+              send(res, 200, document[2] === 'transactions' ? access.documentTransactions(document[1]!, options) : access.documentHistory(document[1]!, options)); return;
             }
             if (url.search) throw new HttpError(400, 'Document read URLs may not contain query parameters.');
             send(res, 200, document[3] ? access.documentVersion(document[1]!, positiveParameter(document[3], 'version')) : access.document(document[1]!)); return;

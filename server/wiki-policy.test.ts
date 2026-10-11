@@ -148,15 +148,16 @@ test('wiki moved links and historical move metadata disclose neither hidden peer
     app.policy(privateParent.id, { spaceId: space.id });
     const moved = await app.move(source.id, 'private-vault/undisclosed-target/'); const target = moved.receipt.destination;
     const stored = app.store.documentVersion(source.id, moved.receipt.source.version);
+    const storedLifecycle = app.store.documentTransactions(source.id);
     assert.equal(stored.move?.destinationId, target.id); assert.equal(stored.location?.movedToId, target.id);
     const visibleHistory = await app.request<{ accessEpoch: number }>(`/api/documents/${source.id}/history`, 'GET', undefined, 'bob');
     assert.equal(visibleHistory.status, 200); assert.ok(JSON.stringify(visibleHistory.body).includes(target.id));
     app.policies.updateSpace(space.id, { expectedVersion: space.version, view: members(app.alice.id) }, app.alice.id);
     assert.ok(app.policies.epoch() > visibleHistory.body.accessEpoch);
-    for (const path of [`/api/documents/${source.id}`, `/api/documents/${source.id}/history`, `/api/documents/${source.id}/versions/${stored.number}`, '/api/state', '/api/wiki?path=public-source/']) {
+    for (const path of [`/api/documents/${source.id}`, `/api/documents/${source.id}/history`, `/api/documents/${source.id}/versions/${stored.number}`, `/api/documents/${source.id}/transactions`, '/api/state', '/api/wiki?path=public-source/']) {
       const result = await app.request<{ accessEpoch?: number }>(path, 'GET', undefined, 'bob'); assert.equal(result.status, 200, path);
       assert.equal(result.body.accessEpoch, app.policies.epoch(), 'all hierarchy-bearing reads report their current authorization epoch');
-      const body = JSON.stringify(result.body); assert.equal(body.includes(target.id), false, path); assert.equal(body.includes('undisclosed-target'), false, path); assert.equal(body.includes('inputSha256'), false, path);
+      const body = JSON.stringify(result.body); assert.equal(body.includes(target.id), false, path); assert.equal(body.includes('undisclosed-target'), false, path); assert.equal(body.includes(stored.move!.inputSha256), false, path);
     }
     const detail = (await app.request<WikiDetail>(`/api/documents/${source.id}`, 'GET', undefined, 'bob')).body;
     assert.equal(detail.document.location?.movedToId, null); assert.equal(detail.hierarchy?.movedTo, null);
@@ -164,12 +165,15 @@ test('wiki moved links and historical move metadata disclose neither hidden peer
     const version = (await app.request<WikiVersion>(`/api/documents/${source.id}/versions/${stored.number}`, 'GET', undefined, 'bob')).body;
     assert.equal(version.move, undefined); assert.equal(version.location?.movedToId, null);
     assert.deepEqual(app.store.documentVersion(source.id, stored.number), stored, 'redaction never rewrites immutable move evidence');
+    assert.deepEqual(app.store.documentTransactions(source.id), storedLifecycle, 'redaction never changes the stored lifecycle digest');
     // The inverse record must also hide its peer if the source later becomes private.
     app.policy(privateParent.id, { spaceId: 'S1' }); app.policy(target.id, { spaceId: 'S1' });
     app.policy(source.id, { view: members(app.alice.id) });
     const destinationVersion = (await app.request<WikiVersion>(`/api/documents/${target.id}/versions/${target.version}`, 'GET', undefined, 'bob')).body;
     assert.equal(destinationVersion.move, undefined);
     assert.equal(JSON.stringify(destinationVersion).includes(source.id), false);
+    const destinationLifecycle = await app.request(`/api/documents/${target.id}/transactions`, 'GET', undefined, 'bob');
+    assert.equal(destinationLifecycle.status, 200); assert.equal(JSON.stringify(destinationLifecycle.body).includes(stored.move!.inputSha256), false, 'destination lifecycle also hides a private source move digest');
   } finally { await app.close(); }
 });
 
@@ -256,6 +260,7 @@ test('legacy wiki gaps remain readable and editable, but fresh creation and move
     app.store.database.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'document',?)").run(legacy.id, JSON.stringify(legacy));
     app.store.database.prepare('INSERT INTO wiki_versions(id,document_id,number,data) VALUES(?,?,?,?)').run(version.id, legacy.id, version.number, JSON.stringify(version));
     app.store.database.prepare("INSERT INTO wiki_locations(document_id,path,status,moved_to_id) VALUES(?,?,'active',NULL)").run(legacy.id, 'gap/middle/leaf/');
+    app.store.database.prepare('INSERT INTO wiki_publication(document_id,revision,head_version_id,published_version_id) VALUES(?,?,?,?)').run(legacy.id, legacy.version, version.id, version.id);
     registerDefaultPolicy(app.store.database, legacy.id);
     assert.equal((await app.request(`/api/documents/${legacy.id}`, 'GET', undefined, 'bob')).status, 200);
     const found = await app.request<WikiPathResult>('/api/wiki?path=gap/middle/leaf/', 'GET', undefined, 'bob');

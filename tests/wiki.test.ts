@@ -55,9 +55,11 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
   let store = createStore({ path });
   try {
     assert.equal(store.fresh, false);
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 20);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 21);
     const detail = store.documentDetail('W1');
-    assert.deepEqual(detail.document, { ...legacy, location: { path: 'research/existing/', status: 'active', movedToId: null } });
+    const { publication, ...snapshot } = detail.document;
+    assert.deepEqual(snapshot, { ...legacy, location: { path: 'research/existing/', status: 'active', movedToId: null } });
+    assert.equal(publication?.headVersion, 7); assert.equal(publication?.publishedVersion, 7); assert.equal(publication?.revision, 7);
     assert.equal(detail.history.firstAvailableVersion, 7);
     assert.equal(detail.history.nextBefore, null);
     assert.equal(detail.history.versions.length, 1);
@@ -79,7 +81,7 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
     assert.deepEqual(store.documentDetail('W1').document, edited);
     assert.deepEqual(store.documentHistory('W1').versions.map(version => version.number), [8, 7]);
     assert.equal(store.documentHistory('W1').firstAvailableVersion, 7);
-    assert.equal(store.createDocument({ title: 'Next document', slug: '/', content: '' }).id, 'W2');
+    assert.equal(store.createDocument({ title: 'Next document', slug: '/', content: 'Document content' }).id, 'W2');
     assert.throws(() => store.database.prepare('UPDATE wiki_versions SET data = data WHERE document_id = ?').run('W1'), /immutable/);
     assert.throws(() => store.database.prepare('DELETE FROM wiki_versions WHERE document_id = ?').run('W1'), /immutable/);
   } finally { store.close(); await rm(directory, { recursive: true, force: true }); }

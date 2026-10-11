@@ -129,9 +129,79 @@ test('direct wiki reads remain session-bound and protected recovery cannot cross
   try {
     const { client } = current; const requests: string[] = [];
     globalThis.fetch = async url => { requests.push(String(url)); return String(url).endsWith('/state') ? Response.json({ access: allAccess(), accessEpoch: 1, spaces: [{ id: 'S1' }, { id: 'S2' }] }) : await new Promise<Response>(resolve => { release = resolve; }); };
-    const pending = client.request('/api/documents/W3/versions/1'); await new Promise(resolve => setTimeout(resolve, 0)); assert.ok(requests.some(url => url.endsWith('/api/documents/W3/versions/1'))); client.writeStored('wiki-request:W3', move); assert.equal(current.entries.size, 0);
+    const pending = client.request('/api/documents/W3/versions/1'); assert.equal(requests.length, 1); assert.ok(requests[0]!.endsWith('/api/documents/W3/versions/1')); client.writeStored('wiki-request:W3', move); assert.equal(current.entries.size, 0);
     const next = createWorkspaceClient(activateSession({ mode: 'password', workspaceId: 'wiki-lifecycle', account: { id: 'U2', username: 'other', displayName: 'Other', disabled: false }, sessionContext: 'session-two', csrfToken: 'csrf-two', expiresAt: null }));
     release(Response.json({ content: 'Private version source', accessEpoch: 1 })); await assert.rejects(pending, SessionChangedError);
     assert.equal(next.readStored('wiki-request:W3', null), null); assert.equal(client.writeStored('wiki-request:W3', move), false); assert.equal(current.entries.size, 0);
   } finally { globalThis.fetch = previous; current.close(); }
+});
+
+test('initial wiki mutations wait for workspace verification and obey newly learned write restrictions', async () => {
+  const previous = globalThis.fetch;
+  try {
+    for (const editable of [true, false]) {
+      const current = fixture('password', false); let release!: (response: Response) => void; const calls: string[] = [];
+      try {
+        globalThis.fetch = async url => { calls.push(String(url)); return String(url).endsWith('/state') ? await new Promise<Response>(resolve => { release = resolve; }) : Response.json({ id: 'W3', version: 2, accessEpoch: 1 }); };
+        const pending = current.client.request('/api/documents/W3', { method: 'PUT', id: 'initial-write', body: { title: 'Title', slug: 'parent/child/', content: 'Changed source', expectedVersion: 1 } });
+        assert.equal(calls.length, 1); assert.ok(calls[0]!.endsWith('/api/state'));
+        release(Response.json({ access: { ...allAccess(), W3: access('W3', editable) }, accessEpoch: 1, spaces: [{ id: 'S1' }, { id: 'S2' }] }));
+        if (editable) { await pending; assert.equal(calls.length, 2); assert.ok(calls[1]!.endsWith('/api/documents/W3')); }
+        else { await assert.rejects(pending, /Permission to submit/); assert.equal(calls.length, 1); }
+      } finally { current.close(); }
+    }
+  } finally { globalThis.fetch = previous; }
+});
+
+const publicationPins = { expectedVersion: 2, expectedHeadVersionId: 'head-two', expectedPublishedVersionId: 'published-one', expectedPublicationRevision: 3, expectedAccessEpoch: 1 };
+const publicationDraft = { title: 'Unsent shared draft', content: 'Keep this exact local text\r\n', message: 'Unsent summary', pins: publicationPins, authorityIds: ['W1', 'W2'] };
+const actionDraft = { message: 'Unsent publication explanation', authorityIds: ['W1', 'W2'] };
+const publicationIntent = { id: 'exact-publish', documentId: 'W3', kind: 'publish', path: '/api/documents/W3/publish', method: 'POST' as const, body: { ...publicationPins, targetVersionId: 'head-two', message: actionDraft.message }, draftKey: 'wiki-action:W3:3:publish:head-two', draft: actionDraft, authorityIds: ['W1', 'W2'] };
+const publicationRecords = [['wiki-edit:W3:head-two:3', publicationDraft], [publicationIntent.draftKey, actionDraft], ['wiki-action-request:W3', publicationIntent]] as const;
+
+test('wiki publication operations never enter the outbox and retained local work follows ancestor and source permissions', async () => {
+  const previous = globalThis.fetch; let requests = 0;
+  try {
+    globalThis.fetch = async () => { requests++; return Response.json({}); };
+    for (const loss of ['ancestor-view', 'source-view', 'source-edit']) {
+      const current = fixture();
+      try {
+        const { client } = current;
+        for (const [key, value] of publicationRecords) assert.equal(client.writeStored(key, value), true);
+        for (const action of ['drafts', 'publish', 'delete']) {
+          const path = `/api/documents/W3/${action}`; assert.equal(canQueue(path, 'POST', publicationIntent.body), false);
+          await assert.rejects(client.request(path, { method: 'POST', id: publicationIntent.id, body: publicationIntent.body, queued: true }), /explicit online save/);
+        }
+        const changed = allAccess(); if (loss === 'ancestor-view') delete changed.W2; else if (loss === 'source-view') delete changed.W3; else changed.W3 = access('W3', false);
+        client.reconcileAccess(changed, 2, ['S1', 'S2']);
+        for (const [key, value] of publicationRecords) { assert.equal(client.draftIsHeld(key), true, `${loss}: ${key}`); assert.equal(client.readStored(key, null), null); assert.deepEqual(client.quarantinedDrafts().find(item => item.key === key)?.value, value); }
+        client.reconcileAccess(allAccess(), 3, ['S1', 'S2']); for (const [key] of publicationRecords) assert.equal(client.draftIsHeld(key), true);
+      } finally { current.close(); }
+    }
+    assert.equal(requests, 0);
+  } finally { globalThis.fetch = previous; }
+});
+
+test('wiki lifecycle recovery preserves both quota copies and late confirmations never remove a newer local draft', () => {
+  for (const [key, draft] of publicationRecords) {
+    const current = fixture();
+    try {
+      const { client } = current, other = { ...draft, message: 'Different newer local note' };
+      client.writeStored(key, draft); client.writeStored(key, other); client.removeStoredIfEqual(key, draft); assert.deepEqual(client.readStored(key, null), other);
+      current.failWrites(); assert.equal(client.writeStored(key, draft), false);
+      const changed = allAccess(); delete changed.W2; client.reconcileAccess(changed, 2, ['S1', 'S2']);
+      const copies = client.quarantinedDrafts().filter(item => item.key === key || item.key === `${key}:unsaved-memory`).map(item => item.value);
+      assert.equal(copies.length, 2); assert.ok(copies.some(item => JSON.stringify(item) === JSON.stringify(other))); assert.ok(copies.some(item => JSON.stringify(item) === JSON.stringify(draft)));
+    } finally { current.close(); }
+  }
+});
+
+test('wiki lifecycle local drafts retain original publication pins across unrelated policy refreshes and ordinary parent edit loss', () => {
+  const current = fixture();
+  try {
+    const { client } = current; for (const [key, value] of publicationRecords) client.writeStored(key, value);
+    client.reconcileAccess({ ...allAccess(), W2: access('W2', false) }, 2, ['S1', 'S2']);
+    for (const [key, value] of publicationRecords) { assert.equal(client.draftIsHeld(key), false); assert.deepEqual(client.readStored(key, null), value); }
+    assert.equal(client.readStored<typeof publicationIntent>('wiki-action-request:W3', publicationIntent).body.expectedAccessEpoch, 1, 'a retained request never silently substitutes current access or publication pins');
+  } finally { current.close(); }
 });
