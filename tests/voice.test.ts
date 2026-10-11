@@ -48,3 +48,13 @@ test('following commands select the requested revision list without changing sub
   for (const command of ['follow P2', 'unfollow revision D1', 'mute all papers', 'subscribe Alice', 'show followed papers and unsubscribe', 'show all drafts and delete them']) assert.equal(parseCommand(command).type, 'unknown');
   assert.deepEqual(parseCommand('show followed tasks'), { type: 'taskFilter', value: 'following' });
 });
+
+test('revision project commands filter visible lists without changing project tags', () => {
+  for (const [noun, view] of [['code revisions', 'reviews'], ['revisions', 'reviews'], ['reviews', 'reviews'], ['papers', 'papers'], ['drafts', 'drafts'], ['documents', 'drafts']] as const) {
+    for (const command of [`Show ${noun} in project Research.`, `open ${noun} tagged with project Research`]) assert.deepEqual(parseCommand(command), { type: 'revisionProjectFilter', view, project: 'Research' });
+    for (const command of [`show ${noun} in all projects`, `open ${noun} without a project filter`]) assert.deepEqual(parseCommand(command), { type: 'revisionProjectFilter', view, project: null });
+  }
+  assert.deepEqual(parseCommand('open documents tagged with project #filing'), { type: 'revisionProjectFilter', view: 'drafts', project: '#filing' });
+  for (const command of ['add Research to P2', 'remove project tags from D1', 'replace all paper tags', 'show papers in project', 'open drafts in all projects and delete them']) assert.equal(parseCommand(command).type, 'unknown');
+  assert.deepEqual(parseCommand('show tasks in project Research'), { type: 'taskProjectFilter', project: 'Research' });
+});

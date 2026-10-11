@@ -66,7 +66,7 @@ export interface GitSourceProvenance {
 }
 /** Internal verified collector output. Import APIs accept commit selectors and metadata, never this source payload. */
 export interface GitImportSnapshot extends GitResponse { files: SourceFile[]; provenance: GitSourceProvenance }
-export interface GitImportInput { draft?: boolean; commitId: string; kind: RevisionKind; title: string; summary?: string; testPlan?: string; projectId?: string | null }
+export interface GitImportInput { draft?: boolean; commitId: string; kind: RevisionKind; title: string; summary?: string; testPlan?: string; projectId?: string | null; projectIds?: string[] }
 
 /** Explicit whole-tree replacement pinned to the current immutable review version. */
 export interface GitVersionImportInput {

@@ -966,3 +966,19 @@
 .revision-following-filter{padding:16px;border-bottom:1px solid var(--border)}.revision-following-filter .field{margin:0;max-width:650px}.revision-subscriptions .card-body{display:grid;gap:14px}.revision-subscriptions .panel-heading{gap:12px;flex-wrap:wrap}.revision-subscriber-list{list-style:none;padding:0;margin:0}.revision-subscriber-list>li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}.revision-subscriber-list small{display:block;margin-top:5px}.revision-subscription-editor,.revision-subscription-recovery,.revision-mute-controls,.revision-subscription-history{border-top:1px solid var(--border);padding-top:16px}.revision-subscriptions .file-actions{gap:8px;flex-wrap:wrap}.revision-subscriptions .file-actions>.button{flex:0 0 auto;white-space:normal}.revision-subscriptions .field{margin:0}.revision-subscription-history li{padding:10px 0;overflow-wrap:anywhere}.revision-subscription-history small{display:block}.revision-subscription-editor p,.revision-subscription-recovery p{margin:10px 0;overflow-wrap:anywhere}
 @media(max-width:700px){.revision-subscriptions .button,.revision-subscriptions summary{min-height:44px}.revision-subscriptions .panel-heading{align-items:flex-start}.revision-subscriptions .file-actions{flex-direction:column;align-items:stretch}.revision-subscriptions .file-actions>.button{flex:0 0 auto}.revision-subscriber-list>li{align-items:flex-start;flex-wrap:wrap}.revision-following-filter select,.revision-subscriptions select{font-size:16px;min-height:44px}}
 @media(max-width:700px){.revision-reviewer-decisions{grid-template-columns:1fr}.revision-reviewers .file-actions,.revision-reviewer-add{flex-direction:column;align-items:stretch}.revision-reviewer-add .field{min-width:0}.revision-reviewers .button{min-height:44px}.revision-reviewer-decisions .button{width:100%}}
+.revision-project-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; }
+.revision-projects .card-body { min-width: 0; }
+.revision-projects .file-actions { margin-top: 14px; flex-wrap: wrap; }
+.revision-project-editor, .revision-project-recovery, .revision-project-history { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.revision-project-picker { min-width: 0; margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 4px; }
+.revision-project-picker .checkbox { min-height: 44px; overflow-wrap: anywhere; align-items: center; }
+.revision-project-picker .checkbox small { color: var(--muted); margin-left: auto; }
+.revision-project-history li { margin-bottom: 16px; overflow-wrap: anywhere; }
+.revision-project-history li > small { display: block; }
+.revision-project-history summary { min-height: 44px; display: list-item; padding: 10px 0; cursor: pointer; }
+@media (max-width: 700px) {
+  .revision-projects .panel-heading { flex-wrap: wrap; gap: 10px; }
+  .revision-projects .button { min-height: 44px; white-space: normal; }
+  .revision-projects .file-actions { flex-direction: column; align-items: stretch; }
+  .revision-projects .file-actions .button { flex: 0 0 auto; }
+}

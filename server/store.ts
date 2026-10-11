@@ -7,6 +7,8 @@ import type { RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { initializeRevisionReviewers, RevisionReviewerStore } from './revision-reviewers.ts';
 import type { RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
 import { initializeRevisionSubscriptions, RevisionSubscriptionStore } from './revision-subscriptions.ts';
+import { initializeRevisionProjects, RevisionProjectStore } from './revision-projects.ts';
+import { revisionProjectCreationInput } from '../shared/revision-projects.ts';
 import { initializeRevisionMetadata, RevisionMetadataStore } from './revision-metadata.ts';
 import type { RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
@@ -64,12 +66,15 @@ export function threadPreferenceInput(input: unknown): SetThreadPreferenceInput 
 }
 
 /** Public import metadata contains no source, policy, or provenance supplied by a client. */
+function parseRevisionProjectCreation(input: { projectId?: unknown; projectIds?: unknown }): { projectId?: string | null; projectIds?: string[] } {
+  try { return revisionProjectCreationInput(input); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid project tags.', 'REVISION_PROJECT_INVALID_INPUT'); }
+}
 export function gitImportInput(input: unknown): GitImportInput {
-  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'testPlan', 'projectId', 'draft']);
+  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'testPlan', 'projectId', 'projectIds', 'draft']);
   if (typeof data.commitId !== 'string' || !isGitObjectId(data.commitId)) throw new HttpError(400, 'Select a full lowercase commit object ID.', 'GIT_INVALID_QUERY');
-  if (data.projectId !== undefined && data.projectId !== null && (typeof data.projectId !== 'string' || !/^PROJ[1-9]\d{0,14}$/.test(data.projectId))) throw new HttpError(400, 'Reference unavailable.');
+  const tags = parseRevisionProjectCreation(data);
   if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
-  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title', 255, true), summary: optionalString(data.summary, 'Summary'), ...(data.testPlan === undefined ? {} : { testPlan: string(data.testPlan, 'Test plan', 100_000, true) }), ...(data.projectId === undefined ? {} : { projectId: data.projectId as string | null }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
+  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title', 255, true), summary: optionalString(data.summary, 'Summary'), ...(data.testPlan === undefined ? {} : { testPlan: string(data.testPlan, 'Test plan', 100_000, true) }), ...tags, ...(data.draft === undefined ? {} : { draft: data.draft }) };
 }
 
 export function gitVersionImportInput(input: unknown): GitVersionImportInput {
@@ -97,10 +102,10 @@ function docxPins(data: Record<string, unknown>): DocxVersionPins {
 }
 export function parseDocxVersionPins(input: unknown): DocxVersionPins { return docxPins(object(input, docxPinKeys)); }
 export function parseDocxImportInput(input: unknown): DocxImportInput {
-  const data = object(input, ['title', 'summary', 'testPlan', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']);
+  const data = object(input, ['title', 'summary', 'testPlan', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft', 'projectId', 'projectIds']);
   if (typeof data.shareSource !== 'boolean') throw new HttpError(400, 'shareSource must be an explicit boolean.');
   if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
-  return { title: string(data.title, 'Title', 255, true), summary: optionalString(data.summary, 'Summary'), ...(data.testPlan === undefined ? {} : { testPlan: string(data.testPlan, 'Test plan', 100_000, true) }), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
+  return { title: string(data.title, 'Title', 255, true), summary: optionalString(data.summary, 'Summary'), ...(data.testPlan === undefined ? {} : { testPlan: string(data.testPlan, 'Test plan', 100_000, true) }), ...parseRevisionProjectCreation(data), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
 }
 export function parseDocxReimportInput(input: unknown): DocxReimportInput {
   const data = object(input, [...docxPinKeys, 'sourceFile', 'shareSource', 'message']);
@@ -174,6 +179,7 @@ export class Store {
   readonly revisionReviewers: RevisionReviewerStore;
   readonly revisionMetadata: RevisionMetadataStore;
   readonly revisionSubscriptions: RevisionSubscriptionStore;
+  readonly revisionProjects: RevisionProjectStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -186,7 +192,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 29) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 30) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -451,6 +457,11 @@ export class Store {
       try { this.transaction(() => { initializeRevisionSubscriptions(this.database); this.database.exec('PRAGMA user_version = 29'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 30) {
+      try { this.transaction(() => { initializeRevisionProjects(this.database); this.database.exec('PRAGMA user_version = 30'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.revisionProjects = new RevisionProjectStore(this.database);
     this.revisionMetadata = new RevisionMetadataStore(this.database, options.revisionMetadata);
     this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
     this.revisionReviewers = new RevisionReviewerStore(this.database, this.revisionLifecycle, options.revisionReviewers);
@@ -490,7 +501,10 @@ export class Store {
         if (existing) return present ? present(existing, true) : existing;
       }
       const response = work();
-      if (key) this.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(key, fingerprint, response.status, JSON.stringify(response.body), new Date().toISOString());
+      if (key) {
+        this.revisionProjects.captureResponse(key, fingerprint, response);
+        this.database.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run(key, fingerprint, response.status, JSON.stringify(response.body), new Date().toISOString());
+      }
       return present ? present(response, false) : response;
     });
   }
@@ -498,7 +512,9 @@ export class Store {
     const row = this.database.prepare('SELECT fingerprint, status, body FROM idempotency WHERE key = ?').get(key) as { fingerprint: string; status: number; body: string } | undefined;
     if (!row) return undefined;
     if (row.fingerprint !== fingerprint) throw new HttpError(409, 'This idempotency key was already used for a different request.');
-    return { status: row.status, body: JSON.parse(row.body) as unknown };
+    const response = { status: row.status, body: JSON.parse(row.body) as unknown };
+    this.revisionProjects.verifyResponse(key, fingerprint, response);
+    return response;
   }
   private nextId(name: string, prefix: string): string {
     const row = this.database.prepare('INSERT INTO sequences (name, value) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET value = value + 1 RETURNING value').get(name) as { value: number };
@@ -537,13 +553,13 @@ export class Store {
     }
     if (kind === 'document') { const { location: _location, publication: _publication, ...rest } = value as WikiDocument; metadata = rest; }
     if (kind === 'revision') {
-      const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, reviewerVersion: _reviewerVersion, metadataVersion: _metadataVersion, testPlan: _testPlan, ...rest } = value as Revision;
+      const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, reviewerVersion: _reviewerVersion, metadataVersion: _metadataVersion, testPlan: _testPlan, projectIds: _projectIds, projectVersion: _projectVersion, ...rest } = value as Revision;
       // Existing writers update source/status through this helper. Metadata is
       // authoritative in its sidecar; never copy a hydrated edit back over the
       // original entity fields retained for historical receipt compatibility.
       const old = this.database.prepare("SELECT data FROM entities WHERE id=? AND kind='revision'").get(value.id) as JsonRow | undefined;
       const original = old ? JSON.parse(old.data) as Revision : null;
-      metadata = original ? { ...rest, title: original.title, summary: original.summary, ...(Object.hasOwn(original, 'testPlan') ? { testPlan: original.testPlan } : {}) } : rest;
+      metadata = original ? { ...rest, title: original.title, summary: original.summary, projectId: original.projectId, ...(Object.hasOwn(original, 'testPlan') ? { testPlan: original.testPlan } : {}) } : rest;
     }
     const json = JSON.stringify(metadata);
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
@@ -553,8 +569,8 @@ export class Store {
   }
   private hydrateRevision(value: Revision): Revision {
     const state = this.revisionAuthorship.state(value.id);
-    const metadata = this.revisionMetadata.state(value.id);
-    return { ...value, title: metadata.title, summary: metadata.summary, testPlan: metadata.testPlan, metadataVersion: metadata.version, ...(metadata.updatedAt && metadata.updatedAt > value.updatedAt ? { updatedAt: metadata.updatedAt } : {}), authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version, reviewerVersion: this.revisionReviewers.state(value.id).version };
+    const metadata = this.revisionMetadata.state(value.id), tags = this.revisionProjects.state(value.id);
+    return { ...value, projectIds: tags.projectIds, projectVersion: tags.version, projectId: tags.projectIds[0] ?? null, title: metadata.title, summary: metadata.summary, testPlan: metadata.testPlan, metadataVersion: metadata.version, ...(metadata.updatedAt && metadata.updatedAt > value.updatedAt ? { updatedAt: metadata.updatedAt } : {}), authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version, reviewerVersion: this.revisionReviewers.state(value.id).version };
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -1336,14 +1352,14 @@ export class Store {
   createDocxRevision(input: DocxImportInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
     return this.discussionMutation(() => {
       const data = parseDocxImportInput(input), actor = this.docxActor(attribution); this.docxEpoch(data.expectedAccessEpoch);
-      const metadata = this.revisionMetadata.creationFields(data);
+      const metadata = this.revisionMetadata.creationFields(data), projectIds = this.revisionProjects.creationTags(data);
       const file = this.docxFile(data.sourceFile, true), source = this.docxSource(bytes, projection, file.originalName, data.sourceFile);
       if (source.sha256 !== file.sha256 || source.bytes !== file.bytes || !Buffer.from(bytes).equals(this.files.readBytes(file.id))) throw docxMismatch();
       const now = new Date().toISOString();
-      const revision: Revision = { id: this.nextId('revision', 'L'), title: metadata.title, summary: metadata.summary, kind: 'document', status: data.draft ? 'draft' : 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: now, updatedAt: now };
+      const revision: Revision = { id: this.nextId('revision', 'L'), title: metadata.title, summary: metadata.summary, kind: 'document', status: data.draft ? 'draft' : 'needs_review', repositoryId: null, projectId: projectIds[0] ?? null, currentVersion: 1, createdAt: now, updatedAt: now };
       this.save('revision', revision); this.attachDocxSource(revision.id, data.sourceFile, data.shareSource, actor);
       this.saveDocxVersion(revision, source, bytes, 'Imported Word document', actor, { kind: 'import', inputSha256: docxOperationHash(data) });
-      this.revisionMetadata.ensure(revision.id, metadata);
+      this.revisionMetadata.ensure(revision.id, metadata); this.revisionProjects.ensure(revision.id, projectIds);
       this.event(revision.id, 'created', 'Imported Word document as version 1.', actor);
       return this.detail(revision.id);
     });
@@ -1411,7 +1427,7 @@ export class Store {
     return this.discussionMutation(() => {
       const data = gitImportInput(input);
       const { source, gitSource } = this.verifiedGitSnapshot(repositoryId, data.commitId, snapshot);
-      return this.createRevisionRecord({ title: data.title, summary: data.summary, ...(data.testPlan === undefined ? {} : { testPlan: data.testPlan }), kind: data.kind, projectId: data.projectId, repositoryId, files: source, ...(data.draft === undefined ? {} : { draft: data.draft }) }, attribution, gitSource);
+      return this.createRevisionRecord({ title: data.title, summary: data.summary, ...(data.testPlan === undefined ? {} : { testPlan: data.testPlan }), kind: data.kind, ...parseRevisionProjectCreation(data), repositoryId, files: source, ...(data.draft === undefined ? {} : { draft: data.draft }) }, attribution, gitSource);
     });
   }
   private verifiedGitSnapshot(repositoryId: string, commitId: string, snapshot: GitImportSnapshot): { source: SourceFile[]; gitSource: GitSourceProvenance } {
@@ -1454,16 +1470,16 @@ export class Store {
     });
   }
   private createRevisionRecord(input: unknown, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionDetail {
-    const data = object(input, ['title', 'summary', 'testPlan', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId', 'draft']);
+    const data = object(input, ['title', 'summary', 'testPlan', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId', 'projectIds', 'draft']);
     if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
     const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
-    const metadata = this.revisionMetadata.creationFields({ title: data.title, summary: data.summary, testPlan: data.testPlan });
+    const metadata = this.revisionMetadata.creationFields({ title: data.title, summary: data.summary, testPlan: data.testPlan }), projectIds = this.revisionProjects.creationTags(data);
     const source = files(data.files);
     const assets = this.sourceAssets(source, data.assets ?? [], []);
     const now = new Date().toISOString();
-    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: metadata.title, summary: metadata.summary, kind, status: data.draft ? 'draft' : 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
+    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: metadata.title, summary: metadata.summary, kind, status: data.draft ? 'draft' : 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: projectIds[0] ?? null, currentVersion: 1, createdAt: now, updatedAt: now };
     this.save('revision', revision); this.shareSourceAssets(revision.id, assets, [], data.shareAssets, attribution);
-    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.revisionMetadata.ensure(revision.id, metadata); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
+    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.revisionMetadata.ensure(revision.id, metadata); this.revisionProjects.ensure(revision.id, projectIds); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
   }
   private sourceAssets(source: SourceFile[], input: unknown, previous: RevisionAsset[]): RevisionAsset[] {
     const resolved = this.files.resolveAssets(input);

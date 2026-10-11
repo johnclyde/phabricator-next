@@ -142,18 +142,30 @@ test('Word API revalidates source authority after asynchronous inspection before
 });
 
 test('Word API rejects a canonical receipt substituted for a different exact replacement', async () => {
-  const app = await start();
-  try {
-    const file = await app.upload(); const { detail } = await app.importDocument(file); const id = detail.revision.id;
-    const input = app.replacement(detail), path = `/api/revisions/${id}/docx/replace`;
-    const saved = await app.request<RevisionDetail>(path, 'POST', input, 'alice', 'original-replacement'); assert.equal(saved.status, 201);
-    const different = { ...input, replacement: 'A different proposed argument.' };
-    const fingerprint = createHash('sha256').update(JSON.stringify(['POST', path, different])).digest('hex');
-    app.store.database.prepare("UPDATE idempotency SET fingerprint=? WHERE key LIKE '%:original-replacement'").run(fingerprint);
-    const replay = await app.request(path, 'POST', different, 'aliceOther', 'original-replacement');
-    assert.equal(replay.status, 409); assert.equal(replay.body.code, 'DOCX_RECEIPT_MISMATCH');
-    assert.equal(app.store.detail(id).versions.length, 2);
-  } finally { await app.close(); }
+  for (const legacyUnbound of [false, true]) {
+    const app = await start();
+    try {
+      const file = await app.upload(); const { detail } = await app.importDocument(file); const id = detail.revision.id;
+      const input = app.replacement(detail), path = `/api/revisions/${id}/docx/replace`;
+      const saved = await app.request<RevisionDetail>(path, 'POST', input, 'alice', 'original-replacement'); assert.equal(saved.status, 201);
+      const original = app.store.database.prepare("SELECT key,fingerprint,body FROM idempotency WHERE key LIKE '%:original-replacement'").get() as { key: string; fingerprint: string; body: string };
+      if (legacyUnbound) {
+        // Simulate a pre-schema30 receipt: migration intentionally does not
+        // backfill response bindings, so Word's original proof must still work.
+        app.store.database.exec('DROP TRIGGER revision_project_response_bindings_no_delete');
+        app.store.database.prepare('DELETE FROM revision_project_response_bindings WHERE key_sha256=?').run(createHash('sha256').update(original.key).digest('hex'));
+      }
+      const different = { ...input, replacement: 'A different proposed argument.' };
+      const fingerprint = createHash('sha256').update(JSON.stringify(['POST', path, different])).digest('hex');
+      app.store.database.prepare('UPDATE idempotency SET fingerprint=? WHERE key=?').run(fingerprint, original.key);
+      const replay = await app.request(path, 'POST', different, 'aliceOther', 'original-replacement');
+      assert.equal(replay.status, 409); assert.equal(replay.body.code, legacyUnbound ? 'DOCX_RECEIPT_MISMATCH' : 'REVISION_PROJECT_INVALID_RECEIPT');
+      assert.equal(app.store.detail(id).versions.length, 2); assert.equal(app.store.database.prepare('SELECT body FROM idempotency WHERE key=?').get(original.key)!.body, original.body);
+      app.store.database.prepare('UPDATE idempotency SET fingerprint=? WHERE key=?').run(original.fingerprint, original.key);
+      const recovered = await app.request<RevisionDetail>(path, 'POST', input, 'aliceOther', 'original-replacement');
+      assert.equal(recovered.status, 201); assert.deepEqual(recovered.body.versions, saved.body.versions); assert.equal(app.store.detail(id).versions.length, 2);
+    } finally { await app.close(); }
+  }
 });
 
 test('application close awaits disconnected Word processing and its final authority checks', async () => {

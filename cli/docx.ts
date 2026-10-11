@@ -6,6 +6,7 @@ import type { DocxInspection } from '../shared/docx';
 import { DOCX_LIMITS } from '../shared/docx';
 import type { Revision, RevisionVersion } from '../shared/types';
 import { sourceSnapshotCanonical } from '../shared/source-snapshot';
+import { revisionProjectCreationInput } from '../shared/revision-projects';
 
 const commands = new Set(['inspect-docx', 'import-docx', 'reimport-docx', 'edit-docx', 'download-docx']);
 const digest = (value: Uint8Array | string) => createHash('sha256').update(value).digest('hex');
@@ -55,10 +56,11 @@ export async function docxCommand({ command, args, options, optionNames, request
     if (input.testPlan !== undefined) throw new Error('Choose testPlan in the Word request file or --test-plan, not both. Retain the same choice when retrying.');
     input.testPlan = option('test-plan');
   }
-  const fields = creation ? ['title', 'summary', 'testPlan', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']
+  const fields = creation ? ['title', 'summary', 'testPlan', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft', 'projectIds', 'projectId']
     : command === 'reimport-docx' ? ['sourceFile', 'shareSource', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch']
       : ['rangeId', 'start', 'end', 'quote', 'replacement', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch'];
   if (Object.keys(input).some(key => !fields.includes(key))) throw new Error('The Word request contains unsupported fields.');
+  if (creation) revisionProjectCreationInput(input);
   if (creation && input.draft !== undefined && typeof input.draft !== 'boolean') throw new Error('draft must be true or false.');
   positive(input.expectedAccessEpoch, 'expectedAccessEpoch');
   if (!creation) {

@@ -218,9 +218,9 @@ test('schema 4 migration preserves legacy comment bytes, provenance and replay w
   const directory = mkdtempSync(join(tmpdir(), 'phab-thread-migration-')); const path = join(directory, 'workspace.sqlite');
   const legacy = legacyDatabase(path); let store = new Store({ path });
   try {
-    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 29);
+    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 30);
     const detail = store.detail(legacy.revision.id);
-    assert.deepEqual(detail.revision, { ...legacy.revision, authorId: null, authorDisplayName: null, authorVersion: 0, lifecycleVersion: 0, reviewerVersion: 0, metadataVersion: 0, testPlan: null }); assert.deepEqual(detail.versions, [legacy.version]); assert.deepEqual(detail.comments, legacy.comments);
+    assert.deepEqual(detail.revision, { ...legacy.revision, authorId: null, authorDisplayName: null, authorVersion: 0, lifecycleVersion: 0, reviewerVersion: 0, metadataVersion: 0, testPlan: null, projectIds: [], projectVersion: 0 }); assert.deepEqual(detail.versions, [legacy.version]); assert.deepEqual(detail.comments, legacy.comments);
     assert.deepEqual((raw(store, 'comments') as { data: string }[]).map(row => row.data), legacy.commentJson);
     assert.equal(detail.comments[0]!.attribution, undefined); assert.equal(detail.comments[0]!.threadId, undefined);
     assert.equal(detail.comments[0]!.anchor, undefined);

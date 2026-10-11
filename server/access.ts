@@ -11,6 +11,8 @@ import type { RevisionMetadataInput, RevisionMetadataSnapshot, RevisionMetadataH
 import { revisionSubscriptionInputHash } from './revision-subscriptions.ts';
 import type { RevisionSubscriptionInput, RevisionSubscriptionSnapshot, RevisionSubscriptionHistory, RevisionMuteHistory, RevisionSubscriptionPerson } from '../shared/revision-subscriptions.ts';
 import { revisionMetadataInputHash } from './revision-metadata.ts';
+import { revisionProjectInputHash } from './revision-projects.ts';
+import type { RevisionProjectInput, RevisionProjectSnapshot, RevisionProjectHistory } from '../shared/revision-projects.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -69,6 +71,46 @@ export class AccessLayer {
   revision(id: string): RevisionDetail {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  revisionProjects(id: string): RevisionProjectSnapshot {
+    this.require(id);
+    return this.redact({ ...this.store.revisionProjects.snapshot(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  revisionProjectHistory(id: string, query: { before?: number; limit?: number; expectedProjectVersion?: number }): RevisionProjectHistory {
+    this.require(id);
+    return this.redact({ ...this.store.revisionProjects.history(id, query), accessEpoch: this.policies.epoch() });
+  }
+  private revisionProjectReferences(value: unknown): void {
+    if (!Array.isArray(value) || value.length > 100) throw new HttpError(400, 'Choose at most 100 project tags.');
+    for (const id of value) if (typeof id !== 'string' || !/^PROJ[1-9]\d{0,14}$/.test(id) || !this.canView(id)) throw new HttpError(404, 'Project reference is unavailable.', 'REVISION_PROJECT_UNAVAILABLE');
+  }
+  requireRevisionProjectAction(id: string, input: RevisionProjectInput): void {
+    this.require(id, 'edit'); this.revisionProjectReferences(input.projectIds);
+  }
+  presentRevisionProject(id: string, input: RevisionProjectInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
+    this.requireRevisionProjectAction(id, input);
+    const invalid = (): never => { throw new HttpError(409, 'This saved project-tag receipt does not match the requested operation.', 'REVISION_PROJECT_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.revisionProjects.operationRevisionId(body.operationId) !== id) return invalid();
+      operation = this.store.revisionProjects.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.attribution.principalId !== this.principal || operation.retryKeySha256 !== retryKeySha256
+      || operation.inputSha256 !== revisionProjectInputHash(input) || !isDeepStrictEqual(operation.input, input) || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: this.redact({ ...operation.receipt, accessEpoch: this.policies.epoch() }) };
+  }
+  private verifyRevisionProjectSnapshot(revision: Record<string, unknown>, id: string, creation: boolean, input: unknown): void {
+    const invalid = (): never => { throw new HttpError(409, 'This saved revision has inconsistent historical project tags.', 'REVISION_PROJECT_INVALID_RECEIPT'); };
+    const modern = Object.hasOwn(revision, 'projectIds') || Object.hasOwn(revision, 'projectVersion');
+    // Legacy scalar receipts remain historical. A new array-form creation
+    // cannot strip its modern fields and masquerade as a legacy response.
+    if (!modern) { if (creation && Object.hasOwn(record(input) ?? {}, 'projectIds')) invalid(); return; }
+    if (revision.id !== id || !Number.isSafeInteger(revision.projectVersion) || Number(revision.projectVersion) < 0 || creation && revision.projectVersion !== 0) return invalid();
+    let historical;
+    try { historical = this.store.revisionProjects.historicalState(id, Number(revision.projectVersion)); } catch { return invalid(); }
+    if (!isDeepStrictEqual(revision.projectIds, historical.projectIds) || revision.projectId !== (historical.projectIds[0] ?? null)) invalid();
   }
   revisionLifecycle(id: string): RevisionLifecycleSnapshot {
     this.require(id);
@@ -682,6 +724,7 @@ export class AccessLayer {
       if (data?.kind === 'milestone' && ['access', 'memberIds', 'icon', 'color', 'colorKey'].some(key => Object.hasOwn(data, key))) throw new HttpError(400, 'Milestones inherit access, membership, icon and color from their parent.');
     }
     if (method === 'POST' && CREATES.has(path)) this.references(input);
+    if (method === 'POST' && (path === '/api/revisions' || path === '/api/revisions/docx' || /^\/api\/repositories\/R\d+\/import-revision$/.test(path)) && record(input)?.projectIds !== undefined) this.revisionProjectReferences(record(input)!.projectIds);
     if (method === 'POST' && path === '/api/tasks' && record(input)?.projectIds !== undefined) this.projectReferences(record(input)!.projectIds);
     if (method === 'POST' && /^\/api\/tasks\/T\d+\/projects$/.test(path)) this.projectReferences(record(input)?.projectIds);
     if (method === 'POST' && path === '/api/projects' && record(input)?.memberIds !== undefined) {
@@ -875,6 +918,8 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    const revisionSnapshot = record(body?.revision);
+    if (revisionSnapshot && target) this.verifyRevisionProjectSnapshot(revisionSnapshot, target.id, method === 'POST' && (path === '/api/revisions' || path === '/api/revisions/docx' || Boolean(gitImport)), mutationInput);
     const dependencies = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies$/.exec(path) : null;
     if (dependencies) {
       this.authorize(method, path, mutationInput);

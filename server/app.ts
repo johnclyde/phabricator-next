@@ -33,6 +33,7 @@ import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 import { revisionLifecycleInput, type RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { revisionReviewerInput, type RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
 import { revisionSubscriptionInput } from '../shared/revision-subscriptions.ts';
+import { revisionProjectInput } from '../shared/revision-projects.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 
 const MAX_BODY = 2_000_000;
@@ -288,6 +289,21 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const revisionProject = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/projects$/.exec(path) : null;
+    if (revisionProject) {
+      const id = revisionProject[1]!;
+      store.read(() => { auth.revalidate(context, 'write'); access.require(id, 'edit'); });
+      if (!rawKey) throw new HttpError(400, 'Project-tag changes require an Idempotency-Key.');
+      let data;
+      try { data = revisionProjectInput(input); } catch { throw new HttpError(400, 'Provide exact project tags, action, project version and access epoch.'); }
+      const authorize = () => { auth.revalidate(context, 'write'); access.requireRevisionProjectAction(id, data); };
+      store.read(authorize);
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex');
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionProjects.mutate(id, data, actor, retryKeySha256) }), authorize, response => access.presentRevisionProject(id, data, response, retryKeySha256));
+    }
     const subscriptions = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/subscriptions$/.exec(path) : null;
     if (subscriptions) {
       const id = subscriptions[1]!;
@@ -414,9 +430,15 @@ export function createApp(options: AppOptions = {}): App {
       const active = pending.get(key);
       if (active) {
         if (active.fingerprint !== fingerprint) throw new HttpError(409, 'This idempotency key is being used for a different request.');
-        let response: MutationResponse;
-        try { response = await active.promise; } catch (error) { store.read(authorize); throw error; }
-        return store.read(() => { authorize(); return present(response); });
+        try { await active.promise; } catch (error) { store.read(authorize); throw error; }
+        return store.read(() => {
+          authorize();
+          // The shared promise already presented its result for the first caller.
+          // Recover raw durable evidence before validating and filtering this retry.
+          const saved = store.replay(key, fingerprint);
+          if (!saved) throw new HttpError(409, 'The completed request has no saved response.');
+          return present(saved);
+        });
       }
     }
     const execute = async (): Promise<MutationResponse> => {
@@ -732,6 +754,14 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const revisionProjects = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/projects(?:\/(history))?$/.exec(path);
+          if (revisionProjects) {
+            const id = revisionProjects[1]!; access.require(id);
+            const allowed = revisionProjects[2] ? ['before', 'limit', 'expectedProjectVersion'] : [];
+            if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Choose supported project-tag history parameters.');
+            const number = (key: string): number | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)) || (key !== 'expectedProjectVersion' && Number(value) < 1) || key === 'limit' && Number(value) > 100) throw new HttpError(400, 'Choose valid project-tag history pagination.'); return Number(value); };
+            send(res, 200, revisionProjects[2] ? access.revisionProjectHistory(id, { before: number('before'), limit: number('limit'), expectedProjectVersion: number('expectedProjectVersion') }) : access.revisionProjects(id)); return;
+          }
           const revisionSubscriptions = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/subscriptions(?:\/(history|mute-history|person))?$/.exec(path);
           if (revisionSubscriptions) {
             const id = revisionSubscriptions[1]!, route = revisionSubscriptions[2]; access.require(id);

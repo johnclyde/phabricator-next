@@ -11,7 +11,7 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
 export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files' | 'pastes';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
-export type VoiceCommand = { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -27,6 +27,11 @@ export function parseCommand(input: string): VoiceCommand {
   }
   const project = original.match(/^(?:show|open) tasks (?:in|tagged with) project (.+)$/i);
   if (project) return { type: 'taskProjectFilter', project: project[1].trim() };
+  const revisionProject = original.match(/^(?:show|open) (code revisions|revisions|reviews|papers|drafts|documents) (?:(?:in|tagged with) project (.+)|in all projects|without (?:a )?project filter)$/i);
+  if (revisionProject) {
+    const noun = revisionProject[1].toLowerCase();
+    return { type: 'revisionProjectFilter', view: noun === 'papers' ? 'papers' : noun === 'drafts' || noun === 'documents' ? 'drafts' : 'reviews', project: revisionProject[2]?.trim() ?? null };
+  }
   const projectFilter = text.match(/^(?:show|open) (joined|watching|active|all) projects$/);
   if (projectFilter) return { type: 'projectFilter', value: projectFilter[1] as 'joined' | 'watching' | 'active' | 'all' };
   const board = original.match(/^(?:open|show|go to) (?:the )?workboard (?:for )?(.+)$/i);

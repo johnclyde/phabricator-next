@@ -24,6 +24,7 @@ import { revisionAuthorshipCommand } from './revision-authorship';
 import { revisionLifecycleCommand } from './revision-lifecycle';
 import { revisionReviewersCommand } from './revision-reviewers';
 import { revisionSubscriptionsCommand } from './revision-subscriptions';
+import { revisionProjectsCommand } from './revision-projects';
 import { revisionMetadataCommand } from './revision-metadata';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
@@ -34,7 +35,7 @@ import { gitPatchCommand } from './git-patch';
 const help = `Phabricator Next — arc (initial CLI)
 
   npm run arc -- check [--kind paper|document|code] FILE... [--json]
-  npm run arc -- diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] FILE...
+  npm run arc -- diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] [--project ID|NAME ...] FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
@@ -47,7 +48,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- blame R1 --commit FULL_ID --path PATH [--json]
   npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
   npm run arc -- download-patch R1 --base FULL_ID|empty --commit FULL_ID --output NEW_FILE [--json]
-  npm run arc -- import-git R1 --commit FULL_ID --title "Title" --test-plan "Verification plan" [--kind code|paper|document] [--draft] [--project ID|NAME] [--request-id KEY] [--json]
+  npm run arc -- import-git R1 --commit FULL_ID --title "Title" --test-plan "Verification plan" [--kind code|paper|document] [--draft] [--project ID|NAME ...] [--request-id KEY] [--json]
   npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
@@ -67,6 +68,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- revision-subscription-history P2 [--before N] [--limit N] [--subscription-version N]
   npm run arc -- revision-mute-history P2 [--before N] [--limit N] [--mute-version N]
   npm run arc -- edit-revision-subscriptions P2 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- revision-projects P2
+  npm run arc -- revision-project-history P2 [--before N] [--limit N] [--project-version N]
+  npm run arc -- edit-revision-projects P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- revision-metadata P2
   npm run arc -- revision-metadata-history P2 [--before N] [--limit N] [--metadata-version N]
   npm run arc -- edit-revision-metadata P2 --intent REQUEST.json [--request-id KEY]
@@ -259,7 +263,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
-      draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, 'subscription-version': { type: 'string' }, 'mute-version': { type: 'string' }, principal: { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
+      draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, 'project-version': { type: 'string' }, 'subscription-version': { type: 'string' }, 'mute-version': { type: 'string' }, principal: { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -319,6 +323,7 @@ async function main() {
   if (await revisionLifecycleCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionReviewersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionSubscriptionsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionProjectsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
@@ -350,13 +355,18 @@ async function main() {
     const files = await readSources(args);
     let detail: RevisionDetail;
     if (values.revision) {
+      if (values.project?.length) throw new Error('Use edit-revision-projects to change tags on an existing revision.');
       const existing = await getDetail(values.revision);
       detail = await request<RevisionDetail>(`/api/revisions/${existing.revision.id}/versions`, 'POST', {
         files, message: values.message || 'Updated via arc', expectedVersion: existing.revision.currentVersion,
       });
     } else {
       if (!values.title?.trim()) throw new Error('--title is required for a new revision.');
-      detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', ...(values['test-plan'] === undefined ? {} : { testPlan: values['test-plan'] }), kind, files, ...(values.draft ? { draft: true } : {}) });
+      if ((values.project?.length ?? 0) > 100) throw new Error('Choose at most 100 --project tags.');
+      const projectState = values.project?.length ? await request<AppState>('/api/state') : undefined;
+      const projectIds = values.project?.map(value => visibleProjectId(value, projectState!));
+      if (projectIds && new Set(projectIds).size !== projectIds.length) throw new Error('Choose unique --project tags.');
+      detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', ...(values['test-plan'] === undefined ? {} : { testPlan: values['test-plan'] }), kind, files, ...(projectIds === undefined ? {} : { projectIds }), ...(values.draft ? { draft: true } : {}) });
     }
     console.log(`${detail.revision.id} · v${detail.revision.currentVersion} · ${detail.revision.title}`);
     console.log(new URL(`${basePath}#${detail.revision.id}`, server).href);
@@ -420,11 +430,15 @@ async function main() {
     if (!commitId || !isGitObjectId(commitId)) throw new Error('--commit requires a full lowercase Git object ID, not a branch name or revision expression.');
     if (!values.title?.trim()) throw new Error('--title is required for a new imported review.');
     if ([values.path, values.file, values.revision, values.after, values.limit, values.version, values.message, values['version-id'], values['content-hash']].some(value => value !== undefined)) throw new Error('import-git creates a new review from the entire commit. File filters, paging and existing-revision options are not accepted.');
-    if ((values.project?.length ?? 0) > 1) throw new Error('An imported review accepts at most one --project.');
+    if ((values.project?.length ?? 0) > 100) throw new Error('Choose at most 100 --project tags.');
     const requestId = values['request-id'] ?? randomUUID();
     if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('--request-id must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
-    const projectId = values.project?.[0] ? visibleProjectId(values.project[0], await request<AppState>('/api/state')) : undefined;
-    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(values['test-plan'] === undefined ? {} : { testPlan: values['test-plan'] }), ...(projectId ? { projectId } : {}), ...(values.draft ? { draft: true } : {}) };
+    const projectState = values.project?.length ? await request<AppState>('/api/state') : undefined;
+    const projectIds = values.project?.map(value => visibleProjectId(value, projectState!));
+    if (projectIds && new Set(projectIds).size !== projectIds.length) throw new Error('Choose unique --project tags.');
+    // Preserve the original single-tag wire shape so saved CLI retries retain
+    // the same fingerprint; multiple selected tags use the new array field.
+    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(values['test-plan'] === undefined ? {} : { testPlan: values['test-plan'] }), ...(projectIds === undefined ? {} : projectIds.length === 1 ? { projectId: projectIds[0]! } : { projectIds }), ...(values.draft ? { draft: true } : {}) };
     console.error(`Import request ID: ${requestId}. Keep this ID and the same inputs when retrying an uncertain result.`);
     const detail = await request<RevisionDetail>(`/api/repositories/${id}/import-revision`, 'POST', input, requestId);
     const version = detail.versions.find(item => item.number === 1); const gitSource = version?.gitSource;
