@@ -2,6 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { initializePaperBuilds } from './paper-builds.ts';
 import { FileStore } from './files.ts';
 import { migrateFiles } from './files-migration.ts';
+import { PasteStore } from './pastes.ts';
+import { migratePastes } from './pastes-migration.ts';
+import type { PasteRecord } from '../shared/pastes.ts';
 import { CitationEvidenceStore, initializeCitationEvidence } from './citation-evidence.ts';
 import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
 import type { FileRecord, RevisionAsset } from '../shared/files.ts';
@@ -22,8 +25,8 @@ import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from '
 import type { TaskColumnMove, WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardBulkMoveReceipt, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
 import type { DiscussionPreferences, SetThreadPreferenceInput, ThreadPreference } from '../shared/discussion.ts';
 
-type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord;
-type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file';
+type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord | PasteRecord;
+type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file' | 'paste';
 export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
 export interface StoreOptions { path?: string }
@@ -60,6 +63,7 @@ export class Store {
   readonly database: DatabaseSync;
   readonly fresh: boolean;
   readonly files: FileStore;
+  readonly pastes: PasteStore;
   readonly citationEvidence: CitationEvidenceStore;
   private taskProjectsReady = false;
   private projects: ProjectStore;
@@ -70,7 +74,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 17) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 18) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -263,6 +267,11 @@ export class Store {
       try { this.transaction(() => { initializeCitationEvidence(this.database); this.database.exec('PRAGMA user_version = 17'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 18) {
+      try { migratePastes(this.database); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.pastes = new PasteStore(this.database, { nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor) });
     this.files = new FileStore(this.database);
     this.citationEvidence = new CitationEvidenceStore(this.database, this.files);
     this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
@@ -354,7 +363,7 @@ export class Store {
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
+    return { pastes: this.all('paste'), files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
     return this.projects.create(input, attribution);

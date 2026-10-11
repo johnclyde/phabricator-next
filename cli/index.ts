@@ -16,6 +16,7 @@ import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, GitVersionI
 import { paperCommand } from './paper-builds';
 import { fileCommand } from './files';
 import { citationCommand } from './citations';
+import { pasteCommand } from './pastes';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -55,6 +56,16 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- citation-record P2 RECORD_ID
   npm run arc -- record-citation P2 --evidence FILE.json --attest-inspected [--request-id KEY]
   npm run arc -- retract-citation P2 RECORD_ID --version N --reason-file FILE.txt [--request-id KEY]
+  npm run arc -- pastes [--query TEXT] [--author ID] [--language LANGUAGE] [--status active|archived|all] [--created-after ISO] [--created-before ISO] [--before N] [--limit N] [--json]
+  npm run arc -- paste PA1
+  npm run arc -- create-paste FILE --title "Title" [--language LANGUAGE] [--space S1] [--request-id KEY]
+  npm run arc -- edit-paste PA1 --version N [--content-file FILE] [--title TEXT] [--language LANGUAGE] [--status active|archived] [--request-id KEY]
+  npm run arc -- paste-version PA1 --version N
+  npm run arc -- paste-versions PA1 [--before N] [--limit N]
+  npm run arc -- paste-history PA1 [--before N] [--limit N]
+  npm run arc -- comment-paste PA1 --version N --comment-file FILE [--request-id KEY]
+  npm run arc -- archive-paste PA1 --version N [--status active] [--request-id KEY]
+  npm run arc -- download-paste PA1 --version N --output NEW_FILE
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -112,6 +123,10 @@ verdict, quote, locator, note, attested:true and expectedAccessEpoch. Records ar
 visible only to readers of both manuscript and supporting File; no File is
 shared implicitly. Retain the input file and request ID for exact retry.
 retract-citation appends a reason without erasing the original record.
+Paste content comes from bounded regular UTF-8 files, preserving BOM, whitespace,
+and newline bytes. Edit/archive --version is the metadata version; comment/read/
+download --version is the immutable content version. Downloads verify SHA-256
+and byte length and never overwrite a file. Empty --language selects plain text.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -167,6 +182,7 @@ async function main() {
       object: { type: 'string' }, mode: { type: 'string' }, 'access-epoch': { type: 'string' },
       'assets-manifest': { type: 'string' }, 'share-assets': { type: 'boolean' },
       'target-id': { type: 'string' }, evidence: { type: 'string' }, 'attest-inspected': { type: 'boolean' }, 'reason-file': { type: 'string' },
+      query: { type: 'string' }, language: { type: 'string' }, space: { type: 'string' }, 'created-after': { type: 'string' }, 'created-before': { type: 'string' }, 'content-file': { type: 'string' }, 'comment-file': { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -212,6 +228,7 @@ async function main() {
   if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

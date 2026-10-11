@@ -124,7 +124,7 @@ test('schema14 adds only empty private storage, preserves actual schema13 eviden
   const directory = mkdtempSync(join(tmpdir(), 'discussion-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaThirteen(path); let store = new Store({ path });
   try {
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 17); assert.equal(store.fresh, false);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 18); assert.equal(store.fresh, false);
     const historicalEvidence = () => new Map([...evidence(store.database)].filter(([name]) => old.before.has(name)));
     assert.deepEqual(historicalEvidence(), old.before); assert.deepEqual(raw(store.database, 'idempotency'), old.replay); assert.deepEqual(raw(store.database, 'thread_preferences'), []);
     // Schema16 widens the entity kind constraint; all child tables and prior
@@ -149,7 +149,7 @@ test('failed schema14 migration rolls its new table back and leaves schema13 ava
   try {
     const db = new DatabaseSync(path);
     try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 13); assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='thread_preferences'").get(), undefined); assert.deepEqual(evidence(db), old.before); assert.deepEqual(raw(db, 'idempotency'), old.replay); } finally { db.close(); }
-    const store = new Store({ path }); try { assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 17); } finally { store.close(); }
+    const store = new Store({ path }); try { assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 18); } finally { store.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

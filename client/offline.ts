@@ -22,7 +22,7 @@ export function canQueue(path: string, method: MutationMethod, body?: unknown): 
   return (path === '/api/tasks' && method === 'POST') || (/^\/api\/tasks\/[^/]+\/(comments|projects)$/.test(path) && method === 'POST') || (/^\/api\/tasks\/[^/]+$/.test(path) && method === 'PATCH') || (path === '/api/documents' && method === 'POST') || (/^\/api\/documents\/[^/]+$/.test(path) && method === 'PUT') || (/^\/api\/revisions\/[^/]+\/(comments|versions)$/.test(path) && method === 'POST') || (/^\/api\/revisions\/[^/]+\/threads\/[^/]+\/replies$/.test(path) && method === 'POST');
 }
 export function isNetworkError(error: unknown): boolean { return error instanceof TypeError; }
-function objectFromPath(path: string): string | null { return /^\/api\/(?:files|revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
+function objectFromPath(path: string): string | null { return /^\/api\/(?:pastes|files|revisions|documents|tasks|projects|repositories|policies|spaces)\/([A-Z]+\d+)(?:[/?]|$)/.exec(path)?.[1] || null; }
 function queuedObject(item: PendingMutation): string | null {
   const id = objectFromPath(item.path); if (id) return id;
   if (item.method !== 'POST' || !['/api/tasks', '/api/documents', '/api/projects'].includes(item.path)) return null;
@@ -30,10 +30,10 @@ function queuedObject(item: PendingMutation): string | null {
   if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function objectFromKey(key: string): string | null { return /^(?:paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return /^(?:paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 // Personal presentation choices retain quota-failed memory, but are purged on view loss rather than treated as content drafts.
-function isRetainedDraftKey(key: string): boolean { return key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return /^(?:paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -69,6 +69,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   }
   const contentKey = (key: string) => storageKey(prefix + key);
   const blockedDraft = (key: string, value?: unknown): boolean => {
+    if (key.startsWith('paste-create:')) { const space = objectFromKey(key); return Boolean(space && (session?.unavailableObjects.has(space) || (session?.visibleObjects && !session.visibleObjects.has(space)))); }
     if (key.startsWith('citation-draft:')) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.interact === false); }
     if (key.startsWith('revision-git-import:')) {
       const ids = draftObjects(key, value); const target = objectFromKey(key);
@@ -80,7 +81,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(taskId && session?.objectCapabilities.get(taskId)?.edit === false);
     }
     const id = objectFromKey(key); const capabilities = id ? session?.objectCapabilities.get(id) : null;
-    return Boolean(id && isDraftKey(key) && capabilities && !((key.startsWith('comment-source:') || key.startsWith('task-comment:')) ? capabilities.interact : capabilities.edit));
+    return Boolean(id && isDraftKey(key) && capabilities && !((key.startsWith('paste-comment:') || (key.startsWith('paste-request:') && (value ?? (() => { try { return JSON.parse(rawRead(key) || 'null'); } catch { return null; } })())?.kind === 'comment') || key.startsWith('comment-source:') || key.startsWith('task-comment:')) ? capabilities.interact : capabilities.edit));
   };
   const savedEntries = (): [string, string][] => {
     if (!sessionIsActive(session)) return [];
@@ -215,7 +216,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session)) return;
     session.taskSnapshotGeneration += 1;
     for (const controller of session.taskReadControllers) if (controller !== except) controller.abort();
-    if (remove) for (const [key] of savedEntries()) if (key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) rawRemove(key);
+    if (remove) for (const [key] of savedEntries()) if (key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) rawRemove(key);
     for (const listener of session.taskSnapshotListeners) listener();
   };
   let holdingLegacy = false;
@@ -245,7 +246,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const changed = (event: StorageEvent) => {
         if (!sessionIsActive(session)) return;
         if (event.key === null || event.key === contentKey('quarantine-ready') || event.key?.startsWith(contentKey('quarantined-drafts:'))) { syncDurableQuarantine(); quarantineChanged(); }
-        if (event.key === null || ((event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:')) || event.key?.startsWith(contentKey('workboard:')) || event.key?.startsWith(contentKey('repository:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
+        if (event.key === null || ((event.key?.startsWith(contentKey('paste:')) || event.key?.startsWith(contentKey('paste-version:')) || event.key?.startsWith(contentKey('paste-list:')) || event.key?.startsWith(contentKey('task:')) || event.key?.startsWith(contentKey('project:')) || event.key?.startsWith(contentKey('workboard:')) || event.key?.startsWith(contentKey('repository:'))) && event.newValue === null)) invalidateTaskSnapshots(undefined, false);
       };
       window.addEventListener('storage', changed);
       session.cleanupCallbacks.add(() => window.removeEventListener('storage', changed));
@@ -262,7 +263,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id)) || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (!currentProjectCache(key, parsed)) return fallback; if ((key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
@@ -270,7 +271,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
     if (key.startsWith('revision-comparison:')) { if (!isComparisonSelection(value, objectFromKey(key) || '')) return false; value = comparisonMetadata(value); }
     if (/^repository:R\d+:selection$/.test(key)) { const selection = repositorySelection(value); if (!selection) return false; value = selection; }
-    if ((key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
+    if ((key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && value && typeof value === 'object' && 'accessEpoch' in value && typeof value.accessEpoch === 'number' && value.accessEpoch < session.accessEpoch) return false;
     if (key.startsWith('workboard-move:') && draftObjects(key, value).some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'A selected move reference is no longer available' });
     if (blockedDraft(key, value)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key)!, value, reason: 'Permission to submit this draft changed' }); }
     if (hasDraftHold(key)) return false;
@@ -406,8 +407,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     const childParent = path === '/api/projects' && options?.method === 'POST' && options.body && typeof options.body === 'object' && 'parentId' in options.body && typeof options.body.parentId === 'string' ? options.body.parentId : null;
     const citationRequest = /^\/api\/revisions\/[DPL]\d+\/(?:citations|citation-evidence)(?:[/?]|$)/.test(path);
-    const taskRequest = citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
-    if ((options || citationRequest || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
+    const pasteRequest = /^\/api\/pastes(?:[/?]|$)/.test(path);
+    const taskRequest = pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
+    if ((options || pasteRequest || citationRequest || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
       // its successful response. Later epoch changes still reject stale content.
@@ -553,7 +555,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory')).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
+      return /^(?:paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };

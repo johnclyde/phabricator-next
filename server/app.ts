@@ -4,6 +4,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { analyzeLocally } from '../shared/review.ts';
 import { analyzeCitations } from '../shared/citations.ts';
+import { PASTE_MAX_BYTES, type PasteListQuery } from '../shared/pastes.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import type { ActorAttribution, AppState, ReviewAnalysis, RevisionKind, RevisionVersion, SourceFile } from '../shared/types.ts';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
@@ -214,6 +215,7 @@ export function createApp(options: AppOptions = {}): App {
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
     const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
     if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
+    if (/^\/api\/pastes(?:\/|$)/.test(path) && !rawKey) throw new HttpError(400, 'Paste mutations require an Idempotency-Key.');
     if (path.startsWith('/api/files') && !rawKey) throw new HttpError(400, 'File mutations require an Idempotency-Key.');
     const citationEvidence = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+)\/retract)?$/.exec(path) : null;
     if (citationEvidence && !rawKey) throw new HttpError(400, 'Citation evidence mutations require an Idempotency-Key.');
@@ -328,9 +330,9 @@ export function createApp(options: AppOptions = {}): App {
           store.database.prepare("UPDATE policy_meta SET value = value + 1 WHERE name = 'epoch'").run();
           return { status: 200, body: binding };
         }
-        if (method === 'POST' && ['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions'].includes(path)) {
+        if (method === 'POST' && ['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/pastes'].includes(path)) {
           const { content } = access.creationInput(input);
-          const created = path === '/api/projects' ? store.createProject(content, attribution)
+          const created = path === '/api/pastes' ? store.pastes.create(content, attribution) : path === '/api/projects' ? store.createProject(content, attribution)
             : path === '/api/repositories' ? store.createRepository(content, attribution)
               : path === '/api/tasks' ? store.createTask(content, attribution)
                 : path === '/api/documents' ? store.createDocument(content, attribution) : store.createRevision(content, attribution);
@@ -347,7 +349,7 @@ export function createApp(options: AppOptions = {}): App {
           store.event(updated.id, 'updated', 'Updated Space settings and access rules.', attribution);
           return { status: 200, body: updated };
         }
-        const policy = /^\/api\/policies\/((?:PROJ|R|T|W|F|[DPL])\d+)$/.exec(path);
+        const policy = /^\/api\/policies\/((?:PROJ|PA|R|T|W|F|[DPL])\d+)$/.exec(path);
         if (method === 'PUT' && policy) {
           const updated = policies.setPolicy(policy[1]!, input, context.principalId);
           store.event(updated.objectId, 'policy_updated', 'Updated access rules.', attribution);
@@ -396,6 +398,9 @@ export function createApp(options: AppOptions = {}): App {
           detail.history = store.taskHistory(taskAction[1]!, undefined, undefined, related => access.canView(related));
           return { status: 200, body: detail };
         }
+        const paste = /^\/api\/pastes\/(PA[1-9]\d{0,14})(\/comments)?$/.exec(path);
+        if (paste && method === 'PATCH' && !paste[2]) return { status: 200, body: store.pastes.update(paste[1]!, input, attribution) };
+        if (paste && method === 'POST' && paste[2]) return { status: 201, body: store.pastes.comment(paste[1]!, input, attribution) };
         const document = /^\/api\/documents\/(W\d+)$/.exec(path);
         if (method === 'PUT' && document) return { status: 200, body: store.updateDocument(document[1]!, input, attribution) };
         const restore = /^\/api\/documents\/(W\d+)\/restore$/.exec(path);
@@ -468,6 +473,42 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const paste = /^\/api\/pastes(?:\/(PA[1-9]\d{0,14})(?:\/(history|versions|raw)(?:\/([^/]+))?)?)?$/.exec(path);
+          if (paste) {
+            const id = paste[1], section = paste[2], selected = paste[3];
+            if (id) access.require(id);
+            const allowed = !id ? ['query', 'authorId', 'language', 'status', 'createdAfter', 'createdBefore', 'before', 'limit']
+              : section === 'raw' ? ['version'] : section && !selected ? ['before', 'limit'] : [];
+            if ([...url.searchParams.keys()].some(name => !allowed.includes(name) || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Invalid Paste query parameters.');
+            const positive = (name: string): number | undefined => {
+              const value = url.searchParams.get(name); if (value === null) return undefined;
+              if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new HttpError(400, `Invalid Paste ${name}.`);
+              return Number(value);
+            };
+            if (!id) {
+              const query: PasteListQuery = { before: positive('before'), limit: positive('limit') };
+              for (const name of ['query', 'authorId', 'createdAfter', 'createdBefore'] as const) if (url.searchParams.has(name)) query[name] = url.searchParams.get(name)!;
+              if (url.searchParams.has('language')) query.language = url.searchParams.get('language') || null;
+              if (url.searchParams.has('status')) query.status = url.searchParams.get('status') as PasteListQuery['status'];
+              send(res, 200, access.pastes(query)); return;
+            }
+            if (!section) { send(res, 200, access.paste(id)); return; }
+            if (selected && section !== 'versions') throw new HttpError(404, 'Paste route not found.');
+            if (section === 'history') { send(res, 200, { ...store.pastes.history(id, positive('before'), positive('limit')), accessEpoch: policies.epoch() }); return; }
+            if (section === 'versions' && !selected) { send(res, 200, { ...store.pastes.versions(id, positive('before'), positive('limit')), accessEpoch: policies.epoch() }); return; }
+            const number = section === 'raw' ? positive('version') : selected && /^[1-9]\d*$/.test(selected) && Number.isSafeInteger(Number(selected)) ? Number(selected) : undefined;
+            if (number === undefined) throw new HttpError(400, 'Select an exact positive Paste content version.');
+            const version = store.pastes.version(id, number);
+            if (section === 'raw') {
+              const bytes = Buffer.from(version.content, 'utf8');
+              res.setHeader('Content-Type', 'text/plain; charset=utf-8'); res.setHeader('Content-Length', bytes.byteLength);
+              res.setHeader('Content-Disposition', `attachment; filename="${id}-v${number}.txt"`);
+              res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox"); res.setHeader('Cache-Control', 'private, no-store');
+              res.setHeader('X-Content-SHA256', version.sha256); res.setHeader('X-Content-Version', number); res.setHeader('X-Access-Epoch', policies.epoch());
+              res.end(bytes); return;
+            }
+            send(res, 200, { version, accessEpoch: policies.epoch() }); return;
+          }
           const citationInventory = /^\/api\/revisions\/([DPL]\d+)\/citations$/.exec(path);
           if (citationInventory) {
             const id = citationInventory[1]!; access.require(id);
@@ -498,7 +539,7 @@ export function createApp(options: AppOptions = {}): App {
             if (!row) throw new HttpError(404, 'This upload has no committed receipt.', 'UPLOAD_RECEIPT_UNAVAILABLE');
             access.require(row.file_id); send(res, 200, store.files.get(row.file_id)); return;
           }
-          const attachmentRead = /^\/api\/files\/(F\d+)\/attachments\/((?:PROJ|R|T|W|[DPL])[1-9]\d{0,14})$/.exec(path);
+          const attachmentRead = /^\/api\/files\/(F\d+)\/attachments\/((?:PROJ|PA|R|T|W|[DPL])[1-9]\d{0,14})$/.exec(path);
           if (attachmentRead) {
             if (url.search) throw new HttpError(400, 'An attachment lookup does not accept query parameters.');
             const fileId = attachmentRead[1]!; const targetId = attachmentRead[2]!; access.require(fileId);
@@ -621,7 +662,7 @@ export function createApp(options: AppOptions = {}): App {
           if (path === '/api/spaces') { send(res, 200, policies.spaces(context.principalId).map(space => access.space(space))); return; }
           const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
           if (space) { send(res, 200, access.space(policies.getSpace(space[1]!, context.principalId))); return; }
-          const policy = /^\/api\/policies\/((?:PROJ|R|T|W|F|[DPL])\d+)$/.exec(path);
+          const policy = /^\/api\/policies\/((?:PROJ|PA|R|T|W|F|[DPL])\d+)$/.exec(path);
           if (policy) { send(res, 200, access.describe(policy[1]!)); return; }
           const subscriptions = /^\/api\/tasks\/(T\d+)\/subscriptions(?:\/([^/]+))?$/.exec(path);
           if (subscriptions) {
@@ -694,7 +735,7 @@ export function createApp(options: AppOptions = {}): App {
       const key = req.headers['idempotency-key'];
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
-      const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : MAX_BODY);
+      const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
       if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };

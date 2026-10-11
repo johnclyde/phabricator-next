@@ -18,7 +18,15 @@ function schema16(path: string) {
   const paper = store.createRevision({ kind: 'paper', title: 'Existing immutable figure history', files: [{ path: 'main.tex', content: 'A claim \\cite{proof}.' }, { path: 'refs.bib', content: '@article{proof,title={Old evidence}}' }], assets: [{ path: 'figure.pdf', fileId: file.id, sha256: file.sha256, bytes: file.bytes, mediaType: 'application/pdf' }], shareAssets: true }, actor);
   store.saveReview(paper.revision.id, 1, { provider: 'local', model: 'deterministic-checks', summary: 'Historical analysis', findings: [] }, actor);
   store.createComment(paper.revision.id, { versionId: paper.versions[0]!.id, body: 'Historical review comment' }, actor);
-  store.database.exec('DROP TABLE citation_evidence_retractions; DROP TABLE citation_evidence; PRAGMA user_version=16;');
+  const definitions = store.database.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name='entities' AND type IN ('index','trigger') AND name!='paste_identity_no_update' AND sql IS NOT NULL ORDER BY type,name").all() as { sql: string }[];
+  store.database.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+    DROP TRIGGER paste_identity_no_update; DROP TABLE paste_transactions; DROP TABLE paste_versions;
+    DROP TABLE citation_evidence_retractions; DROP TABLE citation_evidence;
+    CREATE TABLE entities_v16(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('project','repository','revision','task','document','file')),data TEXT NOT NULL CHECK(json_valid(data)));
+    INSERT INTO entities_v16(rowid,id,kind,data) SELECT rowid,id,kind,data FROM entities;
+    DROP TABLE entities; ALTER TABLE entities_v16 RENAME TO entities;`);
+  for (const definition of definitions) store.database.exec(definition.sql);
+  store.database.exec('PRAGMA user_version=16; COMMIT; PRAGMA foreign_keys=ON;');
   return store;
 }
 
@@ -28,18 +36,19 @@ function snapshot(db: DatabaseSync) {
   return { schema, rows: Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT rowid,* FROM "${table}" ORDER BY rowid`).all()])), references: Object.fromEntries(tables.map(table => [table, db.prepare(`PRAGMA foreign_key_list("${table}")`).all()])) };
 }
 
-test('schema 16 to 17 adds empty evidence tables and preserves all existing source, Files, policies and audit bytes', () => {
+test('schema 16 upgrade adds empty evidence tables and preserves all existing source, Files, policies and audit bytes', () => {
   const directory = mkdtempSync(join(tmpdir(), 'citation-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema16(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 17);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 18);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) {
       assert.deepEqual(after.rows[table], rows, `${table} rows and rowids stay byte-for-byte unchanged`);
       assert.deepEqual(after.references[table], before.references[table], `${table} relationships stay unchanged`);
     }
-    for (const schema of before.schema) assert.deepEqual(after.schema.find(row => row.name === schema.name), schema);
+    for (const schema of before.schema.filter(row => row.name !== 'entities')) assert.deepEqual(after.schema.find(row => row.name === schema.name), schema);
+    assert.match(after.schema.find(row => row.name === 'entities')!.sql, /'paste'/);
     assert.deepEqual(after.rows.citation_evidence, []); assert.deepEqual(after.rows.citation_evidence_retractions, []);
     const migrated = snapshot(store.database); store.close(); store = new Store({ path }); assert.deepEqual(snapshot(store.database), migrated, 'reopening does not rerun migration');
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }

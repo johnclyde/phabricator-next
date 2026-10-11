@@ -699,3 +699,58 @@
   .review-tabs { flex-wrap: wrap; }
 }
 .citations .button { min-height: 44px; }
+
+/* Paste source stays literal while metadata and discussion follow object access. */
+.pastes-list, .paste-detail { min-width: 0; }
+.pastes-list > .file-actions { margin-bottom: 16px; }
+.paste-filters { padding: 18px; display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
+.paste-filters .field { margin: 0; min-width: 0; }
+.paste-list-row { display: flex; align-items: flex-start; gap: 14px; padding: 18px; border-bottom: 1px solid var(--border); color: inherit; }
+.paste-list-row:hover { background: #f4f8fc; text-decoration: none; }
+.paste-list-row > div { flex: 1; min-width: 0; }
+.paste-list-row strong { display: block; color: var(--blue); overflow-wrap: anywhere; }
+.paste-list-row small { display: block; color: var(--muted); margin-top: 6px; }
+.paste-list-row pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 7em; overflow: hidden; margin-bottom: 0; }
+.paste-detail .page-heading h1 { overflow-wrap: anywhere; }
+.paste-detail .panel { margin-bottom: 18px; }
+.paste-version-controls, .paste-range-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 16px; border-bottom: 1px solid var(--border); }
+.paste-version-controls .field { margin: 0; min-width: 130px; }
+.paste-version-controls .button, .paste-range-controls .button, .pastes-list .button, .paste-detail .button { min-height: 44px; }
+.paste-source-meta { margin: 0; padding: 12px 16px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.paste-range-controls { padding: 10px 16px; background: #fafbfc; align-items: center; }
+.paste-range-controls label { display: flex; align-items: center; gap: 7px; }
+.paste-range-controls input { width: 65px; min-height: 44px; border: 1px solid var(--border); border-radius: 3px; padding: 7px; }
+.paste-source-scroll { overflow: auto; max-height: 650px; max-width: 100%; background: #fff; }
+.paste-source-scroll table { border-collapse: collapse; min-width: 100%; }
+.paste-source-scroll td { padding: 0; vertical-align: top; }
+.paste-source-scroll tr.selected { background: #fff5c9; }
+.paste-source-scroll pre { margin: 0; padding: 10px 12px; line-height: 24px; font: 13px/24px ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 4; }
+.paste-line-number { position: sticky; left: 0; width: 50px; border-right: 1px solid var(--border); background: #f5f7f9; text-align: right; }
+.paste-line-number button { color: #728196; background: none; border: 0; min-width: 50px; min-height: 44px; font: 12px ui-monospace, monospace; }
+.paste-source .hljs-keyword, .paste-source .hljs-selector-tag, .paste-source .hljs-literal { color: #8343a1; }
+.paste-source .hljs-string, .paste-source .hljs-regexp, .paste-source .hljs-attr { color: #237845; }
+.paste-source .hljs-comment, .paste-source .hljs-meta { color: #7a8390; }
+.paste-source .hljs-number, .paste-source .hljs-built_in { color: #ac582a; }
+.paste-source .hljs-title, .paste-source .hljs-name, .paste-source .hljs-type { color: #256f9e; }
+.paste-comparison { padding: 16px; border-bottom: 1px solid var(--border); }
+.paste-comparison pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.8 ui-monospace, monospace; }
+.paste-comparison ins { text-decoration: none; background: #d9f3df; }
+.paste-comparison del { background: #fde3e3; }
+.paste-history { padding: 0 18px; list-style: none; margin: 0; }
+.paste-history li { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.paste-history li > div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.paste-history span { font-size: 12px; color: var(--muted); }
+.paste-history p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.paste-history .text-button { min-height: 44px; }
+@media (max-width: 760px) {
+  .paste-filters { grid-template-columns: minmax(0, 1fr); padding: 14px; }
+  .paste-list-row { padding: 14px; }
+  .paste-list-row pre { font-size: 11px; }
+  .paste-version-controls { padding: 12px; gap: 8px; }
+  .paste-version-controls .field { flex: 1; min-width: 120px; }
+  .paste-version-controls > .button { flex: 1; }
+  .paste-range-controls { padding: 12px; gap: 8px; }
+  .paste-range-controls input { font-size: 16px; }
+  .paste-detail .page-heading { align-items: flex-start; }
+  .paste-detail .page-heading h1 { font-size: 23px; }
+}

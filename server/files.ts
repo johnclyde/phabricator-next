@@ -35,7 +35,7 @@ function fileId(value: unknown): string {
   return value;
 }
 function objectId(value: unknown): string {
-  if (typeof value !== 'string' || !/^(?:PROJ|R|T|W|[DPL])[1-9]\d{0,14}$/.test(value)) throw new HttpError(400, 'Choose an available attachment target.');
+  if (typeof value !== 'string' || !/^(?:PROJ|PA|R|T|W|[DPL])[1-9]\d{0,14}$/.test(value)) throw new HttpError(400, 'Choose an available attachment target.');
   return value;
 }
 function principal(value: unknown): string {

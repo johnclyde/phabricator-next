@@ -4,6 +4,7 @@ import type { Project } from './projects';
 import type { TaskColumnMove } from './workboards';
 import type { GitSourceProvenance } from './repositories';
 import type { FileRecord, RevisionAsset } from './files';
+import type { PasteRecord } from './pastes';
 export type { FileRecord, RevisionAsset } from './files';
 export { WORKBOARD_BULK_MOVE_LIMIT } from './workboards';
 export type { WorkboardBulkMoveQuery, WorkboardBulkMoveTask, WorkboardBulkMovePreview, BulkMoveWorkboardCardsInput, WorkboardBulkMoveReceipt } from './workboards';
@@ -51,7 +52,7 @@ export interface ReviewAnalysis { summary: string; findings: Finding[]; provider
 export interface ReviewRun extends ReviewAnalysis { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; contentHash: string; createdAt: string }
 export interface Activity { attribution?: ActorAttribution; id: string; objectId: string; actor: string; action: string; detail: string; createdAt: string }
 export type SpaceSummary = Space & { capabilities: EffectiveAccess };
-export interface AppState { files?: FileRecord[]; projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
+export interface AppState { pastes?: PasteRecord[]; files?: FileRecord[]; projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
 export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; threads: ReviewThread[]; threadEvents: ReviewThreadEvent[]; suggestionApplications: SuggestionApplication[]; reviews: ReviewRun[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; assets?: RevisionAsset[]; shareAssets?: boolean; expectedAccessEpoch?: number; repositoryId?: string | null; projectId?: string | null }
 export interface CreateVersionInput { files: SourceFile[]; assets?: RevisionAsset[]; message: string; expectedVersion: number; expectedVersionId?: string; expectedContentHash?: string; shareAssets?: boolean; expectedAccessEpoch?: number }

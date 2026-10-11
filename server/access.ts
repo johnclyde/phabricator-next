@@ -1,5 +1,7 @@
 import type { AuthContext } from '../shared/auth.ts';
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
+import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
 import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
@@ -10,11 +12,12 @@ import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import { gitImportInput, gitVersionImportInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
+import { validatePasteContent, type PasteDetail, type PasteListQuery, type PastePage } from '../shared/pastes.ts';
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
 import type { CitationEvidenceRecord } from '../shared/citation-evidence.ts';
 import { parseCitationEvidenceInput } from './citation-evidence.ts';
 
-const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/files']);
+const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/files', '/api/pastes']);
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
 /** One request's immutable principal. No process-global current user or policy bypass. */
@@ -32,10 +35,11 @@ export class AccessLayer {
     state.tasks = state.tasks.filter(item => this.canView(item.id));
     state.documents = state.documents.filter(item => this.canView(item.id));
     state.revisions = state.revisions.filter(item => this.canView(item.id));
+    state.pastes = (state.pastes ?? []).filter(item => this.canView(item.id));
     state.files = (state.files ?? []).filter(item => this.canView(item.id));
     state.activity = this.store.activities(undefined, id => this.canView(id));
     state.spaces = this.policies.spaces(this.principal).map(space => this.space(space));
-    state.access = Object.fromEntries([...state.projects, ...state.repositories, ...state.tasks, ...state.documents, ...state.revisions, ...state.files].map(item => [item.id, this.describe(item.id)]));
+    state.access = Object.fromEntries([...state.projects, ...state.repositories, ...state.tasks, ...state.documents, ...state.revisions, ...state.files, ...state.pastes].map(item => [item.id, this.describe(item.id)]));
     state.accessEpoch = this.policies.epoch();
     state.canCreate = this.context.scopes.includes('write');
     state.currentPrincipalId = this.principal;
@@ -51,6 +55,8 @@ export class AccessLayer {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
   }
+  pastes(query: PasteListQuery): PastePage { return { ...this.store.pastes.list(query, id => this.canView(id)), accessEpoch: this.policies.epoch() }; }
+  paste(id: string): PasteDetail { this.require(id); return { ...this.store.pastes.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() }; }
   files(query: FileListQuery): FilePage { return { ...this.store.files.list(query, id => this.canView(id)), accessEpoch: this.policies.epoch() }; }
   file(id: string): FileDetail {
     this.require(id);
@@ -254,11 +260,11 @@ export class AccessLayer {
     return this.principalReference(value, active);
   }
   private target(method: string, path: string): { id: string; capability: ProjectCapability } | null {
-    const policy = /^\/api\/policies\/((?:PROJ|R|T|W|F|[DPL])\d+)$/.exec(path);
+    const policy = /^\/api\/policies\/((?:PROJ|PA|R|T|W|F|[DPL])\d+)$/.exec(path);
     if (policy) return { id: policy[1]!, capability: method === 'GET' ? 'view' : 'edit' };
     const space = /^\/api\/spaces\/(S\d+)$/.exec(path);
     if (space) return { id: space[1]!, capability: method === 'GET' ? 'view' : 'edit' };
-    const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions|files)\/((?:PROJ|R|T|W|F|[DPL])\d+)(?:\/(.*))?$/.exec(path);
+    const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions|files|pastes)\/((?:PROJ|PA|R|T|W|F|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
     const citationEvidence = method === 'POST' && /^citation-evidence(?:\/[^/]+\/retract)?$/.test(object[2] ?? '');
@@ -279,7 +285,7 @@ export class AccessLayer {
     }
     if (method === 'POST' && /^\/api\/files\/F\d+\/attachments$/.test(path)) {
       const data = object(input, ['objectId', 'mode', 'expectedVersion', 'expectedAccessEpoch']);
-      if (typeof data.objectId !== 'string' || !/^(?:PROJ|R|T|W|[DPL])[1-9]\d{0,14}$/.test(data.objectId)) throw new HttpError(400, 'Choose an available object to attach.');
+      if (typeof data.objectId !== 'string' || !/^(?:PROJ|PA|R|T|W|[DPL])[1-9]\d{0,14}$/.test(data.objectId)) throw new HttpError(400, 'Choose an available object to attach.');
       this.require(data.objectId, 'edit');
       if (data.mode === 'attach') integer(data.expectedAccessEpoch, 'expectedAccessEpoch');
     }
@@ -550,6 +556,63 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    if (/^\/api\/pastes(?:\/PA[1-9]\d{0,14}(?:\/comments)?)?$/.test(path)) {
+      const invalid = () => new HttpError(409, 'This saved Paste receipt does not match the original request.');
+      if (!target || !body) throw invalid();
+      const { accessEpoch: _epoch, ...saved } = body;
+      if (path.endsWith('/comments')) {
+        const input = parsePasteCommentInput(mutationInput);
+        if (typeof body.id !== 'string' || body.pasteId !== target.id) throw invalid();
+        const expected = this.store.pastes.transaction(target.id, body.id);
+        if (!isDeepStrictEqual(saved, expected) || expected.kind !== 'comment' || expected.contentVersion !== input.contentVersion
+          || expected.comment !== input.body || expected.attribution.principalId !== this.principal) throw invalid();
+      } else {
+        if (body.id !== target.id || typeof body.version !== 'number' || !Number.isSafeInteger(body.version) || body.version < 1) throw invalid();
+        const expected = this.store.pastes.snapshot(target.id, body.version);
+        if (!isDeepStrictEqual(saved, expected)) throw invalid();
+        const input = method === 'POST' ? parseCreatePasteInput(this.creationInput(mutationInput).content) : parseUpdatePasteInput(mutationInput);
+        if (method === 'POST' && (expected.authorId !== this.principal || expected.version !== 1 || expected.contentVersion !== 1)) throw invalid();
+        if ('expectedVersion' in input) {
+          const previous = this.store.pastes.snapshot(target.id, input.expectedVersion);
+          const previousContent = this.store.pastes.version(target.id, previous.contentVersion);
+          if (previous.contentHash !== previousContent.sha256 || previous.bytes !== previousContent.bytes || previous.lineCount !== previousContent.lineCount) throw invalid();
+          const source = input.content ?? previousContent.content;
+          const checked = validatePasteContent(source);
+          const contentHash = createHash('sha256').update(source, 'utf8').digest('hex');
+          const contentChanged = source !== previousContent.content;
+          const changes = (['title', 'language', 'status'] as const).flatMap(field => input[field] !== undefined && input[field] !== previous[field] ? [{ field, oldValue: previous[field], newValue: input[field]! }] : []);
+          const changed = contentChanged || changes.length > 0;
+          // Reconstruct the whole requested transition. Checking only supplied
+          // fields would accept an unrelated canonical edit which also changed
+          // an omitted language, status, title, or source snapshot.
+          const projected = {
+            ...previous,
+            title: input.title ?? previous.title,
+            language: input.language === undefined ? previous.language : input.language,
+            status: input.status ?? previous.status,
+            version: previous.version + (changed ? 1 : 0),
+            contentVersion: previous.contentVersion + (contentChanged ? 1 : 0),
+            contentHash, bytes: checked.bytes, lineCount: checked.lineCount,
+            updatedAt: changed ? expected.updatedAt : previous.updatedAt,
+          };
+          if (!isDeepStrictEqual(expected, projected)) throw invalid();
+          if (changed) {
+            const transition = this.store.pastes.transition(target.id, projected.version);
+            const contentChange = contentChanged ? { from: previous.contentVersion, to: projected.contentVersion, fromHash: previous.contentHash, toHash: projected.contentHash } : undefined;
+            if (!transition || transition.kind !== 'edit' || transition.pasteId !== target.id || transition.pasteVersion !== projected.version
+              || transition.contentVersion !== projected.contentVersion || transition.contentHash !== projected.contentHash || transition.attribution.principalId !== this.principal
+              || !isDeepStrictEqual(transition.changes ?? [], changes) || !isDeepStrictEqual(transition.contentChange, contentChange)) throw invalid();
+            if (contentChanged && this.store.pastes.version(target.id, projected.contentVersion).content !== source) throw invalid();
+          }
+        } else {
+          for (const field of ['title', 'language'] as const) if (input[field] !== expected[field]) throw invalid();
+          if (createHash('sha256').update(input.content, 'utf8').digest('hex') !== expected.contentHash) throw invalid();
+        }
+      }
+      // A historical receipt stays historical. Obtain current metadata and CAS
+      // versions with a fresh read; refresh only authorization evidence here.
+      return { status: response.status, body: { ...body, accessEpoch: this.policies.epoch() } };
+    }
     if (/^\/api\/revisions\/[DPL]\d+\/citation-evidence(?:\/[^/]+\/retract)?$/.test(path)) {
       const source = record(body?.source);
       if (!target || !body || body.revisionId !== target.id || typeof body.id !== 'string' || typeof source?.fileId !== 'string') throw new HttpError(409, 'This saved citation record cannot be safely replayed.');

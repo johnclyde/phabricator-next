@@ -9,7 +9,7 @@ export interface ProjectPolicy { kind: 'project'; objectId: string; spaceId: str
 export type ObjectPolicy = OrdinaryObjectPolicy | ProjectPolicy;
 export interface Space { id: string; name: string; description: string; version: number; isDefault: boolean; archived: boolean; view: Audience; edit: Audience }
 export interface EffectiveAccess { view: boolean; edit: boolean; interact: boolean; managePolicy: boolean; join?: boolean }
-export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; joinLabel?: string; inheritedFrom?: { projectId: string; policyVersion: number }; automatic?: { kind: 'task-owner' | 'file-author'; principalId: string } | { kind: 'project-member'; parentEditProjectId?: string } }
+export interface ObjectAccess { policy: ObjectPolicy; capabilities: EffectiveAccess; viewLabel: string; editLabel: string; interactLabel: string; joinLabel?: string; inheritedFrom?: { projectId: string; policyVersion: number }; automatic?: { kind: 'task-owner' | 'file-author' | 'paste-author'; principalId: string } | { kind: 'project-member'; parentEditProjectId?: string } }
 export interface NewObjectAccessInput { spaceId: string; view?: Audience; edit?: Audience; interact?: Audience }
 export interface NewProjectAccessInput { spaceId: string; view?: ProjectAudience; edit?: ProjectAudience; interact?: ProjectAudience; join?: ProjectAudience }
 export interface CreateSpaceInput { name: string; description?: string; view?: Audience; edit?: Audience }

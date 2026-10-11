@@ -17,3 +17,8 @@ endorsed by Phacility. The Apache license grants no trademark rights.
 
 Third-party dependencies retain their respective copyright notices and
 licenses, available in their distributed packages.
+
+The bundled highlight.js syntax highlighter is copyright 2006 Ivan
+Sagalaev and is distributed under the BSD 3-Clause License. Its complete
+notice is included in client/public/licenses/highlight.js.txt and copied
+to licenses/highlight.js.txt in browser builds.

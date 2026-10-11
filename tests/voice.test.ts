@@ -20,3 +20,10 @@ test('comparison commands are explicit navigation and reading actions', () => {
   for (const command of ['previous file', 'Read the previous file.', 'show prior file']) assert.deepEqual(parseCommand(command), { type: 'previousFile' });
   for (const command of ['next change and accept it', 'delete current change', 'read all files', 'apply next change', 'next file and publish it', 'delete previous file', 'apply next file']) assert.equal(parseCommand(command).type, 'unknown');
 });
+
+test('Paste navigation keeps PA distinct from manuscript P and never writes by voice', () => {
+  for (const command of ['open pastes', 'go to paste', 'show the pastes']) assert.deepEqual(parseCommand(command), { type: 'navigate', view: 'pastes' });
+  for (const command of ['open PA 12', 'show pa12', 'go to paste 12']) assert.deepEqual(parseCommand(command), { type: 'openObject', id: 'PA12' });
+  assert.deepEqual(parseCommand('open P12'), { type: 'openObject', id: 'P12' });
+  for (const command of ['open PA0', 'open PA9007199254740992', 'create paste execute this', 'archive PA12', 'paste secret text', 'open PA12 and publish']) assert.equal(parseCommand(command).type, 'unknown');
+});
