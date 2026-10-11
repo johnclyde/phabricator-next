@@ -34,7 +34,7 @@ for (const basePath of ['/', '/review/']) test(`lifecycle CLI acts on exact snap
     assert.equal(detail.revision.status, 'draft');
     const read = await cli(['revision-lifecycle', id, '--server', url], reader.token); assert.equal(read.code, 0, read.stderr);
     const snapshot = JSON.parse(read.stdout) as RevisionLifecycleSnapshot;
-    const input = revisionLifecycleInput({ action: 'request_review', message: 'Ready for review', expectedLifecycleVersion: snapshot.lifecycle.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256 });
+    const input = revisionLifecycleInput({ action: 'request_review', message: 'Ready for review', expectedLifecycleVersion: snapshot.lifecycle.version, expectedReviewerVersion: snapshot.reviewers.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256 });
     const intent = join(directory, 'action.json'); await writeFile(intent, JSON.stringify(input));
     const args = ['edit-revision-lifecycle', id, '--intent', intent, '--request-id', 'exact-cli-action', '--server', url];
     assert.notEqual((await cli(args, reader.token)).code, 0);

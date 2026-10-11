@@ -51,7 +51,7 @@ async function start(options: AppOptions = {}) {
   }
   function transferAuthor(id: string) {
     const { authorship, head } = store.revisionAuthorship.snapshot(id);
-    store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.id, expectedAuthorVersion: authorship.version, expectedVersion: head.number, expectedVersionId: head.versionId, expectedContentHash: head.contentHash, expectedAccessEpoch: app.policies.epoch(), message: 'Transfer before testing former-author privacy.' }, { principalId: alice.id, displayName: alice.displayName, credentialId: null, requestId: 'test-author-handoff' }, { principalId: bob.id, displayName: bob.displayName });
+    store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.id, expectedAuthorVersion: authorship.version, expectedReviewerVersion: store.revisionAuthorship.snapshot(id).reviewerVersion, expectedLifecycleVersion: store.revisionAuthorship.snapshot(id).lifecycleVersion, expectedVersion: head.number, expectedVersionId: head.versionId, expectedContentHash: head.contentHash, expectedAccessEpoch: app.policies.epoch(), message: 'Transfer before testing former-author privacy.' }, { principalId: alice.id, displayName: alice.displayName, credentialId: null, requestId: 'test-author-handoff' }, { principalId: bob.id, displayName: bob.displayName });
   }
   const evidence = () => Object.fromEntries(['entities', 'versions', 'activity', 'object_policies', 'policy_meta', 'idempotency', 'sequences'].map(table => [table, store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
   let closed = false;
@@ -70,7 +70,7 @@ test('Git imports atomically retain exact files, modes, attribution, source rule
     assert.deepEqual(version.files, source); assert.equal(version.contentHash, contentHash(source)); assert.deepEqual(version.gitSource, snapshot().provenance);
     assert.equal(version.attribution?.principalId, app.alice.id); assert.equal(detail.activity[0]?.attribution?.principalId, app.alice.id);
     assert.deepEqual(detail.access!.policy.rules, policy.rules); assert.equal(detail.access!.policy.spaceId, space.id); assert.match(detail.access!.viewLabel, /linked repository view/);
-    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 26);
+    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 27);
     const raw = app.store.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id);
     await app.close(); const reopened = createStore({ path });
     try { assert.deepEqual(reopened.detail(detail.revision.id).versions[0], version); assert.deepEqual(reopened.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id), raw); } finally { reopened.close(); }

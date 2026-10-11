@@ -29,10 +29,10 @@ export function authorIntent(value: unknown, revisionId: string): AuthorIntent |
   return body && draft && JSON.stringify(body) === JSON.stringify(draft) ? { id: value.id, revisionId, body, draft: value.draft as RevisionAuthorInput } : null;
 }
 export function prepareAuthorDraft(snapshot: RevisionAuthorshipSnapshot, action: 'commandeer' | { authorId: string }): RevisionAuthorInput {
-  return revisionAuthorInput({ ...(action === 'commandeer' ? { action } : { action: 'assign', authorId: action.authorId }), expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, message: '' });
+  return revisionAuthorInput({ ...(action === 'commandeer' ? { action } : { action: 'assign', authorId: action.authorId }), expectedReviewerVersion: snapshot.reviewerVersion, expectedLifecycleVersion: snapshot.lifecycleVersion, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, message: '' });
 }
 export function authorDraftMatches(draft: RevisionAuthorInput, snapshot: RevisionAuthorshipSnapshot): boolean {
-  return draft.expectedAuthorVersion === snapshot.authorship.version && draft.expectedVersion === snapshot.head.number && draft.expectedVersionId === snapshot.head.versionId && draft.expectedContentHash === snapshot.head.contentHash && draft.expectedAccessEpoch === snapshot.accessEpoch;
+  return draft.expectedReviewerVersion === snapshot.reviewerVersion && draft.expectedLifecycleVersion === snapshot.lifecycleVersion && draft.expectedAuthorVersion === snapshot.authorship.version && draft.expectedVersion === snapshot.head.number && draft.expectedVersionId === snapshot.head.versionId && draft.expectedContentHash === snapshot.head.contentHash && draft.expectedAccessEpoch === snapshot.accessEpoch;
 }
 export async function verifiedAuthorResult(value: unknown, id: string, input: RevisionAuthorInput, principalId: string): Promise<RevisionAuthorResult> {
   if (!validRevisionAuthorResult(value, id, input, principalId)) throw new Error('The authorship receipt does not match this exact request. Keep the request and retry it explicitly.');

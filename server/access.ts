@@ -5,6 +5,8 @@ import { type RevisionAuthorInput, type RevisionAuthorshipSnapshot, type Revisio
 import { revisionAuthorInputHash } from './revision-authorship.ts';
 import type { RevisionLifecycleInput, RevisionLifecycleSnapshot, RevisionLifecycleHistory } from '../shared/revision-lifecycle.ts';
 import { revisionLifecycleInputHash } from './revision-lifecycle.ts';
+import { revisionReviewerPermission, type RevisionReviewerInput, type RevisionReviewerSnapshot, type RevisionReviewerHistory } from '../shared/revision-reviewers.ts';
+import { revisionReviewerInputHash } from './revision-reviewers.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -67,6 +69,49 @@ export class AccessLayer {
     this.require(id);
     const access = this.describe(id), snapshot = this.store.revisionLifecycle.snapshot(id, this.principal);
     return { ...snapshot, actions: snapshot.actions.map(action => access.capabilities.edit ? action : { ...action, available: false, reason: 'Editing permission is required for lifecycle actions.', targetStatus: null }), access, accessEpoch: this.policies.epoch() };
+  }
+  revisionReviewers(id: string): RevisionReviewerSnapshot {
+    this.require(id);
+    const access = this.describe(id), snapshot = this.store.revisionReviewers.snapshot(id, this.principal);
+    return { ...snapshot, actions: snapshot.actions.map(action => {
+      const permission = revisionReviewerPermission(action.action);
+      return access.capabilities[permission] ? action : { ...action, available: false, reason: `${permission === 'edit' ? 'Editing' : 'Interaction'} permission is required for this reviewer action.` };
+    }), access, accessEpoch: this.policies.epoch() };
+  }
+  revisionReviewerHistory(id: string, query: { before?: number; limit?: number; expectedReviewerVersion?: number }): RevisionReviewerHistory {
+    this.require(id);
+    return { ...this.store.revisionReviewers.history(id, query), accessEpoch: this.policies.epoch() };
+  }
+  requireRevisionReviewerAction(id: string, input: RevisionReviewerInput): void {
+    this.require(id, revisionReviewerPermission(input.action));
+  }
+  revisionReviewerTarget(id: string, input: RevisionReviewerInput): { principalId: string; displayName: string } | undefined {
+    this.requireRevisionReviewerAction(id, input);
+    if (!('reviewerId' in input)) return undefined;
+    if (input.action === 'remove' || input.action === 'unblock') {
+      const member = this.store.revisionReviewers.snapshot(id, this.principal).reviewers.members.find(item => item.principalId === input.reviewerId);
+      if (!member) throw new HttpError(400, 'Selected reviewer is unavailable.');
+      // Clearing an existing requirement must remain possible after the account
+      // is disabled; keep the inspected immutable member identity.
+      return { principalId: member.principalId, displayName: member.displayName };
+    }
+    const principalId = this.principalReference(input.reviewerId);
+    return { principalId, displayName: principalId === this.principal ? this.context.displayName : this.auth.listAccounts().find(account => account.id === principalId)!.displayName };
+  }
+  presentRevisionReviewer(id: string, input: RevisionReviewerInput, response: MutationResponse): MutationResponse {
+    this.requireRevisionReviewerAction(id, input);
+    const invalid = (): never => { throw new HttpError(409, 'This saved reviewer receipt does not match the requested operation.', 'REVISION_REVIEWER_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.revisionReviewers.operationRevisionId(body.operationId) !== id) return invalid();
+      operation = this.store.revisionReviewers.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.attribution.principalId !== this.principal
+      || operation.inputSha256 !== revisionReviewerInputHash(input) || !isDeepStrictEqual(operation.input, input)
+      || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionLifecycleHistory(id: string, query: { before?: number; limit?: number; expectedLifecycleVersion?: number }): RevisionLifecycleHistory {
     this.require(id);

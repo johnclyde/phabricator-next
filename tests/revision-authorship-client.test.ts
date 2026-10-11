@@ -6,7 +6,7 @@ import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 import { authorDraft, authorDraftMatches, authorHistory, authorIntent, authorReading, authorSnapshot, mergeAuthorHistory, prepareAuthorDraft, verifiedAuthorResult } from '../client/revision-authorship.ts';
 
 const alice = { principalId: 'U1', displayName: 'Original author' }, bob = { principalId: 'U2', displayName: 'Current <script>author</script>' };
-const snapshot: RevisionAuthorshipSnapshot = { authorship: { revisionId: 'L1', version: 0, author: alice, originalAuthor: alice, updatedAt: null }, head: { versionId: 'version-1', number: 1, contentHash: 'a'.repeat(64) }, status: 'accepted', closeOnAccept: false, accessEpoch: 5, access: { policy: { objectId: 'L1', spaceId: 'S1', version: 1, rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit: true, interact: false, managePolicy: true }, viewLabel: 'Workspace', editLabel: 'Workspace', interactLabel: 'No one' } };
+const snapshot: RevisionAuthorshipSnapshot = { authorship: { revisionId: 'L1', version: 0, author: alice, originalAuthor: alice, updatedAt: null }, head: { versionId: 'version-1', number: 1, contentHash: 'a'.repeat(64) }, status: 'accepted', closeOnAccept: false, reviewerVersion: 0, lifecycleVersion: 0, accessEpoch: 5, access: { policy: { objectId: 'L1', spaceId: 'S1', version: 1, rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit: true, interact: false, managePolicy: true }, viewLabel: 'Workspace', editLabel: 'Workspace', interactLabel: 'No one' } };
 const history: RevisionAuthorHistory = { revisionId: 'L1', authorVersion: 0, transactions: [], nextBefore: null, accessEpoch: 5 };
 const input = { ...prepareAuthorDraft(snapshot, { authorId: bob.principalId }), message: ' Exact authorship note. ' };
 const transaction: RevisionAuthorTransaction = { id: 'transaction-1', revisionId: 'L1', operationId: 'operation-1', authorVersion: 1, action: 'assign', previousAuthor: alice, author: bob, head: snapshot.head, message: input.message, attribution: { principalId: 'U1', displayName: 'Original author', requestId: 'request-1', credentialId: null }, createdAt: '2026-10-11T12:00:00.000Z' };
@@ -62,4 +62,13 @@ test('full and content-free receipts must bind exact normalized input hash and t
   assert.deepEqual(await verifiedAuthorResult(ack, 'L1', input, 'U1'), ack);
   await assert.rejects(verifiedAuthorResult({ ...ack, author: bob }, 'L1', input, 'U1'), /receipt/);
   await assert.rejects(verifiedAuthorResult(ack, 'L1', { ...input, message: 'Another action' }, 'U1'), /different request/);
+});
+
+test('legacy retained author requests remain recoverable without silently acquiring fresh reviewer pins', () => {
+  const { expectedReviewerVersion: _reviewers, expectedLifecycleVersion: _lifecycle, ...old } = input;
+  const retained = authorDraft(old)!; assert.deepEqual(retained, old); assert.equal(authorDraftMatches(retained, snapshot), false);
+  const intent = { id: '12345678-1234-4123-8123-123456789abc', revisionId: 'L1', body: old, draft: old };
+  assert.deepEqual(authorIntent(intent, 'L1'), intent);
+  assert.equal(authorDraftMatches(input, { ...snapshot, reviewerVersion: 1 }), false);
+  assert.equal(authorDraftMatches(input, { ...snapshot, lifecycleVersion: 1 }), false);
 });

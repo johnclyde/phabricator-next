@@ -131,3 +131,13 @@ test('stack cache shape and epoch are checked and password session changes erase
     release(Response.json(graph())); await assert.rejects(pending, SessionChangedError); assert.equal(next.readStored(key, null), null); assert.equal(current.entries.size, 0);
   } finally { globalThis.fetch = previous; current.close(); }
 });
+
+test('reviewer counters absent from Stack v3 do not repeatedly retire unchanged visible graph metadata', async () => {
+  const current = fixture(), previous = globalThis.fetch;
+  try {
+    let changed = 0; current.client.onRevisionStackChange(() => changed++);
+    globalThis.fetch = async () => Response.json(workspaceState(nodes.map(node => ({ ...node, reviewerVersion: 3 }))));
+    await current.client.request('/api/state'); await current.client.request('/api/state');
+    assert.equal(changed, 0); assert.deepEqual(current.client.readStored(key, null), graph());
+  } finally { globalThis.fetch = previous; current.close(); }
+});

@@ -3,11 +3,11 @@ import { isRevisionLifecycleSnapshot, isRevisionLifecycleTransaction, revisionLi
 export const LIFECYCLE_HISTORY_LIMIT = 500;
 export interface LifecycleReading { snapshot: RevisionLifecycleSnapshot; history: RevisionLifecycleHistory }
 export interface LifecycleIntent { id: string; revisionId: string; body: RevisionLifecycleInput; draft: RevisionLifecycleInput }
-export interface RevisionCounters { currentVersion: number; authorVersion?: number; lifecycleVersion?: number; status: string }
+export interface RevisionCounters { currentVersion: number; authorVersion?: number; lifecycleVersion?: number; reviewerVersion?: number; status: string }
 /** Counters are monotonic. A fresh read must never be overwritten by older workspace metadata. */
 export function revisionRefreshDirection(known: RevisionCounters | undefined, read: RevisionCounters): 'workspace' | 'revision' | null {
   if (!known) return 'workspace';
-  const counters = ['currentVersion', 'authorVersion', 'lifecycleVersion'] as const;
+  const counters = ['currentVersion', 'authorVersion', 'lifecycleVersion', 'reviewerVersion'] as const;
   if (counters.some(key => read[key] !== undefined && (known[key] === undefined || read[key]! > known[key]!))) return 'workspace';
   if (counters.some(key => known[key] !== undefined && (read[key] === undefined || known[key]! > read[key]!))) return 'revision';
   return (known.lifecycleVersion === undefined || read.lifecycleVersion === undefined) && known.status !== read.status ? 'revision' : null;
@@ -42,10 +42,10 @@ export function lifecycleIntent(value: unknown, revisionId: string): LifecycleIn
   return body && draft && JSON.stringify(body) === JSON.stringify(draft) ? { id: value.id, revisionId, body, draft: value.draft as RevisionLifecycleInput } : null;
 }
 export function prepareLifecycleDraft(snapshot: RevisionLifecycleSnapshot, action: RevisionLifecycleAction): RevisionLifecycleInput {
-  return revisionLifecycleInput({ action, message: '', expectedLifecycleVersion: snapshot.lifecycle.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256 });
+  return revisionLifecycleInput({ action, message: '', expectedReviewerVersion: snapshot.reviewers.version, expectedLifecycleVersion: snapshot.lifecycle.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256 });
 }
 export function lifecycleDraftMatches(draft: RevisionLifecycleInput, snapshot: RevisionLifecycleSnapshot): boolean {
-  return draft.expectedLifecycleVersion === snapshot.lifecycle.version && draft.expectedAuthorVersion === snapshot.authorship.version && draft.expectedVersion === snapshot.head.number && draft.expectedVersionId === snapshot.head.versionId && draft.expectedContentHash === snapshot.head.contentHash && draft.expectedAccessEpoch === snapshot.accessEpoch && draft.expectedConfigId === snapshot.configId && draft.expectedEvidenceSha256 === snapshot.evidence.sha256;
+  return draft.expectedReviewerVersion === snapshot.reviewers.version && draft.expectedLifecycleVersion === snapshot.lifecycle.version && draft.expectedAuthorVersion === snapshot.authorship.version && draft.expectedVersion === snapshot.head.number && draft.expectedVersionId === snapshot.head.versionId && draft.expectedContentHash === snapshot.head.contentHash && draft.expectedAccessEpoch === snapshot.accessEpoch && draft.expectedConfigId === snapshot.configId && draft.expectedEvidenceSha256 === snapshot.evidence.sha256;
 }
 export async function verifiedLifecycleResult(value: unknown, id: string, input: RevisionLifecycleInput, principalId: string): Promise<RevisionLifecycleReceipt> {
   if (!validRevisionLifecycleResult(value, id, input, principalId)) throw new Error('The lifecycle receipt does not match this exact request. Keep the request and retry it explicitly.');

@@ -5,7 +5,7 @@ import type { RevisionLifecycleAction, RevisionLifecycleInput } from '../shared/
 /** Deliberate lifecycle actions for fixtures, preserving the same pins as HTTP. */
 export function lifecycleInput(store: Store, id: string, action: RevisionLifecycleAction, message = ''): RevisionLifecycleInput {
   const snapshot = store.revisionLifecycle.snapshot(id);
-  return { action, message, expectedLifecycleVersion: snapshot.lifecycle.version, expectedAuthorVersion: snapshot.authorship.version,
+  return { action, message, expectedLifecycleVersion: snapshot.lifecycle.version, expectedReviewerVersion: snapshot.reviewers.version, expectedAuthorVersion: snapshot.authorship.version,
     expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash,
     expectedAccessEpoch: store.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get()!.value as number,
     expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256 };

@@ -37,7 +37,7 @@ for (const basePath of ['/', '/review/']) test(`author CLI reads, transfers and 
     app.policies.setPolicy(id, { expectedVersion: policy.version, spaceId: policy.spaceId, view: onlyBob, edit: onlyBob, interact: onlyBob }, alice.id);
     const read = await cli(['revision-author', id, '--server', url], reader.token); assert.equal(read.code, 0, read.stderr);
     const snapshot = JSON.parse(read.stdout) as RevisionAuthorshipSnapshot; assert.equal(snapshot.authorship.author?.principalId, alice.id); assert.equal(snapshot.access.capabilities.interact, false);
-    const input: RevisionAuthorInput = revisionAuthorInput({ action: 'assign', authorId: bob.id, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, message: 'Continue this manuscript.' });
+    const input: RevisionAuthorInput = revisionAuthorInput({ action: 'assign', authorId: bob.id, expectedAuthorVersion: snapshot.authorship.version, expectedReviewerVersion: snapshot.reviewerVersion, expectedLifecycleVersion: snapshot.lifecycleVersion, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: snapshot.accessEpoch, message: 'Continue this manuscript.' });
     const intent = join(directory, 'transfer.json'); await writeFile(intent, JSON.stringify(input));
     const args = ['edit-revision-author', id, '--intent', intent, '--request-id', 'exact-cli-handoff', '--server', url];
     assert.notEqual((await cli(args, reader.token)).code, 0);

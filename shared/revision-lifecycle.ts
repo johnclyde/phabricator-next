@@ -3,6 +3,7 @@ import type { ObjectAccess } from './policy';
 import { isRevisionStatus, revisionIsClosed, type RevisionStatus } from './revision-status';
 import { isRevisionId } from './revision-dependencies';
 import { isRevisionAuthor, isRevisionAuthorHead, type RevisionAuthor, type RevisionAuthorHead } from './revision-authorship';
+import { isRevisionReviewerSummary, type RevisionReviewerSummary } from './revision-reviewers';
 
 export const REVISION_LIFECYCLE_ACTIONS = ['request_review', 'plan_changes', 'abandon', 'reclaim', 'close', 'reopen', 'accept_reviewed'] as const;
 export type RevisionLifecycleAction = typeof REVISION_LIFECYCLE_ACTIONS[number];
@@ -19,15 +20,18 @@ export interface RevisionLifecycleSnapshot {
   lifecycle: RevisionLifecycle; head: RevisionAuthorHead; authorship: { version: number; author: RevisionAuthor | null };
   evidence: RevisionLifecycleEvidence; config: RevisionLifecycleConfig; configId: string; access: ObjectAccess; accessEpoch: number;
   actions: RevisionLifecycleActionOption[];
+  reviewers: RevisionReviewerSummary;
 }
 export interface RevisionLifecycleInput {
   action: RevisionLifecycleAction; message: string; expectedLifecycleVersion: number; expectedAuthorVersion: number;
   expectedVersion: number; expectedVersionId: string; expectedContentHash: string; expectedAccessEpoch: number;
   expectedConfigId: string; expectedEvidenceSha256: string;
+  /** Omission is accepted only while validating a proven historical receipt. */
+  expectedReviewerVersion?: number;
 }
 export interface RevisionLifecycleTransaction {
   id: string; revisionId: string; operationId: string | null; lifecycleVersion: number;
-  action: RevisionLifecycleAction | 'source_updated' | 'review_invalidated'; fromStatus: RevisionStatus; toStatus: RevisionStatus;
+  action: RevisionLifecycleAction | 'source_updated' | 'review_invalidated' | 'reviewer_reassessed'; fromStatus: RevisionStatus; toStatus: RevisionStatus;
   beforeHead: RevisionAuthorHead; head: RevisionAuthorHead; message: string; attribution: ActorAttribution | null;
   createdAt: string; evidenceSha256: string; reviewIds: string[];
 }
@@ -36,10 +40,15 @@ export interface RevisionLifecycleHistory { revisionId: string; lifecycleVersion
 export const revisionLifecycleActionLabel = (action: RevisionLifecycleAction): string => ({ request_review: 'Request Review', plan_changes: 'Plan Changes', abandon: 'Abandon Revision', reclaim: 'Reclaim Revision', close: 'Close Revision', reopen: 'Reopen Revision', accept_reviewed: 'Accept Reviewed Version' })[action];
 
 /** Native lifecycle eligibility. Evidence acceptance is explicitly distinct from upstream reviewer votes. */
-export function revisionLifecycleActions(snapshot: Omit<RevisionLifecycleSnapshot, 'actions' | 'access' | 'accessEpoch'> & { access?: ObjectAccess }, principalId: string): RevisionLifecycleActionOption[] {
-  const { lifecycle: state, head, authorship, evidence, config, access } = snapshot;
+export function revisionLifecycleActions(snapshot: Omit<RevisionLifecycleSnapshot, 'actions' | 'access' | 'accessEpoch' | 'reviewers'> & { access?: ObjectAccess; reviewers?: RevisionReviewerSummary }, principalId: string): RevisionLifecycleActionOption[] {
+  const { lifecycle: state, head, authorship, evidence, config, access, reviewers } = snapshot;
   const owner = authorship.author?.principalId === principalId, terminal = revisionIsClosed(state.status, config.closeOnAccept);
-  const canRestore = state.status === 'changes_planned' && state.resumeAcceptanceHead !== null && sameHead(state.resumeAcceptanceHead, head) && evidence.reviewIds.length > 0 && evidence.errorCount === 0;
+  const blockers = Boolean(reviewers && (reviewers.rejecting || reviewers.olderRejecting || reviewers.blocking));
+  const basis = reviewers?.acceptance;
+  const nativeBasis = basis?.kind === 'evidence' && sameHead(basis.head, head) && evidence.reviewIds.length > 0;
+  const canRestore = state.status === 'changes_planned' && evidence.errorCount === 0 && !(reviewers?.blocking)
+    && (reviewers ? reviewers.accepting > 0 || nativeBasis && state.resumeAcceptanceHead !== null && sameHead(state.resumeAcceptanceHead, head) : state.resumeAcceptanceHead !== null && sameHead(state.resumeAcceptanceHead, head) && evidence.reviewIds.length > 0);
+  const reassessedReview = (): RevisionStatus => reviewers?.rejecting ? 'changes_requested' : !blockers && evidence.errorCount === 0 && (reviewers && reviewers.accepting > 0 || nativeBasis) ? 'accepted' : 'needs_review';
   return REVISION_LIFECYCLE_ACTIONS.map(action => {
     let reason: string | null = access && (!access.capabilities.edit || !access.capabilities.view) ? 'Editing this revision is required.' : null;
     let targetStatus: RevisionStatus;
@@ -47,10 +56,10 @@ export function revisionLifecycleActions(snapshot: Omit<RevisionLifecycleSnapsho
       case 'request_review': targetStatus = canRestore ? 'accepted' : 'needs_review'; reason ??= terminal ? 'Reclaim or reopen this revision first.' : state.status === 'needs_review' ? 'Review has already been requested.' : !owner && state.status !== 'draft' ? 'Only the current author can request review.' : null; break;
       case 'plan_changes': targetStatus = 'changes_planned'; reason ??= !owner ? 'Only the current author can plan changes.' : terminal || state.status === 'draft' ? 'Request review before planning changes.' : state.status === 'changes_planned' ? 'Changes are already planned.' : null; break;
       case 'abandon': targetStatus = 'abandoned'; reason ??= terminal ? 'This revision is already closed or abandoned.' : !owner && !config.alwaysAllowAbandon ? 'Only the current author can abandon this revision.' : null; break;
-      case 'reclaim': targetStatus = state.reviewStarted ? 'needs_review' : 'draft'; reason ??= !owner ? 'Only the current author can reclaim this revision.' : state.status !== 'abandoned' ? 'Only abandoned revisions can be reclaimed.' : null; break;
+      case 'reclaim': targetStatus = state.reviewStarted ? reassessedReview() : 'draft'; reason ??= !owner ? 'Only the current author can reclaim this revision.' : state.status !== 'abandoned' ? 'Only abandoned revisions can be reclaimed.' : null; break;
       case 'close': targetStatus = 'closed'; reason ??= terminal ? 'This revision is already closed.' : state.status !== 'accepted' ? 'Accept the reviewed version before closing this revision.' : !owner && !config.alwaysAllowClose ? 'Only the current author can close this revision.' : null; break;
-      case 'reopen': targetStatus = 'needs_review'; reason ??= !config.allowReopen ? 'Reopening is disabled by the operator.' : state.status !== 'closed' ? 'Only closed revisions can be reopened.' : null; break;
-      case 'accept_reviewed': targetStatus = 'accepted'; reason ??= !['needs_review', 'changes_requested'].includes(state.status) ? 'Request review before accepting this version.' : evidence.reviewIds.length === 0 ? 'Run checks or an explicit AI review on this exact version first.' : evidence.errorCount > 0 ? 'Resolve the errors reported for this version first.' : null; break;
+      case 'reopen': targetStatus = reassessedReview(); reason ??= !config.allowReopen ? 'Reopening is disabled by the operator.' : state.status !== 'closed' ? 'Only closed revisions can be reopened.' : null; break;
+      case 'accept_reviewed': targetStatus = 'accepted'; reason ??= !['needs_review', 'changes_requested'].includes(state.status) ? 'Request review before accepting this version.' : blockers ? 'Resolve required reviews and reviewer requests for changes first.' : evidence.reviewIds.length === 0 ? 'Run checks or an explicit AI review on this exact version first.' : evidence.errorCount > 0 ? 'Resolve the errors reported for this version first.' : null; break;
     }
     return { action, label: revisionLifecycleActionLabel(action), available: reason === null, reason, targetStatus: reason === null ? targetStatus : null };
   });
@@ -67,10 +76,10 @@ export const isRevisionLifecycleAction = (value: unknown): value is RevisionLife
 export function sameHead(a: RevisionAuthorHead, b: RevisionAuthorHead): boolean { return a.versionId === b.versionId && a.number === b.number && a.contentHash === b.contentHash; }
 export function isRevisionLifecycleConfig(value: unknown): value is RevisionLifecycleConfig { return object(value) && keys(value, ['allowReopen', 'alwaysAllowClose', 'alwaysAllowAbandon', 'closeOnAccept']) && Object.values(value).every(v => typeof v === 'boolean'); }
 export function revisionLifecycleInput(value: unknown): RevisionLifecycleInput {
-  if (!object(value) || !keys(value, ['action', 'message', 'expectedLifecycleVersion', 'expectedAuthorVersion', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch', 'expectedConfigId', 'expectedEvidenceSha256'])
+  if (!object(value) || !keys(value, ['action', 'message', 'expectedLifecycleVersion', 'expectedAuthorVersion', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch', 'expectedConfigId', 'expectedEvidenceSha256', ...(value.expectedReviewerVersion === undefined ? [] : ['expectedReviewerVersion'])])
     || !isRevisionLifecycleAction(value.action) || !message(value.message) || !integer(value.expectedLifecycleVersion) || !integer(value.expectedAuthorVersion)
-    || !integer(value.expectedVersion, 1) || !text(value.expectedVersionId, 240) || !hash(value.expectedContentHash) || !integer(value.expectedAccessEpoch) || !hash(value.expectedConfigId) || !hash(value.expectedEvidenceSha256)) throw new Error('Provide an exact lifecycle action, source, author, lifecycle, evidence, configuration and access snapshot.');
-  return { action: value.action, message: value.message, expectedLifecycleVersion: value.expectedLifecycleVersion, expectedAuthorVersion: value.expectedAuthorVersion, expectedVersion: value.expectedVersion, expectedVersionId: value.expectedVersionId, expectedContentHash: value.expectedContentHash, expectedAccessEpoch: value.expectedAccessEpoch, expectedConfigId: value.expectedConfigId, expectedEvidenceSha256: value.expectedEvidenceSha256 };
+    || !integer(value.expectedVersion, 1) || !text(value.expectedVersionId, 240) || !hash(value.expectedContentHash) || !integer(value.expectedAccessEpoch) || !hash(value.expectedConfigId) || !hash(value.expectedEvidenceSha256) || value.expectedReviewerVersion !== undefined && !integer(value.expectedReviewerVersion)) throw new Error('Provide an exact lifecycle action, source, author, lifecycle, evidence, configuration and access snapshot.');
+  return { action: value.action, message: value.message, expectedLifecycleVersion: value.expectedLifecycleVersion, expectedAuthorVersion: value.expectedAuthorVersion, expectedVersion: value.expectedVersion, expectedVersionId: value.expectedVersionId, expectedContentHash: value.expectedContentHash, expectedAccessEpoch: value.expectedAccessEpoch, expectedConfigId: value.expectedConfigId, expectedEvidenceSha256: value.expectedEvidenceSha256, ...(value.expectedReviewerVersion === undefined ? {} : { expectedReviewerVersion: value.expectedReviewerVersion }) };
 }
 export function isRevisionLifecycle(value: unknown, id?: string): value is RevisionLifecycle {
   return object(value) && keys(value, ['revisionId', 'version', 'status', 'reviewStarted', 'closedFromAccepted', 'resumeAcceptanceHead', 'updatedAt'])
@@ -80,7 +89,7 @@ export function isRevisionLifecycle(value: unknown, id?: string): value is Revis
 }
 export function isRevisionLifecycleEvidence(value: unknown): value is RevisionLifecycleEvidence { return object(value) && keys(value, ['sha256', 'reviewIds', 'errorCount']) && hash(value.sha256) && reviewIds(value.reviewIds) && integer(value.errorCount) && (value.reviewIds.length > 0 || value.errorCount === 0); }
 export function isRevisionLifecycleSnapshot(value: unknown, id: string): value is RevisionLifecycleSnapshot {
-  if (!object(value) || !keys(value, ['lifecycle', 'head', 'authorship', 'evidence', 'config', 'configId', 'access', 'accessEpoch', 'actions'])
+  if (!object(value) || !keys(value, ['lifecycle', 'head', 'authorship', 'evidence', 'config', 'configId', 'access', 'accessEpoch', 'actions', 'reviewers']) || !isRevisionReviewerSummary(value.reviewers)
     || !isRevisionLifecycle(value.lifecycle, id) || !isRevisionAuthorHead(value.head) || !object(value.authorship) || !keys(value.authorship, ['version', 'author']) || !integer(value.authorship.version) || value.authorship.author !== null && !isRevisionAuthor(value.authorship.author)
     || !isRevisionLifecycleEvidence(value.evidence) || !isRevisionLifecycleConfig(value.config) || !hash(value.configId) || !integer(value.accessEpoch)
     || !object(value.access) || !object(value.access.policy) || value.access.policy.objectId !== id || !object(value.access.capabilities) || !['view', 'edit', 'interact', 'managePolicy'].every(key => typeof ((value.access as Record<string, unknown>).capabilities as Record<string, unknown>)[key] === 'boolean')
@@ -96,8 +105,9 @@ export function isRevisionLifecycleTransaction(value: unknown, id?: string): val
     || !message(value.message) || !date(value.createdAt) || !hash(value.evidenceSha256) || !reviewIds(value.reviewIds)) return false;
   if (value.action === 'source_updated') return value.operationId === null && (value.attribution === null || actor(value.attribution)) && value.head.number === value.beforeHead.number + 1 && value.head.versionId !== value.beforeHead.versionId;
   if (value.action === 'review_invalidated') return value.operationId === null && (value.attribution === null || actor(value.attribution)) && sameHead(value.head, value.beforeHead) && (value.fromStatus === 'accepted' && value.toStatus === 'changes_requested' || value.fromStatus === 'changes_planned' && value.toStatus === 'changes_planned');
+  if (value.action === 'reviewer_reassessed') return value.operationId === null && (value.attribution === null || actor(value.attribution)) && sameHead(value.head, value.beforeHead) && (['needs_review', 'changes_requested', 'accepted'].includes(value.fromStatus) && ['needs_review', 'changes_requested', 'accepted'].includes(value.toStatus) || value.fromStatus === 'changes_planned' && value.toStatus === 'changes_planned');
   if (!isRevisionLifecycleAction(value.action) || !text(value.operationId, 240) || !actor(value.attribution) || !sameHead(value.head, value.beforeHead) || value.fromStatus === value.toStatus) return false;
-  const targets: Record<RevisionLifecycleAction, RevisionStatus[]> = { request_review: ['needs_review', 'accepted'], plan_changes: ['changes_planned'], abandon: ['abandoned'], reclaim: ['needs_review', 'draft'], close: ['closed'], reopen: ['needs_review'], accept_reviewed: ['accepted'] };
+  const targets: Record<RevisionLifecycleAction, RevisionStatus[]> = { request_review: ['needs_review', 'accepted'], plan_changes: ['changes_planned'], abandon: ['abandoned'], reclaim: ['needs_review', 'draft', 'accepted', 'changes_requested'], close: ['closed'], reopen: ['needs_review', 'accepted', 'changes_requested'], accept_reviewed: ['accepted'] };
   return targets[value.action].includes(value.toStatus) && (value.action !== 'accept_reviewed' || value.reviewIds.length > 0);
 }
 export function validRevisionLifecycleResult(value: unknown, id: string, input: RevisionLifecycleInput, principalId?: string): value is RevisionLifecycleReceipt {

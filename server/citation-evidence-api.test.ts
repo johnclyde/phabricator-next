@@ -133,7 +133,7 @@ test('retraction requires original author or current editor in addition to inter
     // The original evidence author must actually relinquish revision ownership:
     // narrowing the edit audience alone does not remove an author's automatic edit.
     const ownership = app.store.revisionAuthorship.snapshot(id);
-    const handoff = await app.request(`/api/revisions/${id}/authorship`, 'POST', { action: 'assign', authorId: app.bob.id, message: 'Transfer manuscript responsibility', expectedAuthorVersion: ownership.authorship.version, expectedVersion: ownership.head.number, expectedVersionId: ownership.head.versionId, expectedContentHash: ownership.head.contentHash, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'handoff-before-evidence-retraction');
+    const handoff = await app.request(`/api/revisions/${id}/authorship`, 'POST', { action: 'assign', authorId: app.bob.id, message: 'Transfer manuscript responsibility', expectedAuthorVersion: ownership.authorship.version, expectedReviewerVersion: ownership.reviewerVersion, expectedLifecycleVersion: ownership.lifecycleVersion, expectedVersion: ownership.head.number, expectedVersionId: ownership.head.versionId, expectedContentHash: ownership.head.contentHash, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'handoff-before-evidence-retraction');
     assert.equal(handoff.status, 200);
     app.policy(id, { edit: members(app.bob.id) }, app.bob.id);
     assert.equal(app.policies.access(id, app.alice.id).edit, false);

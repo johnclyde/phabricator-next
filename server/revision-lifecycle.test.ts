@@ -7,6 +7,7 @@ import type { DocxProjection } from '../shared/docx.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { Store } from './store.ts';
 import { RevisionLifecycleStore, revisionLifecycleInputHash } from './revision-lifecycle.ts';
+import { RevisionReviewerStore } from './revision-reviewers.ts';
 import { lifecycleAction, lifecycleInput, closeRevision } from '../tests/revision-lifecycle-fixture.ts';
 
 const alice: ActorAttribution = { principalId: 'alice', displayName: 'Original Alice', credentialId: 'alice-key', requestId: 'request-alice' };
@@ -98,8 +99,8 @@ test('operator configuration controls editor close/abandon and accepted terminal
   const store = new Store({ path: ':memory:', revisionLifecycle: { alwaysAllowClose: true, alwaysAllowAbandon: true, allowReopen: true } }); try {
     const id = create(store); lifecycleAction(store, id, 'abandon', bob); lifecycleAction(store, id, 'reclaim', alice);
     review(store, id); lifecycleAction(store, id, 'accept_reviewed', bob); lifecycleAction(store, id, 'close', bob); lifecycleAction(store, id, 'reopen', bob);
-    const closed = new RevisionLifecycleStore(store.database, { closeOnAccept: true });
-    review(store, id); lifecycleAction(store, id, 'accept_reviewed', bob);
+    const closed = new RevisionLifecycleStore(store.database, { closeOnAccept: true }); closed.connectReviewers(new RevisionReviewerStore(store.database, closed));
+    review(store, id); assert.equal(state(store, id).status, 'accepted', 'reopening unchanged accepted evidence reassesses its existing basis');
     for (const action of ['request_review', 'plan_changes', 'abandon', 'close'] as const) assert.equal(closed.snapshot(id, alice.principalId).actions.find(row => row.action === action)!.available, false);
     assert.throws(() => new RevisionLifecycleStore(store.database, { allowReopen: 'true' as unknown as boolean }), /configuration/);
     assert.throws(() => new RevisionLifecycleStore(store.database, { surprise: false } as never), /configuration/);
@@ -109,12 +110,12 @@ test('operator configuration controls editor close/abandon and accepted terminal
 test('all independent action pins, evidence changes, ABA source identity and author handoff are checked atomically', () => {
   const store = new Store({ path: ':memory:' }); try {
     const id = create(store), input = lifecycleInput(store, id, 'plan_changes');
-    for (const changed of [{ expectedLifecycleVersion: 1 }, { expectedAuthorVersion: 1 }, { expectedVersion: 2 }, { expectedVersionId: 'other' }, { expectedContentHash: 'f'.repeat(64) }, { expectedAccessEpoch: input.expectedAccessEpoch + 1 }, { expectedConfigId: 'a'.repeat(64) }, { expectedEvidenceSha256: 'a'.repeat(64) }]) {
+    for (const changed of [{ expectedLifecycleVersion: 1 }, { expectedReviewerVersion: 1 }, { expectedAuthorVersion: 1 }, { expectedVersion: 2 }, { expectedVersionId: 'other' }, { expectedContentHash: 'f'.repeat(64) }, { expectedAccessEpoch: input.expectedAccessEpoch + 1 }, { expectedConfigId: 'a'.repeat(64) }, { expectedEvidenceSha256: 'a'.repeat(64) }]) {
       const before = rows(store); assert.throws(() => store.revisionLifecycle.mutate(id, { ...input, ...changed }, alice), { status: 409 }); assert.deepEqual(rows(store), before);
     }
     review(store, id); assert.throws(() => store.revisionLifecycle.mutate(id, input, alice), { code: 'REVISION_LIFECYCLE_CHANGED' });
     const authorInput = lifecycleInput(store, id, 'plan_changes');
-    store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.principalId, message: '', expectedAuthorVersion: 0, expectedVersion: authorInput.expectedVersion, expectedVersionId: authorInput.expectedVersionId, expectedContentHash: authorInput.expectedContentHash, expectedAccessEpoch: authorInput.expectedAccessEpoch }, alice, { principalId: bob.principalId, displayName: bob.displayName });
+    store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.principalId, message: '', expectedAuthorVersion: 0, expectedReviewerVersion: authorInput.expectedReviewerVersion, expectedLifecycleVersion: authorInput.expectedLifecycleVersion, expectedVersion: authorInput.expectedVersion, expectedVersionId: authorInput.expectedVersionId, expectedContentHash: authorInput.expectedContentHash, expectedAccessEpoch: authorInput.expectedAccessEpoch }, alice, { principalId: bob.principalId, displayName: bob.displayName });
     assert.throws(() => store.revisionLifecycle.mutate(id, { ...authorInput, expectedAccessEpoch: lifecycleInput(store, id, 'plan_changes').expectedAccessEpoch }, alice), { code: 'REVISION_LIFECYCLE_CHANGED' });
     const stale = lifecycleInput(store, id, 'plan_changes'); store.createVersion(id, { expectedVersion: 1, files, message: 'Identical content, new immutable version' }, bob);
     assert.equal(store.revisionLifecycle.snapshot(id).head.contentHash, stale.expectedContentHash);
@@ -136,8 +137,8 @@ test('historical receipt proof survives later evidence, source, configuration an
     const id = create(store); review(store, id); const receipt = lifecycleAction(store, id, 'accept_reviewed', bob);
     const planned = lifecycleAction(store, id, 'plan_changes', alice);
     review(store, id, true); update(store, id);
-    const pin = lifecycleInput(store, id, 'plan_changes'); store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.principalId, message: '', expectedAuthorVersion: 0, expectedVersion: pin.expectedVersion, expectedVersionId: pin.expectedVersionId, expectedContentHash: pin.expectedContentHash, expectedAccessEpoch: pin.expectedAccessEpoch }, alice, { principalId: bob.principalId, displayName: bob.displayName });
-    const configured = new RevisionLifecycleStore(store.database, { closeOnAccept: true });
+    const pin = lifecycleInput(store, id, 'plan_changes'); store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.principalId, message: '', expectedAuthorVersion: 0, expectedReviewerVersion: pin.expectedReviewerVersion, expectedLifecycleVersion: pin.expectedLifecycleVersion, expectedVersion: pin.expectedVersion, expectedVersionId: pin.expectedVersionId, expectedContentHash: pin.expectedContentHash, expectedAccessEpoch: pin.expectedAccessEpoch }, alice, { principalId: bob.principalId, displayName: bob.displayName });
+    const configured = new RevisionLifecycleStore(store.database, { closeOnAccept: true }); configured.connectReviewers(new RevisionReviewerStore(store.database, configured));
     assert.deepEqual(configured.operation(receipt.operationId).receipt, receipt); assert.deepEqual(configured.operation(planned.operationId).receipt, planned);
     assert.equal(configured.operationRevisionId(receipt.operationId), id);
     store.database.exec('DROP TRIGGER revision_lifecycle_operations_no_update');

@@ -36,7 +36,7 @@ async function start(basePath = '/', configuration: Partial<RevisionLifecycleCon
   const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}) => store.createRevision({ title: 'Original title', summary: 'Original summary', kind, files: [{ path: 'source.txt', content: 'Exact immutable source\n' }], ...extra }, actor);
   const input = (id: string, action: RevisionLifecycleAction): RevisionLifecycleInput => {
     const snapshot = store.revisionLifecycle.snapshot(id, alice.id);
-    return { action, expectedLifecycleVersion: snapshot.lifecycle.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: app.policies.epoch(), expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256, message: '  Exact action message\n' };
+    return { action, expectedLifecycleVersion: snapshot.lifecycle.version, expectedReviewerVersion: snapshot.reviewers.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: app.policies.epoch(), expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256, message: '  Exact action message\n' };
   };
   const policy = (id: string, rules: Record<string, unknown>, who = alice.id) => { const current = app.policies.policy(id, who); return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...rules }, who); };
   const evidence = (id: string, error = false) => store.saveReview(id, store.detail(id).revision.currentVersion, { provider: 'local', model: 'test-check', summary: 'Recorded check', findings: error ? [{ id: 'error', source: 'local', severity: 'error', filePath: 'source.txt', line: 1, title: 'Blocking finding', body: 'A recorded exact-source problem.' }] : [] }, actor);
@@ -52,14 +52,18 @@ for (const basePath of ['/', '/mounted/']) test(`explicit lifecycle actions pres
       const initial = await app.request<RevisionLifecycleSnapshot>(app.path(id), 'GET', undefined, 'reader'); assert.equal(initial.status, 200); assert.equal(initial.headers.get('cache-control'), 'no-store');
       const planned = await app.act(id, 'plan_changes'); assert.equal(planned.receipt.transaction.toStatus, 'changes_planned'); assert.equal(planned.receipt.inputSha256, revisionLifecycleInputHash(planned.data));
       await app.act(id, 'request_review'); app.evidence(id); await app.act(id, 'accept_reviewed'); await app.act(id, 'close');
-      const reopened = await app.act(id, 'reopen', 'bob'); assert.equal(reopened.receipt.transaction.toStatus, 'needs_review', 'reopen does not require current authorship');
+      const reopened = await app.act(id, 'reopen', 'bob'); assert.equal(reopened.receipt.transaction.toStatus, 'accepted', 'a non-author editor can reopen and restore retained exact-source acceptance');
       await app.act(id, 'abandon'); await app.act(id, 'reclaim');
       const current = (await app.request<RevisionLifecycleSnapshot>(app.path(id))).body;
-      assert.equal(current.lifecycle.status, 'needs_review'); assert.deepEqual(app.store.detail(id).versions, detail.versions);
+      assert.equal(current.lifecycle.status, 'accepted', 'reclaim reassesses retained exact-source acceptance'); assert.deepEqual(app.store.detail(id).versions, detail.versions);
       const first = await app.request<RevisionLifecycleHistory>(`${app.path(id)}/history?limit=1&expectedLifecycleVersion=${current.lifecycle.version}`); assert.equal(first.status, 200); assert.equal(first.body.transactions.length, 1); assert.ok(first.body.nextBefore);
       const older = await app.request<RevisionLifecycleHistory>(`${app.path(id)}/history?limit=1&before=${first.body.nextBefore}&expectedLifecycleVersion=${current.lifecycle.version}`); assert.equal(older.status, 200); assert.ok(older.body.transactions[0]!.lifecycleVersion < first.body.transactions[0]!.lifecycleVersion);
       const replay = await app.request<RevisionLifecycleReceipt>(app.path(id), 'POST', planned.data, 'alice', planned.key); assert.equal(replay.status, 200); assert.deepEqual(replay.body.transaction, planned.receipt.transaction); assert.equal(replay.body.accessEpoch, app.policies.epoch());
       assert.equal((await app.request(`${app.path(id)}/history?expectedLifecycleVersion=0`)).status, 409);
+      app.store.createVersion(id, { expectedVersion: 1, files: [{ path: 'source.txt', content: 'Changed immutable source\n' }], message: 'Acceptance must remain bound to its original source.' }, app.actor);
+      const changed = (await app.request<RevisionLifecycleSnapshot>(app.path(id))).body;
+      assert.equal(changed.lifecycle.status, 'needs_review'); assert.equal(changed.reviewers.acceptance, null);
+      assert.equal(changed.head.number, 2); assert.notEqual(changed.head.contentHash, current.head.contentHash);
     }
   } finally { await app.close(); }
 });
@@ -97,7 +101,7 @@ test('historical retries preserve original attribution after handoff and credent
   const app = await start();
   try {
     const id = app.revision().revision.id, saved = await app.act(id, 'plan_changes');
-    const author = app.store.revisionAuthorship.snapshot(id); app.store.revisionAuthorship.mutate(id, { action: 'assign', authorId: app.bob.id, expectedAuthorVersion: author.authorship.version, expectedVersion: author.head.number, expectedVersionId: author.head.versionId, expectedContentHash: author.head.contentHash, expectedAccessEpoch: app.policies.epoch(), message: 'Handoff' }, app.actor, { principalId: app.bob.id, displayName: app.bob.displayName });
+    const author = app.store.revisionAuthorship.snapshot(id); app.store.revisionAuthorship.mutate(id, { action: 'assign', authorId: app.bob.id, expectedAuthorVersion: author.authorship.version, expectedReviewerVersion: author.reviewerVersion, expectedLifecycleVersion: author.lifecycleVersion, expectedVersion: author.head.number, expectedVersionId: author.head.versionId, expectedContentHash: author.head.contentHash, expectedAccessEpoch: app.policies.epoch(), message: 'Handoff' }, app.actor, { principalId: app.bob.id, displayName: app.bob.displayName });
     const old = app.tokens.alice.record.id; app.tokens.alice = app.auth.createToken(app.alice.id, { name: 'Rotated', scopes: ['read', 'write'] }); app.auth.revokeToken(app.alice.id, old);
     const replay = await app.request<RevisionLifecycleReceipt>(app.path(id), 'POST', saved.data, 'alice', saved.key); assert.equal(replay.status, 200); assert.deepEqual(replay.body.transaction, saved.receipt.transaction); assert.equal(replay.body.accessEpoch, app.policies.epoch());
     app.policy(id, { edit: members(app.bob.id) }, app.bob.id); assert.equal((await app.request(app.path(id), 'POST', saved.data, 'alice', saved.key)).status, 403);
@@ -116,11 +120,13 @@ test('saved lifecycle responses are bound to immutable operation owner, exact in
     const foreign = await app.act(other, 'plan_changes', 'bob'); app.policy(other, { view: members(app.bob.id), edit: members(app.bob.id) }, app.bob.id);
     assert.equal((await app.request(app.path(other))).status, 404);
     const operation = app.store.revisionLifecycle.operation.bind(app.store.revisionLifecycle);
-    app.store.revisionLifecycle.operation = operationId => { assert.notEqual(operationId, foreign.receipt.operationId, 'hidden operation evidence must not be loaded before checking its owner'); return operation(operationId); };
+    let hiddenLoads = 0;
+    app.store.revisionLifecycle.operation = operationId => { if (operationId === foreign.receipt.operationId) { hiddenLoads++; throw new Error('Hidden operation must not load'); } return operation(operationId); };
     for (const body of [{ ...saved.receipt, inputSha256: 'f'.repeat(64) }, { ...saved.receipt, transaction: { ...saved.receipt.transaction, message: 'Forged evidence' } }, foreign.receipt, { ...saved.receipt, operationId: foreign.receipt.operationId }]) {
       app.store.database.prepare('UPDATE idempotency SET body=? WHERE key=?').run(JSON.stringify(body), row.key);
       assert.equal((await app.request(app.path(id), 'POST', saved.data, 'alice', saved.key)).status, 409);
     }
+    assert.equal(hiddenLoads, 0, 'hidden operation evidence must not be loaded before checking its owner');
     app.store.database.prepare('UPDATE idempotency SET body=? WHERE key=?').run(row.body, row.key); assert.equal((await app.request(app.path(id), 'POST', saved.data, 'alice', saved.key)).status, 200);
   } finally { await app.close(); }
 });

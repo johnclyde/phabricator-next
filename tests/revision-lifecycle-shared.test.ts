@@ -4,7 +4,7 @@ import { DEFAULT_REVISION_LIFECYCLE_CONFIG, revisionLifecycleActions, revisionLi
 import { revisionStackTopology } from '../shared/revision-stack.ts';
 
 const head = { versionId: 'source-v1', number: 1, contentHash: 'a'.repeat(64) };
-const base: Omit<RevisionLifecycleSnapshot, 'actions' | 'access' | 'accessEpoch'> = { lifecycle: { revisionId: 'P1', version: 0, status: 'needs_review', reviewStarted: true, closedFromAccepted: null, resumeAcceptanceHead: null, updatedAt: null }, head, authorship: { version: 0, author: { principalId: 'U1', displayName: 'Author' } }, evidence: { sha256: 'b'.repeat(64), reviewIds: ['review'], errorCount: 0 }, config: { ...DEFAULT_REVISION_LIFECYCLE_CONFIG }, configId: 'c'.repeat(64) };
+const base: Omit<RevisionLifecycleSnapshot, 'actions' | 'access' | 'accessEpoch'> = { lifecycle: { revisionId: 'P1', version: 0, status: 'needs_review', reviewStarted: true, closedFromAccepted: null, resumeAcceptanceHead: null, updatedAt: null }, head, authorship: { version: 0, author: { principalId: 'U1', displayName: 'Author' } }, evidence: { sha256: 'b'.repeat(64), reviewIds: ['review'], errorCount: 0 }, config: { ...DEFAULT_REVISION_LIFECYCLE_CONFIG }, configId: 'c'.repeat(64), reviewers: { version: 0, accepting: 0, rejecting: 0, olderRejecting: 0, blocking: 0, acceptance: null } };
 const available = (snapshot = base, principal = 'U1') => revisionLifecycleActions(snapshot, principal).filter(a => a.available).map(a => a.action);
 test('native lifecycle applies author and terminal rules, with explicit operator overrides', () => {
   assert.deepEqual(available(), ['plan_changes', 'abandon', 'accept_reviewed']);
@@ -17,7 +17,7 @@ test('native lifecycle applies author and terminal rules, with explicit operator
   assert.deepEqual(available({ ...base, lifecycle: { ...base.lifecycle, status: 'accepted' }, config: { ...base.config, alwaysAllowClose: true, alwaysAllowAbandon: true } }, 'U2'), ['abandon', 'close']);
 });
 test('a planned acceptance resumes only for the exact still-clean reviewed source', () => {
-  const snapshot = { ...base, lifecycle: { ...base.lifecycle, status: 'changes_planned' as const, resumeAcceptanceHead: head } };
+  const snapshot = { ...base, lifecycle: { ...base.lifecycle, status: 'changes_planned' as const, resumeAcceptanceHead: head }, reviewers: { ...base.reviewers, acceptance: { kind: 'evidence' as const, head, transactionId: 'accepted-event' } } };
   const next = (s = snapshot) => revisionLifecycleActions(s, 'U1').find(a => a.action === 'request_review')!.targetStatus;
   assert.equal(next(), 'accepted');
   assert.equal(next({ ...snapshot, head: { ...head, contentHash: 'd'.repeat(64) } }), 'needs_review');

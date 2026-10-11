@@ -28,9 +28,11 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 - `POST /api/revisions` CreateRevisionInput → RevisionDetail
 - `GET /api/revisions/:id` → RevisionDetail
 - `POST /api/revisions/:id/versions` CreateVersionInput → RevisionDetail; append immutable version and lifecycle history, invalidate acceptance and reject stale expectedVersion. Closed and Draft retain their status; other revisions return to Needs Review if review previously started, otherwise Draft. See [source-change lifecycle rules](revision-lifecycle.md#drafts-and-source-changes).
+- `GET /api/revisions/:id/reviewers` and `/reviewers/history` → authorized reviewer state, exact source/configuration/evidence pins and paged immutable history.
+- `POST /api/revisions/:id/reviewers` → exact immutable membership/decision receipt; requires Idempotency-Key and reviewer/lifecycle/author/source/evidence/configuration/access pins. Membership uses Edit; personal decisions use Interact. See [reviewer contract](revision-reviewers.md).
 - `GET /api/revisions/:id/lifecycle` → current lifecycle/source/author/evidence/configuration/access snapshot and action availability.
 - `GET /api/revisions/:id/lifecycle/history` → immutable paged manual/source/review transitions; supports `before`, `limit`, `expectedLifecycleVersion`.
-- `POST /api/revisions/:id/lifecycle` → exact immutable action receipt; requires Idempotency-Key and source/author/lifecycle/evidence/configuration/access pins. See [lifecycle contract](revision-lifecycle.md).
+- `POST /api/revisions/:id/lifecycle` → exact immutable action receipt; requires Idempotency-Key and source/author/reviewer/lifecycle/evidence/configuration/access pins. See [lifecycle contract](revision-lifecycle.md).
 - Legacy `PATCH /api/revisions/:id` status requests now return 409; old saved receipt bytes remain but cannot prove a lifecycle action.
 - `POST /api/revisions/:id/comments` CreateCommentInput → ReviewComment
 - `POST /api/revisions/:id/threads/:threadId/replies` CreateReplyInput → ReviewComment; inherits the original thread anchor and records the viewed version

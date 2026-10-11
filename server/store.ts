@@ -4,6 +4,8 @@ import { RevisionStackStore } from './revision-stack.ts';
 import { initializeRevisionAuthorship, RevisionAuthorshipStore } from './revision-authorship.ts';
 import { initializeRevisionLifecycle, RevisionLifecycleStore } from './revision-lifecycle.ts';
 import type { RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
+import { initializeRevisionReviewers, RevisionReviewerStore } from './revision-reviewers.ts';
+import type { RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
 import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
 import type { WikiConduitMethod, WikiConduitReceipt } from '../shared/wiki-conduit.ts';
@@ -43,7 +45,7 @@ type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file' | 'paste';
 export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
-export interface StoreOptions { path?: string; revisionLifecycle?: Partial<RevisionLifecycleConfig> }
+export interface StoreOptions { path?: string; revisionLifecycle?: Partial<RevisionLifecycleConfig>; revisionReviewers?: Partial<RevisionReviewerConfig> }
 type JsonRow = { data: string };
 
 export function parseRevisionDependencyInput(input: unknown): RevisionDependencyInput {
@@ -166,6 +168,7 @@ export class Store {
   readonly revisionStack: RevisionStackStore;
   readonly revisionAuthorship: RevisionAuthorshipStore;
   readonly revisionLifecycle: RevisionLifecycleStore;
+  readonly revisionReviewers: RevisionReviewerStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -178,7 +181,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 26) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 27) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -431,8 +434,14 @@ export class Store {
       try { this.transaction(() => { initializeRevisionLifecycle(this.database); this.database.exec('PRAGMA user_version = 26'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 27) {
+      try { this.transaction(() => { initializeRevisionReviewers(this.database); this.database.exec('PRAGMA user_version = 27'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
-    this.revisionAuthorship = new RevisionAuthorshipStore(this.database, this.revisionLifecycle.config.closeOnAccept);
+    this.revisionReviewers = new RevisionReviewerStore(this.database, this.revisionLifecycle, options.revisionReviewers);
+    this.revisionLifecycle.connectReviewers(this.revisionReviewers);
+    this.revisionAuthorship = new RevisionAuthorshipStore(this.database, this.revisionLifecycle.config.closeOnAccept, (id, previous, author, actor, operationId) => this.revisionReviewers.authorChanged(id, previous, author, actor, operationId));
     this.revisionDependencies = new RevisionDependencyStore(this.database);
     this.revisionStack = new RevisionStackStore(this.database, this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
@@ -512,7 +521,7 @@ export class Store {
       metadata = rest;
     }
     if (kind === 'document') { const { location: _location, publication: _publication, ...rest } = value as WikiDocument; metadata = rest; }
-    if (kind === 'revision') { const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, ...rest } = value as Revision; metadata = rest; }
+    if (kind === 'revision') { const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, reviewerVersion: _reviewerVersion, ...rest } = value as Revision; metadata = rest; }
     const json = JSON.stringify(metadata);
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
     if (created.changes) { registerDefaultPolicy(this.database, value.id); if(kind==='document')this.wikiSearch?.ensureDocument(value.id); }
@@ -521,7 +530,7 @@ export class Store {
   }
   private hydrateRevision(value: Revision): Revision {
     const state = this.revisionAuthorship.state(value.id);
-    return { ...value, authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version };
+    return { ...value, authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version, reviewerVersion: this.revisionReviewers.state(value.id).version };
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -621,9 +630,9 @@ export class Store {
       if (!account) throw new HttpError(404, 'Active account not found.');
       const rows = this.database.prepare('SELECT revision_id FROM revision_authorship WHERE author_id = ? ORDER BY revision_id').all(fromId) as { revision_id: string }[];
       for (const row of rows) {
-        const { authorship, head } = this.revisionAuthorship.snapshot(row.revision_id);
+        const { authorship, head, reviewerVersion, lifecycleVersion } = this.revisionAuthorship.snapshot(row.revision_id);
         const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name = 'epoch'").get() as { value: number }).value;
-        this.revisionAuthorship.mutate(row.revision_id, { action: 'assign', authorId: toId, expectedAuthorVersion: authorship.version, expectedVersion: head.number, expectedVersionId: head.versionId, expectedContentHash: head.contentHash, expectedAccessEpoch: epoch, message: 'A terminal operator transferred local-only revision ownership to a workspace account.' }, attribution, { principalId: toId, displayName: account.display_name });
+        this.revisionAuthorship.mutate(row.revision_id, { action: 'assign', authorId: toId, expectedAuthorVersion: authorship.version, expectedVersion: head.number, expectedVersionId: head.versionId, expectedContentHash: head.contentHash, expectedAccessEpoch: epoch, expectedReviewerVersion: reviewerVersion, expectedLifecycleVersion: lifecycleVersion, message: 'A terminal operator transferred local-only revision ownership to a workspace account.' }, attribution, { principalId: toId, displayName: account.display_name });
       }
       return rows.length;
     });
@@ -1295,7 +1304,7 @@ export class Store {
     const version: RevisionVersion = { id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: [], docx: source, docxOperation: operation, message, contentHash: contentHash([], [], source), createdAt: new Date().toISOString(), attribution: actor };
     this.database.prepare('INSERT INTO versions(id,revision_id,number,data) VALUES(?,?,?,?)').run(version.id, revision.id, version.number, JSON.stringify(version));
     this.database.prepare('INSERT INTO revision_docx_packages(version_id,sha256,byte_size,data) VALUES(?,?,?,?)').run(version.id, source.sha256, source.bytes, bytes);
-    if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); }
+    if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); this.revisionReviewers.ensure(revision.id); }
     else this.revisionLifecycle.sourceUpdated(revision.id, actor);
     return version;
   }
@@ -1453,7 +1462,7 @@ export class Store {
   private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance, assets: RevisionAsset[] = []): RevisionVersion {
     const version: RevisionVersion = { ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), ...(assets.length ? { assets } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source, assets), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version));
-    if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); }
+    if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); this.revisionReviewers.ensure(revision.id); }
     else this.revisionLifecycle.sourceUpdated(revision.id, attribution);
     return version;
   }

@@ -31,6 +31,7 @@ import { wikiDocumentQuery } from './wiki-query.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 import { revisionLifecycleInput, type RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
+import { revisionReviewerInput, type RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -42,6 +43,7 @@ export interface AppOptions {
   basePath?: string;
   authMode?: AuthMode;
   revisionLifecycle?: RevisionLifecycleConfig;
+  revisionReviewers?: RevisionReviewerConfig;
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
@@ -143,9 +145,10 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
 export function createApp(options: AppOptions = {}): App {
   if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
   if (options.store && options.revisionLifecycle) throw new Error('Configure revisionLifecycle on the supplied Store, or let createApp create the Store.');
+  if (options.store && options.revisionReviewers) throw new Error('Configure revisionReviewers on the supplied Store, or let createApp create the Store.');
   const git = options.gitObserver ?? createGitObserver(options.gitRepositories ?? {});
   const basePath = normalizeBasePath(options.basePath ?? '/');
-  const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle });
+  const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle, revisionReviewers: options.revisionReviewers });
   let auth: Auth;
   try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
   catch (error) { if (!options.store) store.close(); throw error; }
@@ -281,6 +284,20 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const reviewers = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/reviewers$/.exec(path) : null;
+    if (reviewers) {
+      const id = reviewers[1]!;
+      store.read(() => { auth.revalidate(context, 'write'); access.require(id); });
+      if (!rawKey) throw new HttpError(400, 'Reviewer actions require an Idempotency-Key.');
+      let data;
+      try { data = revisionReviewerInput(input); } catch { throw new HttpError(400, 'Provide an exact reviewer action, message and current reviewer, lifecycle, author, source, access, configuration and evidence pins.'); }
+      const authorize = () => { auth.revalidate(context, 'write'); access.requireRevisionReviewerAction(id, data); };
+      store.read(authorize);
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionReviewers.mutate(id, data, actor, access.revisionReviewerTarget(id, data)) }), authorize, response => access.presentRevisionReviewer(id, data, response));
+    }
     const lifecycle = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/lifecycle$/.exec(path) : null;
     if (lifecycle) {
       const id = lifecycle[1]!;
@@ -682,6 +699,18 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const reviewers = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/reviewers(\/history)?$/.exec(path);
+          if (reviewers) {
+            const id = reviewers[1]!; access.require(id);
+            const allowed = reviewers[2] ? ['before', 'limit', 'expectedReviewerVersion'] : [];
+            for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid revision reviewer query.');
+            const parameter = (name: string): number | undefined => {
+              const raw = url.searchParams.get(name); if (raw === null) return undefined;
+              if (!(name === 'expectedReviewerVersion' ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(raw) || !Number.isSafeInteger(Number(raw))) throw new HttpError(400, 'Provide a valid reviewer history cursor and limit.');
+              return Number(raw);
+            };
+            send(res, 200, reviewers[2] ? access.revisionReviewerHistory(id, { before: parameter('before'), limit: parameter('limit'), expectedReviewerVersion: parameter('expectedReviewerVersion') }) : access.revisionReviewers(id)); return;
+          }
           const lifecycle = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/lifecycle(\/history)?$/.exec(path);
           if (lifecycle) {
             const id = lifecycle[1]!; access.require(id);

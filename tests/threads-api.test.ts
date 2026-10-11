@@ -113,7 +113,7 @@ test('thread replies require interact and write scope, resolution requires edit,
     const authorship = (await app.request<RevisionAuthorshipSnapshot>('alice', `${path}/authorship`)).body;
     assert.equal((await app.request('alice', `${path}/authorship`, 'POST', {
       action: 'assign', authorId: app.bob.id, message: 'Hand over responsibility for this discussion.',
-      expectedAuthorVersion: authorship.authorship.version, expectedVersion: authorship.head.number,
+      expectedAuthorVersion: authorship.authorship.version, expectedReviewerVersion: authorship.reviewerVersion, expectedLifecycleVersion: authorship.lifecycleVersion, expectedVersion: authorship.head.number,
       expectedVersionId: authorship.head.versionId, expectedContentHash: authorship.head.contentHash,
       expectedAccessEpoch: authorship.accessEpoch,
     }, 'handoff-before-thread-revocation')).status, 200);

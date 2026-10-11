@@ -77,8 +77,11 @@ test('a source viewer can append Git provenance to an editable review without ch
     const saved = await app.request<RevisionDetail>(route(id), 'POST', input(old), 'alice', 'append'); assert.equal(saved.status, 201, JSON.stringify(saved.body));
     const detail = saved.body; const imported = detail.versions[1]!;
     assert.equal(detail.revision.currentVersion, 2); assert.equal(detail.revision.status, 'needs_review');
-    const stable = ({ currentVersion: _version, status: _status, updatedAt: _updated, lifecycleVersion: _lifecycle, ...metadata }: RevisionDetail['revision']) => metadata;
+    const stable = ({ currentVersion: _version, status: _status, updatedAt: _updated, lifecycleVersion: _lifecycle, reviewerVersion: _reviewers, ...metadata }: RevisionDetail['revision']) => metadata;
     assert.equal(detail.revision.lifecycleVersion, old.revision.lifecycleVersion! + 1); assert.equal(app.store.revisionLifecycle.history(id).transactions[0]!.action, 'source_updated');
+    assert.equal(detail.revision.reviewerVersion, old.revision.reviewerVersion! + 1);
+    assert.equal(app.store.revisionReviewers.state(id).acceptance, null);
+    assert.equal(app.store.revisionReviewers.history(id).transactions[0]!.action, 'source_updated');
     assert.deepEqual(stable(detail.revision), stable(old.revision)); assert.deepEqual(imported.files, source); assert.equal(imported.contentHash, contentHash(source)); assert.deepEqual(imported.gitSource, snapshot().provenance);
     assert.equal(imported.attribution?.principalId, app.alice.id); assert.equal(imported.message, input(old).message); assert.equal(detail.activity[0]?.attribution?.principalId, app.alice.id);
     for (const table of ['comments', 'review_threads', 'thread_events', 'suggestion_applications', 'reviews', 'object_policies', 'policy_meta']) assert.deepEqual(app.rows(table), before[table], table);

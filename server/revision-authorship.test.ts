@@ -18,7 +18,7 @@ const bob: ActorAttribution = { principalId: 'bob', displayName: 'Bob', credenti
 const ref = (actor: ActorAttribution): RevisionAuthor => ({ principalId: actor.principalId, displayName: actor.displayName });
 const epoch = (store: Store) => store.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get()!.value as number;
 function request(store: Store, id: string, action: 'assign' | 'commandeer' = 'assign', authorId = 'bob', message = 'Handoff\r\nmessage  '): RevisionAuthorInput {
-  const snapshot = store.revisionAuthorship.snapshot(id), pins = { expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: epoch(store), message };
+  const snapshot = store.revisionAuthorship.snapshot(id), pins = { expectedReviewerVersion: snapshot.reviewerVersion, expectedLifecycleVersion: snapshot.lifecycleVersion, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: epoch(store), message };
   return action === 'assign' ? { action, authorId, ...pins } : { action, ...pins };
 }
 function create(store: Store, actor: ActorAttribution | undefined = alice, kind: 'code' | 'paper' | 'document' = 'paper') {
@@ -49,7 +49,7 @@ test('new code, paper and document authorship starts at version zero without fab
   } finally { store.close(); }
 });
 
-test('assign and commandeer change only ownership sidecars and the access epoch, preserving content, acceptance and provenance', () => {
+test('assign and commandeer update ownership and reviewer membership while preserving native evidence acceptance and source provenance', () => {
   const store = new Store({ path: ':memory:' }); try {
     const detail = create(store), id = detail.revision.id;
     store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Preserved evidence', findings: [] }, alice);
@@ -60,7 +60,8 @@ test('assign and commandeer change only ownership sidecars and the access epoch,
     assert.equal(receipt.transaction.authorVersion, 1); assert.deepEqual(receipt.transaction.previousAuthor, ref(alice)); assert.deepEqual(receipt.transaction.author, ref(bob));
     assert.equal(receipt.inputSha256, revisionAuthorInputHash(input)); assert.deepEqual(store.revisionAuthorship.operation(receipt.operationId).receipt, receipt);
     assert.equal(store.revisionAuthorship.operationRevisionId(receipt.operationId), id);
-    const after = snapshot(store.database, true); delete before.rows.policy_meta; delete after.rows.policy_meta; assert.deepEqual(after, before);
+    const after = snapshot(store.database, true); for (const table of ['policy_meta', 'revision_reviewers', 'revision_reviewer_transactions']) { delete before.rows[table]; delete after.rows[table]; } assert.deepEqual(after, before);
+    assert.deepEqual(store.revisionReviewers.state(id).members.map(member => [member.principalId, member.status]), [['alice', 'added']]);
     const projected = store.detail(id).revision; assert.equal(projected.authorId, 'bob'); assert.equal(projected.authorVersion, 1); assert.equal(projected.status, 'accepted');
     assert.equal(store.state({ configured: false, model: null, localConfigured: false, localModel: null }).revisions.find(row => row.id === id)!.authorId, 'bob');
     const reclaim = store.revisionAuthorship.mutate(id, request(store, id, 'commandeer'), alice);
@@ -110,7 +111,7 @@ test('close-on-accept prohibits fresh commandeering but preserves assignments, a
     assert.deepEqual(store.revisionAuthorship.operation(receipt.operationId).receipt, receipt);
     store.revisionAuthorship.mutate(id, request(store, id, 'assign', alice.principalId), bob, ref(alice));
     assert.equal(store.revisionAuthorship.state(id).author?.principalId, alice.principalId);
-    const openConfig = new RevisionAuthorshipStore(store.database);
+    const openConfig = new RevisionAuthorshipStore(store.database, false, (id, previous, author, actor, operationId) => store.revisionReviewers.authorChanged(id, previous, author, actor, operationId));
     assert.equal(openConfig.snapshot(id).closeOnAccept, false);
     openConfig.mutate(id, request(store, id, 'commandeer'), bob);
     const abandoned = create(store).revision.id; lifecycleAction(store, abandoned, 'abandon', alice);
@@ -169,6 +170,24 @@ test('canonical operations reject swapped, forged and incomplete historical rece
   } finally { store.close(); }
 });
 
+test('modern authorship receipts bind reviewer and lifecycle pins even when forged request hashes are internally consistent', () => {
+  const store = new Store({ path: ':memory:' }); try {
+    const id = create(store).revision.id, receipt = store.revisionAuthorship.mutate(id, request(store, id), alice, ref(bob));
+    const original = store.revisionAuthorship.operation(receipt.operationId);
+    const effect = store.database.prepare("SELECT version,before_lifecycle_version FROM revision_reviewer_transactions WHERE cause_id=? AND json_extract(data,'$.action')='author_changed'").get(receipt.operationId)!;
+    assert.equal(effect.version, original.input.expectedReviewerVersion! + 1); assert.equal(effect.before_lifecycle_version, original.input.expectedLifecycleVersion);
+    store.database.exec('DROP TRIGGER revision_author_operations_no_update');
+    for (const pin of ['expectedReviewerVersion', 'expectedLifecycleVersion'] as const) {
+      const input = { ...original.input, [pin]: original.input[pin]! + 1 }, inputSha256 = revisionAuthorInputHash(input);
+      const forged = { ...original, input, inputSha256, receipt: { ...original.receipt, inputSha256 } };
+      store.database.prepare('UPDATE revision_author_operations SET input_sha256=?,data=? WHERE id=?').run(inputSha256, JSON.stringify(forged), receipt.operationId);
+      assert.throws(() => store.revisionAuthorship.operation(receipt.operationId), { code: 'REVISION_AUTHOR_INVALID_RECEIPT' }, `${pin} must match immutable side-effect evidence`);
+    }
+    store.database.prepare('UPDATE revision_author_operations SET input_sha256=?,data=? WHERE id=?').run(original.inputSha256, JSON.stringify(original), receipt.operationId);
+    assert.deepEqual(store.revisionAuthorship.operation(receipt.operationId), original);
+  } finally { store.close(); }
+});
+
 test('schema25 preserves every schema24 row and schema definition, establishes trustworthy baselines, and reopens without changes', () => {
   const directory = mkdtempSync(join(tmpdir(), 'revision-author-migration-')), path = join(directory, 'workspace.sqlite'); let store = new Store({ path });
   try {
@@ -181,7 +200,7 @@ test('schema25 preserves every schema24 row and schema definition, establishes t
     assert.equal(store.database.prepare("SELECT json_type(data,'$.attribution') AS type FROM versions WHERE revision_id=? AND number=1").get(encoded)!.type, 'text');
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('historic', 'exact', 201, '{"saved":"bytes"}', '2026-01-01T00:00:00Z');
     oldSchema(store); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 26); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.deepEqual(store.revisionAuthorship.state(id).author, ref(alice)); assert.equal(store.revisionAuthorship.state(id).version, 0);
@@ -200,7 +219,7 @@ test('schema25 collision rolls back partial schema and version updates, allowing
     create(store); oldSchema(store); store.database.exec("CREATE TABLE revision_author_operations(operator_note TEXT); INSERT INTO revision_author_operations VALUES('Retain operator data')");
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|no such column/);
     db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 24); assert.deepEqual(snapshot(db), before);
-    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 26);
+    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 27);
   } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

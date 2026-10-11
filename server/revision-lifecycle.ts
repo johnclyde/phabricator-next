@@ -7,6 +7,8 @@ import { isRevisionAuthor, isRevisionAuthorHead, isRevisionAuthorTransaction } f
 import { isRevisionId } from '../shared/revision-dependencies.ts';
 import { RevisionAuthorshipStore } from './revision-authorship.ts';
 import { HttpError, object } from './validation.ts';
+import type { RevisionReviewerStore, RevisionReviewerLifecycleProof } from './revision-reviewers.ts';
+import { revisionReviewerSummary } from '../shared/revision-reviewers.ts';
 import { DEFAULT_REVISION_LIFECYCLE_CONFIG, revisionLifecycleInput, revisionLifecycleActions, isRevisionLifecycleState, isRevisionLifecycleTransaction, isRevisionLifecycleConfig, isRevisionLifecycleEvidence, validRevisionLifecycleResult } from '../shared/revision-lifecycle.ts';
 import type { RevisionLifecycleState, RevisionLifecycleConfig, RevisionLifecycleInput, RevisionLifecycleTransaction, RevisionLifecycleReceipt, RevisionLifecycleSnapshot, RevisionLifecycleHistory } from '../shared/revision-lifecycle.ts';
 
@@ -16,6 +18,7 @@ export interface RevisionLifecycleOperation {
   authorship: RevisionLifecycleSnapshot['authorship']; config: RevisionLifecycleConfig;
   evidence: RevisionLifecycleSnapshot['evidence']; reviewProofs: { id: string; sha256: string }[];
   receipt: RevisionLifecycleReceipt;
+  reviewers?: RevisionReviewerLifecycleProof;
 }
 type Snapshot = Omit<RevisionLifecycleSnapshot, 'access' | 'accessEpoch'>;
 
@@ -76,12 +79,22 @@ export function revisionLifecycleConfigHash(config: RevisionLifecycleConfig): st
 /** Caller authorizes current View/Edit; this storage boundary also checks the
  * current author role, source and lifecycle pins under the same writer lock. */
 export class RevisionLifecycleStore {
+  private reviewers?: RevisionReviewerStore;
   readonly config: RevisionLifecycleConfig;
   readonly configId: string;
   constructor(private readonly database: DatabaseSync, configuration: Partial<RevisionLifecycleConfig> = {}) {
     const config = { ...DEFAULT_REVISION_LIFECYCLE_CONFIG, ...configuration };
     if (Object.keys(config).length !== 4 || Object.values(config).some(value => typeof value !== 'boolean')) throw new Error('Invalid revision lifecycle configuration.');
     this.config = Object.freeze(config); this.configId = revisionLifecycleConfigHash(config);
+  }
+  connectReviewers(reviewers: RevisionReviewerStore): void { this.reviewers = reviewers; }
+  reviewEvidence(id: string, source: RevisionAuthorHead, ids?: string[]) { return this.evidence(id, source, ids); }
+  historicalState(id: string, version: number): RevisionLifecycleState {
+    if (!natural(version)) throw invalid();
+    if (version > 0) return this.transactionAt(id, version).after;
+    const first = this.database.prepare('SELECT version FROM revision_lifecycle_transactions WHERE revision_id=? ORDER BY version LIMIT 1').get(id) as { version: number } | undefined;
+    if (first) { if (first.version !== 1) throw invalid(); return this.transactionAt(id, 1).before; }
+    const state = this.readState(id); if (state.version !== 0) throw invalid(); return state;
   }
   private metadata(id: string): { status: RevisionStatus; currentVersion: number } {
     if (!isRevisionId(id)) throw new HttpError(404, 'Revision lifecycle is unavailable.', 'REVISION_LIFECYCLE_UNAVAILABLE');
@@ -136,7 +149,8 @@ export class RevisionLifecycleStore {
     return scope(this.database, () => {
       const lifecycle = this.readState(id), head = this.head(id), authored = new RevisionAuthorshipStore(this.database).snapshot(id);
       if (!isDeepStrictEqual(authored.head, head) || head.number !== this.metadata(id).currentVersion) throw invalid();
-      const core = { lifecycle, head, authorship: { version: authored.authorship.version, author: authored.authorship.author }, evidence: this.evidence(id, head).evidence, config: this.config, configId: this.configId };
+      const reviewers = this.reviewers?.summary(id, head) ?? { version: 0, accepting: 0, rejecting: 0, olderRejecting: 0, blocking: 0, acceptance: null };
+      const core = { lifecycle, head, authorship: { version: authored.authorship.version, author: authored.authorship.author }, evidence: this.evidence(id, head).evidence, config: this.config, configId: this.configId, reviewers };
       return { ...core, actions: revisionLifecycleActions(core, principalId) };
     });
   }
@@ -164,7 +178,7 @@ export class RevisionLifecycleStore {
     this.database.prepare('UPDATE revision_lifecycle SET version=?,data=? WHERE revision_id=?').run(after.version, JSON.stringify(after), before.revisionId);
     this.database.prepare("UPDATE entities SET data=json_set(data,'$.status',?,'$.updatedAt',?) WHERE id=? AND kind='revision'").run(after.status, after.updatedAt, before.revisionId);
   }
-  private transition(snapshot: Omit<Snapshot, 'actions'>, input: RevisionLifecycleInput, principalId: string): RevisionLifecycleState {
+  private transition(snapshot: Omit<Snapshot, 'actions' | 'reviewers'> & { reviewers?: Snapshot['reviewers'] }, input: RevisionLifecycleInput, principalId: string): RevisionLifecycleState {
     const action = revisionLifecycleActions(snapshot, principalId).find(item => item.action === input.action);
     if (!action?.available || !action.targetStatus) throw new HttpError(409, action?.reason ?? 'This lifecycle action is unavailable.', 'REVISION_LIFECYCLE_ACTION_UNAVAILABLE');
     const before = snapshot.lifecycle;
@@ -178,14 +192,17 @@ export class RevisionLifecycleStore {
     const request = parse(input); if (!attribution(actor)) throw new HttpError(400, 'Authenticated lifecycle attribution is required.');
     return scope(this.database, () => {
       const snapshot = this.snapshot(id, actor.principalId), { lifecycle, head, authorship } = snapshot;
+      if (request.expectedReviewerVersion === undefined) throw new HttpError(400, 'Reload lifecycle to provide the exact reviewer version.', 'REVISION_LIFECYCLE_INVALID_INPUT');
       const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get() as { value: number }).value;
       if (!natural(epoch)) throw invalid();
       if (epoch !== request.expectedAccessEpoch) throw new HttpError(409, 'Access changed. Reload before continuing.', 'ACCESS_EPOCH_CHANGED');
-      if (lifecycle.version !== request.expectedLifecycleVersion || authorship.version !== request.expectedAuthorVersion || head.number !== request.expectedVersion || head.versionId !== request.expectedVersionId || head.contentHash !== request.expectedContentHash || snapshot.configId !== request.expectedConfigId || snapshot.evidence.sha256 !== request.expectedEvidenceSha256) throw changed();
-      const after = this.transition(snapshot, request, actor.principalId), operationId = randomUUID(), inputSha256 = revisionLifecycleInputHash(request);
-      const transaction: RevisionLifecycleTransaction = { id: randomUUID(), revisionId: id, operationId, lifecycleVersion: after.version, action: request.action, fromStatus: lifecycle.status, toStatus: after.status, beforeHead: head, head, message: request.message, attribution: { ...actor }, createdAt: after.updatedAt!, evidenceSha256: snapshot.evidence.sha256, reviewIds: [...snapshot.evidence.reviewIds] };
+      if (snapshot.reviewers.version !== request.expectedReviewerVersion || lifecycle.version !== request.expectedLifecycleVersion || authorship.version !== request.expectedAuthorVersion || head.number !== request.expectedVersion || head.versionId !== request.expectedVersionId || head.contentHash !== request.expectedContentHash || snapshot.configId !== request.expectedConfigId || snapshot.evidence.sha256 !== request.expectedEvidenceSha256) throw changed();
+      const proposed = this.transition(snapshot, request, actor.principalId), operationId = randomUUID(), transactionId = randomUUID(), inputSha256 = revisionLifecycleInputHash(request);
+      if (!this.reviewers) throw invalid();
+      const reviewResult = this.reviewers.lifecycleChanged(id, request, snapshot, proposed, transactionId, operationId, actor), after = reviewResult.lifecycle;
+      const transaction: RevisionLifecycleTransaction = { id: transactionId, revisionId: id, operationId, lifecycleVersion: after.version, action: request.action, fromStatus: lifecycle.status, toStatus: after.status, beforeHead: head, head, message: request.message, attribution: { ...actor }, createdAt: after.updatedAt!, evidenceSha256: snapshot.evidence.sha256, reviewIds: [...snapshot.evidence.reviewIds] };
       const receipt: RevisionLifecycleReceipt = { revisionId: id, operationId, inputSha256, transaction, accessEpoch: epoch };
-      const operation: RevisionLifecycleOperation = { id: operationId, revisionId: id, input: request, inputSha256, attribution: { ...actor }, before: lifecycle, after, authorship, config: this.config, evidence: snapshot.evidence, reviewProofs: this.evidence(id, head).proofs, receipt };
+      const operation: RevisionLifecycleOperation = { id: operationId, revisionId: id, input: request, inputSha256, attribution: { ...actor }, before: lifecycle, after, authorship, config: this.config, evidence: snapshot.evidence, reviewProofs: this.evidence(id, head).proofs, receipt, reviewers: reviewResult.proof };
       this.database.prepare('INSERT INTO revision_lifecycle_operations(id,revision_id,input_sha256,data) VALUES(?,?,?,?)').run(operationId, id, inputSha256, JSON.stringify(operation));
       this.append(lifecycle, after, transaction); return receipt;
     }, true);
@@ -196,6 +213,7 @@ export class RevisionLifecycleStore {
       const before = this.readState(id), head = this.head(id), beforeHead = this.head(id, head.number - 1);
       if (head.number !== this.metadata(id).currentVersion || head.number < 2) throw invalid();
       const status = before.status === 'closed' ? 'closed' : before.status === 'draft' ? 'draft' : before.reviewStarted ? 'needs_review' : 'draft';
+      this.reviewers?.sourceUpdated(id, head, before.status, status, before.version + 1, actor);
       const after: RevisionLifecycleState = { ...before, version: before.version + 1, status, resumeAcceptanceHead: null, updatedAt: new Date().toISOString() }, evidence = this.evidence(id, head).evidence;
       const transaction: RevisionLifecycleTransaction = { id: randomUUID(), revisionId: id, operationId: null, lifecycleVersion: after.version, action: 'source_updated', fromStatus: before.status, toStatus: status, beforeHead, head, message: 'New immutable source version; previous acceptance no longer applies.', attribution: actor ? { ...actor } : null, createdAt: after.updatedAt!, evidenceSha256: evidence.sha256, reviewIds: evidence.reviewIds };
       this.append(before, after, transaction);
@@ -205,12 +223,22 @@ export class RevisionLifecycleStore {
     scope(this.database, () => {
       if (actor !== undefined && !attribution(actor)) throw new HttpError(400, 'Invalid review attribution.');
       const before = this.readState(id), head = this.head(id), evidence = this.evidence(id, head).evidence;
-      if (!evidence.errorCount || before.status !== 'accepted' && before.resumeAcceptanceHead === null) return;
+      if (!evidence.errorCount) return;
+      this.reviewers?.reviewError(id, head, before.status, before.status === 'accepted' ? 'changes_requested' : before.status, before.status === 'accepted' || before.resumeAcceptanceHead !== null ? before.version + 1 : before.version, before.version, actor);
+      if (before.status !== 'accepted' && before.resumeAcceptanceHead === null) return;
       const status = before.status === 'accepted' ? 'changes_requested' : before.status;
       const after: RevisionLifecycleState = { ...before, version: before.version + 1, status, resumeAcceptanceHead: null, updatedAt: new Date().toISOString() };
       const transaction: RevisionLifecycleTransaction = { id: randomUUID(), revisionId: id, operationId: null, lifecycleVersion: after.version, action: 'review_invalidated', fromStatus: before.status, toStatus: status, beforeHead: head, head, message: 'Current-version review errors invalidated acceptance.', attribution: actor ? { ...actor } : null, createdAt: after.updatedAt!, evidenceSha256: evidence.sha256, reviewIds: evidence.reviewIds };
       this.append(before, after, transaction);
     }, true);
+  }
+  reviewerReassessed(id: string, status: RevisionStatus, actor: ActorAttribution, clearResume: boolean, now: string): RevisionLifecycleState {
+    const before = this.readState(id);
+    if (before.status === status && (!clearResume || before.resumeAcceptanceHead === null)) return before;
+    const source = this.head(id), evidence = this.evidence(id, source).evidence;
+    const after: RevisionLifecycleState = { ...before, version: before.version + 1, status, ...(clearResume ? { resumeAcceptanceHead: null } : {}), updatedAt: now };
+    const transaction: RevisionLifecycleTransaction = { id: randomUUID(), revisionId: id, operationId: null, lifecycleVersion: after.version, action: 'reviewer_reassessed', fromStatus: before.status, toStatus: after.status, beforeHead: source, head: source, message: 'Reviewer state reassessed this exact source version.', attribution: { ...actor }, createdAt: now, evidenceSha256: evidence.sha256, reviewIds: evidence.reviewIds };
+    if (!isRevisionLifecycleTransaction(transaction, id)) throw invalid(); this.append(before, after, transaction); return after;
   }
   operationRevisionId(id: string): string {
     if (!uuid(id)) throw invalid(); const row = this.database.prepare('SELECT revision_id FROM revision_lifecycle_operations WHERE id=?').get(id) as { revision_id: string } | undefined;
@@ -220,7 +248,7 @@ export class RevisionLifecycleStore {
     return scope(this.database, () => {
       try {
         const revisionId = this.operationRevisionId(id), row = this.database.prepare('SELECT input_sha256,data FROM revision_lifecycle_operations WHERE id=?').get(id) as { input_sha256: string; data: string }, operation = decode<RevisionLifecycleOperation>(row.data);
-        if (!operation || Object.keys(operation).sort().join(',') !== ['id', 'revisionId', 'input', 'inputSha256', 'attribution', 'before', 'after', 'authorship', 'config', 'evidence', 'reviewProofs', 'receipt'].sort().join(',') || operation.id !== id || operation.revisionId !== revisionId || !attribution(operation.attribution) || !isDeepStrictEqual(parse(operation.input), operation.input) || operation.inputSha256 !== row.input_sha256 || operation.inputSha256 !== revisionLifecycleInputHash(operation.input)) throw invalid();
+        if (!operation || Object.keys(operation).sort().join(',') !== ['id', 'revisionId', 'input', 'inputSha256', 'attribution', 'before', 'after', 'authorship', 'config', 'evidence', 'reviewProofs', 'receipt', ...(operation.reviewers === undefined ? [] : ['reviewers'])].sort().join(',') || operation.id !== id || operation.revisionId !== revisionId || !attribution(operation.attribution) || !isDeepStrictEqual(parse(operation.input), operation.input) || operation.inputSha256 !== row.input_sha256 || operation.inputSha256 !== revisionLifecycleInputHash(operation.input)) throw invalid();
         if (!isRevisionLifecycleConfig(operation.config) || !isRevisionLifecycleEvidence(operation.evidence) || !validRevisionLifecycleResult(operation.receipt, revisionId, operation.input, operation.attribution.principalId)
           || !operation.authorship || Object.keys(operation.authorship).sort().join(',') !== 'author,version' || !natural(operation.authorship.version) || !(operation.authorship.author === null || isRevisionAuthor(operation.authorship.author))) throw invalid();
         const ownership = new RevisionAuthorshipStore(this.database).state(revisionId);
@@ -239,8 +267,17 @@ export class RevisionLifecycleStore {
         if (before.version > 0 && !isDeepStrictEqual(this.transactionAt(revisionId, before.version).after, before)) throw invalid();
         const evidence = this.evidence(revisionId, head, operation.evidence.reviewIds);
         if (!isDeepStrictEqual(evidence.evidence, operation.evidence) || !isDeepStrictEqual(evidence.proofs, operation.reviewProofs) || operation.evidence.sha256 !== operation.input.expectedEvidenceSha256 || transaction.evidenceSha256 !== operation.evidence.sha256 || !isDeepStrictEqual(transaction.reviewIds, operation.evidence.reviewIds)) throw invalid();
-        const proposed = this.transition({ lifecycle: before, head, authorship: operation.authorship, evidence: operation.evidence, config: operation.config, configId: operation.input.expectedConfigId }, operation.input, operation.attribution.principalId);
-        if (!isDeepStrictEqual({ ...proposed, updatedAt: after.updatedAt }, after)) throw invalid();
+        if (operation.reviewers === undefined) {
+          const baselineRow = this.database.prepare('SELECT data FROM revision_reviewer_baselines WHERE revision_id=?').get(revisionId) as { data: string } | undefined;
+          if (operation.input.expectedReviewerVersion !== undefined || !baselineRow || decode<{ lifecycleVersion: number }>(baselineRow.data).lifecycleVersion < after.version) throw invalid();
+          const proposed = this.transition({ lifecycle: before, head, authorship: operation.authorship, evidence: operation.evidence, config: operation.config, configId: operation.input.expectedConfigId }, operation.input, operation.attribution.principalId);
+          if (!isDeepStrictEqual({ ...proposed, updatedAt: after.updatedAt }, after)) throw invalid();
+        } else {
+          if (!this.reviewers || operation.input.expectedReviewerVersion !== operation.reviewers.before.version) throw invalid();
+          const snapshot = { lifecycle: before, head, authorship: operation.authorship, evidence: operation.evidence, config: operation.config, configId: operation.input.expectedConfigId, reviewers: revisionReviewerSummary(operation.reviewers.before, head) };
+          const proposed = { ...this.transition(snapshot, operation.input, operation.attribution.principalId), updatedAt: after.updatedAt };
+          this.reviewers.verifyLifecycleTransition(revisionId, id, operation.reviewers, operation.input, snapshot, proposed, transaction.id, operation.attribution, after);
+        }
         return operation;
       } catch { throw invalid(); }
     });

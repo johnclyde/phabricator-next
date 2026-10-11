@@ -14,6 +14,19 @@ test('author intents require exact concurrency and source pins without implicit 
   assert.throws(() => revisionAuthorInput({ ...input, message: undefined }));
 });
 
+test('modern authorship intents preserve reviewer and lifecycle pins without rewriting historical receipt input', () => {
+  const modern = { ...input, expectedReviewerVersion: 3, expectedLifecycleVersion: 4 };
+  assert.deepEqual(revisionAuthorInput(modern), modern);
+  assert.deepEqual(revisionAuthorInput(input), input);
+  for (const patch of [{ expectedReviewerVersion: -1 }, { expectedReviewerVersion: '3' }, { expectedLifecycleVersion: 1.5 }, { expectedLifecycleVersion: null }]) {
+    assert.throws(() => revisionAuthorInput({ ...modern, ...patch }));
+  }
+  const { expectedReviewerVersion: _reviewers, ...missingReviewers } = modern;
+  const { expectedLifecycleVersion: _lifecycle, ...missingLifecycle } = modern;
+  assert.throws(() => revisionAuthorInput(missingReviewers));
+  assert.throws(() => revisionAuthorInput(missingLifecycle));
+});
+
 test('ownership baseline is honest and known original attribution cannot masquerade as a prior transfer', () => {
   const baseline = { revisionId: 'P1', version: 0, author, originalAuthor: author, updatedAt: null };
   assert.ok(isRevisionAuthorship(baseline, 'P1')); assert.ok(isRevisionAuthorship({ ...baseline, author: null, originalAuthor: null }, 'P1'));

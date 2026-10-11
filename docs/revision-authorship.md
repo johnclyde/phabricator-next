@@ -25,12 +25,16 @@ Token scopes and enabled-account requirements still apply. The recipient need
 not already be able to read the revision, but ownership cannot bypass those
 source or Space restrictions. A handoff may remove the former author's access.
 
-Transfers pin the inspected ownership version, source version number, immutable
-source version ID, content hash and workspace access epoch. These are checked
+Transfers pin the inspected ownership, reviewer and lifecycle versions, source
+version number, immutable source version ID, content hash and workspace access
+epoch. These are checked
 under the database writer lock. A successful transfer increments the access
-epoch once. It leaves source bytes, source history, review evidence, acceptance,
-manual status, dependencies and entity timestamps unchanged. Stored hashes are
-source identities; this operation does not rehash manuscript contents.
+epoch once. It adds the previous author as a reviewer, removes the new author
+from the reviewer list and reassesses acceptance atomically. The handoff can
+change review status when the removed reviewer supplied the accepting decision.
+Source bytes, source history, recorded check/AI evidence and dependencies remain
+unchanged. Stored hashes are source identities; this operation does not rehash
+manuscript contents. See [reviewer rules](revision-reviewers.md).
 
 ## Drafts and exact recovery
 
@@ -57,7 +61,7 @@ qualify.
 ## API and CLI
 
 - `GET /api/revisions/:id/authorship` returns current and original authors,
-  ownership version, exact source head, status, close-on-accept configuration, access and access epoch.
+  ownership/reviewer/lifecycle versions, exact source head, status, close-on-accept configuration, access and access epoch.
 - `GET /api/revisions/:id/authorship/history` returns immutable transfers in
   descending ownership-version order. Optional `before`, `limit` and
   `expectedAuthorVersion` support stable paging (25 by default, at most 100).
@@ -71,6 +75,8 @@ qualify.
   "authorId": "recipient-principal-id",
   "message": "Handing off the manuscript",
   "expectedAuthorVersion": 0,
+  "expectedReviewerVersion": 0,
+  "expectedLifecycleVersion": 0,
   "expectedVersion": 1,
   "expectedVersionId": "exact-source-version-id",
   "expectedContentHash": "exact-lowercase-sha256",
@@ -78,9 +84,11 @@ qualify.
 }
 ```
 
-All fields are required, including a message (which may be empty and is limited
+Fresh requests require all fields, including a message (which may be empty and is limited
 to 10,000 characters). For `"action": "commandeer"`, omit `authorId`. Unknown
-fields and coerced numeric values are rejected.
+fields and coerced numeric values are rejected. Proven saved receipts from before
+reviewer support retain their original input without the two newer pins; new
+mutations cannot omit them.
 
 ```sh
 npm run arc -- revision-author P1
@@ -124,9 +132,10 @@ concurrency pins, explicit receipt recovery and stricter repository/File ceiling
 
 Upstream's [transaction editor](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/editor/DifferentialTransactionEditor.php)
 also removes the new author from reviewers, adds the former author and
-recalculates review state. Reviewer assignments are not implemented here;
-model/check evidence is not substituted for people in that workflow. This slice
-therefore preserves existing evidence and acceptance. Reviewer effects,
-notifications, profile handles and PHIDs/Conduit author edits remain explicit parity gaps.
+recalculates review state. These effects now apply to new handoffs in the
+[named-reviewer workflow](revision-reviewers.md); migration does not fabricate
+reviewer effects for older handoffs. Model/check evidence remains separate from
+personal decisions. Collective reviewers, notifications, profile handles and
+PHIDs/Conduit author edits remain explicit parity gaps.
 
 The [revision lifecycle](revision-lifecycle.md) now provides explicit author actions and operator close-on-accept semantics. Stack v3 binds lifecycle versions and this terminal-status configuration in its canonical identity.

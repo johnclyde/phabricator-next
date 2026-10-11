@@ -7,6 +7,7 @@ import { isRevisionId } from '../shared/revision-dependencies.ts';
 import { isRevisionAuthor, isRevisionAuthorHead, isRevisionAuthorTransaction, isRevisionAuthorship, revisionAuthorInput, validRevisionAuthorResult, REVISION_AUTHOR_LIMITS } from '../shared/revision-authorship.ts';
 import type { RevisionAuthor, RevisionAuthorHead, RevisionAuthorHistory, RevisionAuthorInput, RevisionAuthorReceipt, RevisionAuthorTransaction, RevisionAuthorship } from '../shared/revision-authorship.ts';
 import { HttpError, object } from './validation.ts';
+import { isRevisionReviewerState, isRevisionReviewerTransaction } from '../shared/revision-reviewers.ts';
 
 export interface RevisionAuthorOperation { id: string; revisionId: string; input: RevisionAuthorInput; inputSha256: string; attribution: ActorAttribution; receipt: RevisionAuthorReceipt }
 export interface RevisionAuthorHistoryQuery { before?: number; limit?: number; expectedAuthorVersion?: number }
@@ -74,7 +75,7 @@ export function initializeRevisionAuthorship(db: DatabaseSync): void {
 /** Storage boundary: the caller checks current revision authority and validates
  * an assignment target as an active workspace principal before calling mutate. */
 export class RevisionAuthorshipStore {
-  constructor(private readonly database: DatabaseSync, private readonly closeOnAccept = false) {}
+  constructor(private readonly database: DatabaseSync, private readonly closeOnAccept = false, private readonly reviewerChanged?: (id: string, previous: RevisionAuthor | null, author: RevisionAuthor, actor: ActorAttribution, operationId: string) => void) {}
   private requireRevision(id: string): void {
     if (!isRevisionId(id) || !this.database.prepare("SELECT 1 FROM entities WHERE id=? AND kind='revision'").get(id)) throw unavailable();
   }
@@ -110,12 +111,17 @@ export class RevisionAuthorshipStore {
     const head = { versionId: row.id, number: row.number, contentHash: row.content_hash };
     if (!isRevisionAuthorHead(head)) throw invalid(); return head;
   }
-  snapshot(id: string): { authorship: RevisionAuthorship; head: RevisionAuthorHead; status: RevisionStatus; closeOnAccept: boolean } {
+  snapshot(id: string): { authorship: RevisionAuthorship; head: RevisionAuthorHead; status: RevisionStatus; closeOnAccept: boolean; reviewerVersion: number; lifecycleVersion: number } {
     return scope(this.database, () => {
       const authorship = this.readState(id), head = this.versionHead(id);
       const row = this.database.prepare("SELECT json_extract(data,'$.id') AS id,json_extract(data,'$.status') AS status,json_extract(data,'$.currentVersion') AS version,json_type(data,'$.currentVersion') AS version_type FROM entities WHERE id=? AND kind='revision'").get(id) as Record<string, unknown>;
       if (row.id !== id || !isRevisionStatus(row.status) || row.version !== head.number || !['integer', 'real'].includes(String(row.version_type))) throw invalid();
-      return { authorship, head, status: row.status as RevisionStatus, closeOnAccept: this.closeOnAccept };
+      const reviewerTable = this.database.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='revision_reviewers'").get();
+      const reviewerVersion = reviewerTable ? (this.database.prepare('SELECT version FROM revision_reviewers WHERE revision_id=?').get(id) as { version: number } | undefined)?.version : 0;
+      const lifecycleTable = this.database.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='revision_lifecycle'").get();
+      const lifecycleVersion = lifecycleTable ? (this.database.prepare('SELECT version FROM revision_lifecycle WHERE revision_id=?').get(id) as { version: number } | undefined)?.version : 0;
+      if (!natural(reviewerVersion) || !natural(lifecycleVersion)) throw invalid();
+      return { authorship, head, status: row.status as RevisionStatus, closeOnAccept: this.closeOnAccept, reviewerVersion, lifecycleVersion };
     });
   }
   private transactionAt(id: string, version: number): RevisionAuthorTransaction {
@@ -140,11 +146,12 @@ export class RevisionAuthorshipStore {
     const author = request.action === 'commandeer' ? { principalId: actor.principalId, displayName: actor.displayName } : targetRef;
     if (!isRevisionAuthor(author) || request.action === 'assign' && author.principalId !== request.authorId) throw new HttpError(400, 'Choose a valid workspace author.');
     return scope(this.database, () => {
-      const { authorship, head, status } = this.snapshot(id);
+      const { authorship, head, status, reviewerVersion, lifecycleVersion } = this.snapshot(id);
+      if (request.expectedReviewerVersion === undefined || request.expectedLifecycleVersion === undefined) throw new HttpError(400, 'Reload authorship to provide current reviewer and lifecycle versions.');
       const epoch = this.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get() as { value: number } | undefined;
       if (!epoch || !natural(epoch.value) || !Number.isSafeInteger(epoch.value + 1)) throw invalid();
       if (epoch.value !== request.expectedAccessEpoch) throw new HttpError(409, 'Access changed. Reload before transferring this revision.', 'ACCESS_EPOCH_CHANGED');
-      if (authorship.version !== request.expectedAuthorVersion || head.number !== request.expectedVersion || head.versionId !== request.expectedVersionId || head.contentHash !== request.expectedContentHash) throw changed();
+      if (reviewerVersion !== request.expectedReviewerVersion || lifecycleVersion !== request.expectedLifecycleVersion || authorship.version !== request.expectedAuthorVersion || head.number !== request.expectedVersion || head.versionId !== request.expectedVersionId || head.contentHash !== request.expectedContentHash) throw changed();
       if (request.action === 'commandeer' && (status === 'closed' || this.closeOnAccept && status === 'accepted')) throw new HttpError(409, 'Closed revisions cannot be commandeered.', 'REVISION_AUTHOR_CLOSED');
       if (authorship.author?.principalId === author.principalId) throw new HttpError(409, 'This principal is already the revision author.', 'REVISION_AUTHOR_NO_EFFECT');
       if (!Number.isSafeInteger(authorship.version + 1)) throw new HttpError(422, 'The revision author history reached its version limit.', 'REVISION_AUTHOR_LIMIT');
@@ -156,6 +163,8 @@ export class RevisionAuthorshipStore {
       this.database.prepare('INSERT INTO revision_author_transactions(id,revision_id,author_version,operation_id,data) VALUES(?,?,?,?,?)').run(transaction.id, id, transaction.authorVersion, operationId, JSON.stringify(transaction));
       const next: RevisionAuthorship = { revisionId: id, version: transaction.authorVersion, author: transaction.author, originalAuthor: authorship.originalAuthor, updatedAt: now };
       this.database.prepare('UPDATE revision_authorship SET version=?,author_id=?,data=? WHERE revision_id=?').run(next.version, author.principalId, JSON.stringify(next), id);
+      if (!this.reviewerChanged) throw invalid();
+      this.reviewerChanged(id, authorship.author, author, actor, operationId);
       this.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run();
       return receipt;
     }, true);
@@ -174,6 +183,18 @@ export class RevisionAuthorshipStore {
         if (!value || Object.keys(value).length !== 6 || value.id !== id || value.revisionId !== revisionId || !attribution(value.attribution) || !isDeepStrictEqual(parse(value.input), value.input) || value.inputSha256 !== row.input_sha256 || value.inputSha256 !== revisionAuthorInputHash(value.input)
           || !validRevisionAuthorResult(value.receipt, revisionId, value.input, value.attribution.principalId) || value.receipt.operationId !== id || value.receipt.inputSha256 !== value.inputSha256 || value.receipt.accessEpoch !== value.input.expectedAccessEpoch + 1) throw invalid();
         const transaction = this.transactionAt(revisionId, value.input.expectedAuthorVersion + 1);
+        if (value.input.expectedReviewerVersion === undefined) {
+          const baseline = this.database.prepare('SELECT data FROM revision_reviewer_baselines WHERE revision_id=?').get(revisionId) as { data: string } | undefined;
+          if (!baseline || decode<{ authorVersion: number }>(baseline.data).authorVersion < transaction.authorVersion) throw invalid();
+        } else {
+          const effects = this.database.prepare("SELECT version,before_lifecycle_version,data,before_state,after_state FROM revision_reviewer_transactions WHERE revision_id=? AND cause_id=? AND json_extract(data,'$.action')='author_changed' LIMIT 2").all(revisionId, id) as { version: number; before_lifecycle_version: number; data: string; before_state: string; after_state: string }[];
+          if (effects.length !== 1) throw invalid(); const effect = effects[0]!, review = decode<unknown>(effect.data), before = decode<unknown>(effect.before_state), after = decode<unknown>(effect.after_state);
+          if (!isRevisionReviewerTransaction(review, revisionId) || !isRevisionReviewerState(before, revisionId) || !isRevisionReviewerState(after, revisionId) || effect.before_lifecycle_version !== value.input.expectedLifecycleVersion || effect.version !== value.input.expectedReviewerVersion + 1 || before.version !== value.input.expectedReviewerVersion || after.version !== effect.version || review.reviewerVersion !== effect.version || !isDeepStrictEqual(before.members, review.before) || !isDeepStrictEqual(after.members, review.after) || !isDeepStrictEqual(before.acceptance, review.beforeAcceptance) || !isDeepStrictEqual(after.acceptance, review.acceptance) || !isDeepStrictEqual(review.head, transaction.head) || !isDeepStrictEqual(review.attribution, value.attribution)) throw invalid();
+          const members = before.members.filter(member => member.principalId !== transaction.author.principalId);
+          if (transaction.previousAuthor && !members.some(member => member.principalId === transaction.previousAuthor!.principalId)) members.push({ ...transaction.previousAuthor, status: 'added', decision: null });
+          members.sort((a, b) => a.principalId < b.principalId ? -1 : a.principalId > b.principalId ? 1 : 0);
+          if (!isDeepStrictEqual(members, after.members)) throw invalid();
+        }
         const previous = transaction.authorVersion === 1 ? originalAuthor(this.database, revisionId) : this.transactionAt(revisionId, transaction.authorVersion - 1).author;
         if (!isDeepStrictEqual(value.receipt.transaction, transaction) || !isDeepStrictEqual(transaction.attribution, value.attribution) || !isDeepStrictEqual(transaction.previousAuthor, previous)
           || !isDeepStrictEqual(transaction.head, this.versionHead(revisionId, transaction.head.versionId))) throw invalid();

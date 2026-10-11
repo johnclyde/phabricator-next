@@ -22,6 +22,7 @@ import { docxDiscussionCommand } from './docx-discussion';
 import { revisionDependenciesCommand } from './revision-dependencies';
 import { revisionAuthorshipCommand } from './revision-authorship';
 import { revisionLifecycleCommand } from './revision-lifecycle';
+import { revisionReviewersCommand } from './revision-reviewers';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
@@ -56,6 +57,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- revision-lifecycle P2
   npm run arc -- revision-lifecycle-history P2 [--before N] [--limit N] [--lifecycle-version N]
   npm run arc -- edit-revision-lifecycle P2 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- revision-reviewers P2
+  npm run arc -- revision-reviewer-history P2 [--before N] [--limit N] [--reviewer-version N]
+  npm run arc -- edit-revision-reviewers P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- revision-author P2
   npm run arc -- revision-author-history P2 [--before N] [--limit N] [--author-version N]
   npm run arc -- edit-revision-author P2 --intent REQUEST.json [--request-id KEY]
@@ -245,7 +249,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
-      draft: { type: 'boolean' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' },
+      draft: { type: 'boolean' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -303,6 +307,7 @@ async function main() {
   if (await revisionDependenciesCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionAuthorshipCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionLifecycleCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionReviewersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

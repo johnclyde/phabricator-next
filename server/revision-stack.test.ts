@@ -9,6 +9,7 @@ import type { ActorAttribution, Revision, RevisionVersion } from '../shared/type
 import { canonicalRevisionStack, REVISION_STACK_LIMITS } from '../shared/revision-stack.ts';
 import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
 import { initializeRevisionLifecycle, RevisionLifecycleStore } from './revision-lifecycle.ts';
+import { initializeRevisionReviewers, RevisionReviewerStore } from './revision-reviewers.ts';
 import { RevisionStackStore } from './revision-stack.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
 import { initializeRevisionAuthorship, RevisionAuthorshipStore } from './revision-authorship.ts';
@@ -22,12 +23,16 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA user_version=24;
     CREATE TABLE entities(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)));
     CREATE TABLE policy_meta(name TEXT PRIMARY KEY,value INTEGER NOT NULL); INSERT INTO policy_meta VALUES('epoch',1);
-    CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),UNIQUE(revision_id,number));`);
+    CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),UNIQUE(revision_id,number));
+    CREATE TABLE reviews(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),version_id TEXT NOT NULL REFERENCES versions(id),data TEXT NOT NULL CHECK(json_valid(data)));`);
   initializeRevisionDependencies(db);
   initializeRevisionAuthorship(db);
   initializeRevisionLifecycle(db);
+  initializeRevisionReviewers(db);
   const lifecycle = new RevisionLifecycleStore(db);
-  const authorship = new RevisionAuthorshipStore(db);
+  const reviewers = new RevisionReviewerStore(db, lifecycle);
+  lifecycle.connectReviewers(reviewers);
+  const authorship = new RevisionAuthorshipStore(db, false, (id, previous, author, actor, operationId) => reviewers.authorChanged(id, previous, author, actor, operationId));
   const reader = new RevisionStackStore(db), dependencies = new RevisionDependencyStore(db);
   const version = (id: string, number = 1, attribution: ActorAttribution | undefined = alice, content = 'Original source\n') => {
     const files = [{ path: 'source.txt', content }];
@@ -37,11 +42,11 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
   };
   const entity = (id: string, attribution: ActorAttribution | undefined = alice) => {
     const value: Revision = { id, title: `Title ${id}`, summary: 'Original summary', kind: id.startsWith('P') ? 'paper' : id.startsWith('L') ? 'document' : 'code', status: 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-    db.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'revision',?)").run(id, JSON.stringify(value)); version(id, 1, attribution); authorship.ensure(id); lifecycle.ensure(id); return value;
+    db.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'revision',?)").run(id, JSON.stringify(value)); version(id, 1, attribution); authorship.ensure(id); lifecycle.ensure(id); reviewers.ensure(id); return value;
   };
   for (const id of ids) entity(id);
   const mutate = (id: string, add: string[], remove: string[] = []) => dependencies.mutate(id, { direction: 'parents', add, remove, expectedRelationshipVersion: dependencies.version(id), expectedAccessEpoch: 1 }, alice);
-  const snapshot = () => ({ schema: db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY name").all(), rows: Object.fromEntries(['entities', 'versions', 'revision_dependency_versions', 'revision_dependency_edges', 'revision_dependency_operations', 'revision_dependency_transactions', 'revision_authorship', 'revision_author_transactions', 'revision_author_operations', 'revision_lifecycle', 'revision_lifecycle_operations', 'revision_lifecycle_transactions'].map(table => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()])), version: db.prepare('PRAGMA user_version').get() });
+  const snapshot = () => ({ schema: db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY name").all(), rows: Object.fromEntries(['entities', 'versions', 'revision_dependency_versions', 'revision_dependency_edges', 'revision_dependency_operations', 'revision_dependency_transactions', 'revision_authorship', 'revision_author_transactions', 'revision_author_operations', 'revision_lifecycle', 'revision_lifecycle_operations', 'revision_lifecycle_transactions', 'revision_reviewers', 'revision_reviewer_baselines', 'revision_reviewer_operations', 'revision_reviewer_transactions'].map(table => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()])), version: db.prepare('PRAGMA user_version').get() });
   // Large boundary fixtures seed only edges; they do not fabricate source bodies
   // or run tens of thousands of mutation requests just to exercise read budgets.
   const seedEdges = (edges: [string, string][]) => {
@@ -58,7 +63,7 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
     db.prepare("UPDATE entities SET data=json_set(data,'$.status',?) WHERE id=?").run(value, id);
     db.prepare('DELETE FROM revision_lifecycle WHERE revision_id=?').run(id); lifecycle.ensure(id);
   };
-  return { db, reader, dependencies, entity, version, mutate, seedEdges, title, status, snapshot, close: () => db.close() };
+  return { db, reader, dependencies, authorship, entity, version, mutate, seedEdges, title, status, snapshot, close: () => db.close() };
 }
 
 test('stack includes the complete connected branch graph in stable child-before-parent order without changing source or relationships', () => {
@@ -128,8 +133,8 @@ test('snapshot pins cover exact heads, transitive relationships, node metadata, 
     const rootRelationship = f.dependencies.version('D1'); f.mutate('P1', ['L1']); check(); assert.equal(f.dependencies.version('D1'), rootRelationship);
     f.title('L1', 'Changed distant title'); check(); f.status('P1', 'closed'); check();
     f.version('L1', 2, bob, 'Later source'); check();
-    const ownership = new RevisionAuthorshipStore(f.db), context = ownership.snapshot('L1');
-    ownership.mutate('L1', { action: 'assign', authorId: bob.principalId, expectedAuthorVersion: context.authorship.version, expectedVersion: context.head.number, expectedVersionId: context.head.versionId, expectedContentHash: context.head.contentHash, expectedAccessEpoch: 1, message: 'Handoff' }, alice, { principalId: bob.principalId, displayName: bob.displayName }); check();
+    const ownership = f.authorship, context = ownership.snapshot('L1');
+    ownership.mutate('L1', { action: 'assign', authorId: bob.principalId, expectedAuthorVersion: context.authorship.version, expectedReviewerVersion: context.reviewerVersion, expectedLifecycleVersion: context.lifecycleVersion, expectedVersion: context.head.number, expectedVersionId: context.head.versionId, expectedContentHash: context.head.contentHash, expectedAccessEpoch: 1, message: 'Handoff' }, alice, { principalId: bob.principalId, displayName: bob.displayName }); check();
     const handed = previous.nodes.find(node => node.id === 'L1')!; assert.equal(handed.author?.principalId, bob.principalId); assert.equal(handed.originalAuthor?.principalId, alice.principalId); assert.equal(handed.authorVersion, 1);
     const nextEpoch = f.reader.read('D1', visible, 2); assert.notEqual(nextEpoch.snapshotId, previous.snapshotId);
     assert.throws(() => f.reader.read('D1', visible, 2, previous.snapshotId), { code: 'REVISION_STACK_CHANGED' });

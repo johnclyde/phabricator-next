@@ -5,7 +5,7 @@ import { DEFAULT_REVISION_LIFECYCLE_CONFIG, revisionLifecycleActions, revisionLi
 import { lifecycleReading, lifecycleSnapshot, lifecycleHistory, mergeLifecycleHistory, lifecycleDraft, lifecycleDraftMatches, lifecycleIntent, prepareLifecycleDraft, verifiedLifecycleResult, revisionRefreshDirection } from '../client/revision-lifecycle.ts';
 
 const base: Omit<RevisionLifecycleSnapshot, 'actions'> = {
-  lifecycle: { revisionId: 'P1', version: 0, status: 'needs_review', reviewStarted: true, closedFromAccepted: null, resumeAcceptanceHead: null, updatedAt: null },
+  reviewers: { version: 0, accepting: 0, rejecting: 0, olderRejecting: 0, blocking: 0, acceptance: null }, lifecycle: { revisionId: 'P1', version: 0, status: 'needs_review', reviewStarted: true, closedFromAccepted: null, resumeAcceptanceHead: null, updatedAt: null },
   head: { versionId: 'source-1', number: 1, contentHash: 'a'.repeat(64) }, authorship: { version: 0, author: { principalId: 'U1', displayName: 'Current Author' } },
   evidence: { sha256: 'b'.repeat(64), reviewIds: ['review-1'], errorCount: 0 }, config: { ...DEFAULT_REVISION_LIFECYCLE_CONFIG }, configId: 'c'.repeat(64), accessEpoch: 5,
   access: { policy: { objectId: 'P1', spaceId: 'S1', version: 1, rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit: true, interact: true, managePolicy: true }, viewLabel: 'Workspace', editLabel: 'Workspace', interactLabel: 'Workspace' },
@@ -16,8 +16,8 @@ const input = { ...prepareLifecycleDraft(snapshot, 'plan_changes'), message: ' E
 const transaction: RevisionLifecycleTransaction = { id: 'event-1', revisionId: 'P1', operationId: 'operation-1', lifecycleVersion: 1, action: 'plan_changes', fromStatus: 'needs_review', toStatus: 'changes_planned', beforeHead: base.head, head: base.head, message: input.message, attribution: { principalId: 'U1', displayName: 'Current Author', requestId: 'request-1', credentialId: null }, createdAt: '2026-10-11T12:00:00.000Z', evidenceSha256: base.evidence.sha256, reviewIds: base.evidence.reviewIds };
 
 test('monotonic metadata refresh updates the older side and only uses status fallback for legacy snapshots', () => {
-  const known = { currentVersion: 2, authorVersion: 1, lifecycleVersion: 3, status: 'needs_review' };
-  for (const field of ['currentVersion', 'authorVersion', 'lifecycleVersion'] as const) {
+  const known = { currentVersion: 2, authorVersion: 1, lifecycleVersion: 3, reviewerVersion: 0, status: 'needs_review' };
+  for (const field of ['currentVersion', 'authorVersion', 'lifecycleVersion', 'reviewerVersion'] as const) {
     const newer = { ...known, [field]: known[field] + 1 };
     assert.equal(revisionRefreshDirection(known, newer), 'workspace');
     assert.equal(revisionRefreshDirection(newer, known), 'revision');
@@ -74,4 +74,12 @@ test('receipt requires exact whitespace, source, action, actor and normalized in
   await assert.rejects(verifiedLifecycleResult(receipt, 'P1', input, 'U2'), /receipt/);
   await assert.rejects(verifiedLifecycleResult({ ...receipt, inputSha256: 'f'.repeat(64) }, 'P1', input, 'U1'), /different request/);
   await assert.rejects(verifiedLifecycleResult({ ...receipt, transaction: { ...transaction, head: { ...transaction.head, versionId: 'other-source' } } }, 'P1', input, 'U1'), /receipt/);
+});
+
+test('legacy retained lifecycle requests remain recoverable while unsent legacy drafts require fresh review', () => {
+  const { expectedReviewerVersion: _reviewers, ...old } = input;
+  const retained = lifecycleDraft(old)!; assert.deepEqual(retained, old); assert.equal(lifecycleDraftMatches(retained, snapshot), false);
+  const intent = { id: '12345678-1234-4123-8123-123456789abc', revisionId: 'P1', body: old, draft: old };
+  assert.deepEqual(lifecycleIntent(intent, 'P1'), intent);
+  assert.equal(lifecycleDraftMatches(input, { ...snapshot, reviewers: { ...snapshot.reviewers, version: 1 } }), false);
 });

@@ -60,7 +60,7 @@ async function start(databasePath = ':memory:') {
   async function acceptReviewed(id: string) {
     const result = await request<RevisionLifecycleSnapshot>('alice', `/api/revisions/${id}/lifecycle`);
     assert.equal(result.status, 200); const s = result.body;
-    return request('alice', `/api/revisions/${id}/lifecycle`, 'POST', { action: 'accept_reviewed', message: '', expectedLifecycleVersion: s.lifecycle.version, expectedAuthorVersion: s.authorship.version, expectedVersion: s.head.number, expectedVersionId: s.head.versionId, expectedContentHash: s.head.contentHash, expectedAccessEpoch: s.accessEpoch, expectedConfigId: s.configId, expectedEvidenceSha256: s.evidence.sha256 }, crypto.randomUUID());
+    return request('alice', `/api/revisions/${id}/lifecycle`, 'POST', { action: 'accept_reviewed', message: '', expectedLifecycleVersion: s.lifecycle.version, expectedReviewerVersion: s.reviewers.version, expectedAuthorVersion: s.authorship.version, expectedVersion: s.head.number, expectedVersionId: s.head.versionId, expectedContentHash: s.head.contentHash, expectedAccessEpoch: s.accessEpoch, expectedConfigId: s.configId, expectedEvidenceSha256: s.evidence.sha256 }, crypto.randomUUID());
   }
   return { ...app, alice, bob, request, create, suggest, input, acceptReviewed, close: async () => { await app.close(); store.close(); } };
 }
@@ -109,7 +109,7 @@ test('applying suggestions requires current edit and write authority while propo
     const authorship = (await app.request<RevisionAuthorshipSnapshot>('alice', `${path}/authorship`)).body;
     assert.equal((await app.request('alice', `${path}/authorship`, 'POST', {
       action: 'assign', authorId: app.bob.id, message: 'Hand over the manuscript before access is revoked.',
-      expectedAuthorVersion: authorship.authorship.version, expectedVersion: authorship.head.number,
+      expectedAuthorVersion: authorship.authorship.version, expectedReviewerVersion: authorship.reviewerVersion, expectedLifecycleVersion: authorship.lifecycleVersion, expectedVersion: authorship.head.number,
       expectedVersionId: authorship.head.versionId, expectedContentHash: authorship.head.contentHash,
       expectedAccessEpoch: authorship.accessEpoch,
     }, 'handoff-before-apply-revocation')).status, 200);

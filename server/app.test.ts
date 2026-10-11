@@ -22,7 +22,7 @@ async function start(options: AppOptions = {}) {
   const lifecycleInput = async (id: string, action: RevisionLifecycleAction): Promise<RevisionLifecycleInput> => {
     const result = await request<RevisionLifecycleSnapshot>(`/api/revisions/${id}/lifecycle`);
     assert.equal(result.status, 200); const s = result.body;
-    return { action, message: '', expectedLifecycleVersion: s.lifecycle.version, expectedAuthorVersion: s.authorship.version, expectedVersion: s.head.number, expectedVersionId: s.head.versionId, expectedContentHash: s.head.contentHash, expectedAccessEpoch: s.accessEpoch, expectedConfigId: s.configId, expectedEvidenceSha256: s.evidence.sha256 };
+    return { action, message: '', expectedLifecycleVersion: s.lifecycle.version, expectedReviewerVersion: s.reviewers.version, expectedAuthorVersion: s.authorship.version, expectedVersion: s.head.number, expectedVersionId: s.head.versionId, expectedContentHash: s.head.contentHash, expectedAccessEpoch: s.accessEpoch, expectedConfigId: s.configId, expectedEvidenceSha256: s.evidence.sha256 };
   };
   const lifecycle = async (id: string, action: RevisionLifecycleAction) => request<RevisionLifecycleReceipt>(`/api/revisions/${id}/lifecycle`, 'POST', await lifecycleInput(id, action), { 'Idempotency-Key': crypto.randomUUID() });
   return { ...app, base, request, lifecycleInput, lifecycle };

@@ -7,7 +7,7 @@ export async function lifecycleAction(call: (path: string, body?: unknown) => Pr
   const snapshot = await call(`/revisions/${id}/lifecycle`) as RevisionLifecycleSnapshot;
   return call(`/revisions/${id}/lifecycle`, {
     action, message: 'Explicit lifecycle test action', expectedLifecycleVersion: snapshot.lifecycle.version,
-    expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number,
+    expectedReviewerVersion: snapshot.reviewers.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number,
     expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash,
     expectedAccessEpoch: snapshot.accessEpoch, expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256,
   });

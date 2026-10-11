@@ -13,6 +13,8 @@ export interface RevisionAuthorship {
   updatedAt: string | null;
 }
 export interface RevisionAuthorPins {
+  expectedReviewerVersion?: number;
+  expectedLifecycleVersion?: number;
   expectedAuthorVersion: number;
   expectedVersion: number;
   expectedVersionId: string;
@@ -47,6 +49,8 @@ export interface RevisionAuthorshipSnapshot {
   head: RevisionAuthorHead;
   status: RevisionStatus;
   closeOnAccept: boolean;
+  reviewerVersion: number;
+  lifecycleVersion: number;
   access: ObjectAccess;
   accessEpoch: number;
 }
@@ -78,12 +82,12 @@ export const isRevisionAuthorHead = (value: unknown): value is RevisionAuthorHea
 
 /** Pure canonical input validation, shared by browser, CLI and server. */
 export function revisionAuthorInput(value: unknown): RevisionAuthorInput {
-  if (!object(value) || !keys(value, ['action', 'message', 'expectedAuthorVersion', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch', ...(value.action === 'assign' ? ['authorId'] : [])])
+  if (!object(value) || !keys(value, ['action', 'message', 'expectedAuthorVersion', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch', ...(value.action === 'assign' ? ['authorId'] : []), ...(value.expectedReviewerVersion === undefined && value.expectedLifecycleVersion === undefined ? [] : ['expectedReviewerVersion', 'expectedLifecycleVersion'])])
     || !['assign', 'commandeer'].includes(String(value.action)) || typeof value.action !== 'string'
     || !integer(value.expectedAuthorVersion) || !integer(value.expectedVersion, 1) || !text(value.expectedVersionId, 240) || !hash(value.expectedContentHash) || !integer(value.expectedAccessEpoch)
     || typeof value.message !== 'string' || value.message.length > REVISION_AUTHOR_LIMITS.message || value.message.includes('\0')
-    || value.action === 'assign' && !isRevisionAuthorId(value.authorId)) throw new Error('Provide an exact author action, source identity, author version and access epoch.');
-  const pins: RevisionAuthorPins = { expectedAuthorVersion: value.expectedAuthorVersion, expectedVersion: value.expectedVersion, expectedVersionId: value.expectedVersionId, expectedContentHash: value.expectedContentHash, expectedAccessEpoch: value.expectedAccessEpoch };
+    || value.action === 'assign' && !isRevisionAuthorId(value.authorId) || (value.expectedReviewerVersion !== undefined || value.expectedLifecycleVersion !== undefined) && (!integer(value.expectedReviewerVersion) || !integer(value.expectedLifecycleVersion))) throw new Error('Provide an exact author action, source identity, author version and access epoch.');
+  const pins: RevisionAuthorPins = { expectedAuthorVersion: value.expectedAuthorVersion, expectedVersion: value.expectedVersion, expectedVersionId: value.expectedVersionId, expectedContentHash: value.expectedContentHash, expectedAccessEpoch: value.expectedAccessEpoch, ...(value.expectedReviewerVersion === undefined ? {} : { expectedReviewerVersion: value.expectedReviewerVersion as number, expectedLifecycleVersion: value.expectedLifecycleVersion as number }) };
   return value.action === 'assign' ? { action: 'assign', authorId: value.authorId as string, ...pins, message: value.message } : { action: 'commandeer', ...pins, message: value.message };
 }
 
@@ -113,8 +117,8 @@ export function validRevisionAuthorResult(value: unknown, id: string, input: Rev
 }
 
 export function isRevisionAuthorshipSnapshot(value: unknown, id: string): value is RevisionAuthorshipSnapshot {
-  if (!(object(value) && keys(value, ['authorship', 'head', 'status', 'closeOnAccept', 'access', 'accessEpoch']) && isRevisionAuthorship(value.authorship, id) && isRevisionAuthorHead(value.head)
-    && isRevisionStatus(value.status) && typeof value.closeOnAccept === 'boolean' && integer(value.accessEpoch)
+  if (!(object(value) && keys(value, ['authorship', 'head', 'status', 'closeOnAccept', 'reviewerVersion', 'lifecycleVersion', 'access', 'accessEpoch']) && isRevisionAuthorship(value.authorship, id) && isRevisionAuthorHead(value.head)
+    && isRevisionStatus(value.status) && typeof value.closeOnAccept === 'boolean' && integer(value.reviewerVersion) && integer(value.lifecycleVersion) && integer(value.accessEpoch)
     && object(value.access) && object(value.access.policy) && value.access.policy.objectId === id && object(value.access.capabilities))) return false;
   const capabilities = value.access.capabilities;
   return ['view', 'edit', 'interact', 'managePolicy'].every(key => typeof capabilities[key] === 'boolean');
