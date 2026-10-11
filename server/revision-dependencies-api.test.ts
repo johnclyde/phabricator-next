@@ -1,3 +1,4 @@
+import { lifecycleAction } from '../tests/revision-lifecycle-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -47,7 +48,7 @@ for (const basePath of ['/', '/mounted/']) test(`revision dependencies join code
   try {
     const code = app.revision(), paper = app.revision('paper'), document = app.revision('document');
     app.store.saveReview(code.revision.id, 1, { provider: 'local', model: 'checks', summary: 'Passed', findings: [] }, app.actor);
-    app.store.updateRevision(code.revision.id, { status: 'accepted', expectedVersion: 1 }, app.actor);
+    lifecycleAction(app.store, code.revision.id, 'accept_reviewed', app.actor);
     const before = [code, paper, document].map(item => { const detail = app.store.detail(item.revision.id); return { revision: detail.revision, versions: detail.versions, reviews: detail.reviews }; });
     app.policy(paper.revision.id, { edit: members(app.alice.id) });
     const body = app.input(code.revision.id, [paper.revision.id, document.revision.id]);

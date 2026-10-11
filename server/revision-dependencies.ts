@@ -1,3 +1,4 @@
+import { isRevisionStatus } from '../shared/revision-status.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ActorAttribution } from '../shared/types.ts';
@@ -90,7 +91,7 @@ export class RevisionDependencyStore {
         if (!visible(row.id)) continue;
         if (revisions.length === count) return { revisionId: id, direction, relationshipVersion: version, revisions, nextAfter: revisions.at(-1)!.id };
         const item = this.database.prepare("SELECT json_extract(data,'$.id') AS id,json_extract(data,'$.title') AS title,json_extract(data,'$.kind') AS kind,json_extract(data,'$.status') AS status,json_extract(data,'$.currentVersion') AS currentVersion,json_extract(data,'$.updatedAt') AS updatedAt FROM entities WHERE id=? AND kind='revision'").get(row.id) as RevisionDependencyReference | undefined;
-        if (!item || item.id !== row.id || typeof item.title !== 'string' || !['code', 'paper', 'document'].includes(item.kind) || !['draft', 'needs_review', 'changes_requested', 'accepted', 'closed'].includes(item.status) || !Number.isSafeInteger(item.currentVersion) || item.currentVersion < 1 || typeof item.updatedAt !== 'string') throw invalidReceipt();
+        if (!item || item.id !== row.id || typeof item.title !== 'string' || !['code', 'paper', 'document'].includes(item.kind) || !isRevisionStatus(item.status) || !Number.isSafeInteger(item.currentVersion) || item.currentVersion < 1 || typeof item.updatedAt !== 'string') throw invalidReceipt();
         revisions.push({ ...item });
       }
       if (rows.length < 100) return { revisionId: id, direction, relationshipVersion: version, revisions, nextAfter: null };

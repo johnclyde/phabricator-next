@@ -57,7 +57,7 @@ export function parseCommand(input: string): VoiceCommand {
   if (/^(?:show|open) (?:my tasks|tasks assigned to me)$/.test(text)) return { type: 'taskFilter', value: 'mine' };
   if (/^(?:show|open) unassigned tasks$/.test(text)) return { type: 'taskFilter', value: 'unassigned' };
   if (/^(?:show|open) (?:tasks i follow|followed tasks)$/.test(text)) return { type: 'taskFilter', value: 'following' };
-  const filter = text.match(/^(?:filter|show) (?:by )?(open|all|in progress|resolved|duplicate|accepted|needs review|draft)$/);
+  const filter = text.match(/^(?:filter|show) (?:by )?(open|all|in progress|resolved|duplicate|accepted|needs review|changes requested|changes planned|draft|closed|abandoned)$/);
   if (filter) return { type: 'filter', value: filter[1].replaceAll(' ', '_') };
   return { type: 'unknown', text: original };
 }

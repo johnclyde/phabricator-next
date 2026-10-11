@@ -11,6 +11,7 @@ import { createAuth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
 import type { Audience, ObjectAccess } from '../shared/policy.ts';
 import type { RevisionAuthorshipSnapshot } from '../shared/revision-authorship.ts';
+import type { RevisionLifecycleSnapshot } from '../shared/revision-lifecycle.ts';
 import type { ApplySuggestionInput, RevisionDetail, ReviewComment } from '../shared/types.ts';
 
 type ErrorBody = { error: string; code?: string };
@@ -56,7 +57,12 @@ async function start(databasePath = ':memory:') {
     const current = detail.versions.find(item => item.number === detail.revision.currentVersion)!;
     return { expectedVersion: current.number, expectedVersionId: current.id, expectedContentHash: current.contentHash, expectedThreadVersion };
   };
-  return { ...app, alice, bob, request, create, suggest, input, close: async () => { await app.close(); store.close(); } };
+  async function acceptReviewed(id: string) {
+    const result = await request<RevisionLifecycleSnapshot>('alice', `/api/revisions/${id}/lifecycle`);
+    assert.equal(result.status, 200); const s = result.body;
+    return request('alice', `/api/revisions/${id}/lifecycle`, 'POST', { action: 'accept_reviewed', message: '', expectedLifecycleVersion: s.lifecycle.version, expectedAuthorVersion: s.authorship.version, expectedVersion: s.head.number, expectedVersionId: s.head.versionId, expectedContentHash: s.head.contentHash, expectedAccessEpoch: s.accessEpoch, expectedConfigId: s.configId, expectedEvidenceSha256: s.evidence.sha256 }, crypto.randomUUID());
+  }
+  return { ...app, alice, bob, request, create, suggest, input, acceptReviewed, close: async () => { await app.close(); store.close(); } };
 }
 
 test('an explicit suggested edit changes only its exact passage once and invalidates old acceptance', async () => {
@@ -66,7 +72,7 @@ test('an explicit suggested edit changes only its exact passage once and invalid
     const path = `/api/revisions/${before.revision.id}`;
     const proposal = await app.suggest(before);
     await app.create('alice', `${path}/reviews`, { provider: 'local', expectedVersion: 1 });
-    assert.equal((await app.request('alice', path, 'PATCH', { status: 'accepted', expectedVersion: 1 })).status, 200);
+    assert.equal((await app.acceptReviewed(before.revision.id)).status, 200);
     const endpoint = `${path}/suggestions/${proposal.id}/apply`; const input = app.input(before);
     const applied = await app.create<RevisionDetail>('alice', endpoint, input, 'apply-once');
     assert.equal(applied.revision.currentVersion, 2); assert.equal(applied.revision.status, 'needs_review');
@@ -82,7 +88,7 @@ test('an explicit suggested edit changes only its exact passage once and invalid
     assert.equal(evidence.attribution?.principalId, app.alice.id); assert.equal(evidence.threadVersion, 2);
     assert.deepEqual(await app.create('alice', endpoint, input, 'apply-once'), applied);
     assert.equal((await app.request('alice', endpoint, 'POST', input, 'apply-again')).status, 409);
-    assert.equal((await app.request('alice', path, 'PATCH', { status: 'accepted', expectedVersion: 2 })).status, 409);
+    assert.equal((await app.acceptReviewed(before.revision.id)).status, 409);
     assert.equal(app.store.detail(before.revision.id).versions.length, 2);
   } finally { await app.close(); }
 });

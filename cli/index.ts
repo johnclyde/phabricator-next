@@ -21,6 +21,7 @@ import { docxCommand } from './docx';
 import { docxDiscussionCommand } from './docx-discussion';
 import { revisionDependenciesCommand } from './revision-dependencies';
 import { revisionAuthorshipCommand } from './revision-authorship';
+import { revisionLifecycleCommand } from './revision-lifecycle';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
@@ -30,7 +31,7 @@ import { gitPatchCommand } from './git-patch';
 const help = `Phabricator Next — arc (initial CLI)
 
   npm run arc -- check [--kind paper|document|code] FILE... [--json]
-  npm run arc -- diff --title "Title" --kind paper FILE...
+  npm run arc -- diff --title "Title" --kind paper [--draft] FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
@@ -43,7 +44,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- blame R1 --commit FULL_ID --path PATH [--json]
   npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
   npm run arc -- download-patch R1 --base FULL_ID|empty --commit FULL_ID --output NEW_FILE [--json]
-  npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--project ID|NAME] [--request-id KEY] [--json]
+  npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--draft] [--project ID|NAME] [--request-id KEY] [--json]
   npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
@@ -52,6 +53,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- revision-dependency-history P2 [--before N] [--limit N] [--relationship-version N]
   npm run arc -- revision-stack P2 [--snapshot SHA256]
   npm run arc -- edit-revision-dependencies P2 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- revision-lifecycle P2
+  npm run arc -- revision-lifecycle-history P2 [--before N] [--limit N] [--lifecycle-version N]
+  npm run arc -- edit-revision-lifecycle P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- revision-author P2
   npm run arc -- revision-author-history P2 [--before N] [--limit N] [--author-version N]
   npm run arc -- edit-revision-author P2 --intent REQUEST.json [--request-id KEY]
@@ -241,7 +245,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
-      direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'author-version': { type: 'string' },
+      draft: { type: 'boolean' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -298,6 +302,7 @@ async function main() {
   if (await docxDiscussionCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionDependenciesCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionAuthorshipCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionLifecycleCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
@@ -322,6 +327,7 @@ async function main() {
     if (review.findings.some(finding => finding.severity === 'error')) process.exitCode = 1;
     return;
   }
+  if (values.draft !== undefined && !(command === 'import-git' || command === 'diff' && !values.revision)) throw new Error('--draft applies only to creation of a new text or Git revision.');
   if (command === 'diff') {
     const files = await readSources(args);
     let detail: RevisionDetail;
@@ -332,7 +338,7 @@ async function main() {
       });
     } else {
       if (!values.title?.trim()) throw new Error('--title is required for a new revision.');
-      detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', kind, files });
+      detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', kind, files, ...(values.draft ? { draft: true } : {}) });
     }
     console.log(`${detail.revision.id} · v${detail.revision.currentVersion} · ${detail.revision.title}`);
     console.log(new URL(`${basePath}#${detail.revision.id}`, server).href);
@@ -400,7 +406,7 @@ async function main() {
     const requestId = values['request-id'] ?? randomUUID();
     if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('--request-id must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
     const projectId = values.project?.[0] ? visibleProjectId(values.project[0], await request<AppState>('/api/state')) : undefined;
-    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(projectId ? { projectId } : {}) };
+    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(projectId ? { projectId } : {}), ...(values.draft ? { draft: true } : {}) };
     console.error(`Import request ID: ${requestId}. Keep this ID and the same inputs when retrying an uncertain result.`);
     const detail = await request<RevisionDetail>(`/api/repositories/${id}/import-revision`, 'POST', input, requestId);
     const version = detail.versions.find(item => item.number === 1); const gitSource = version?.gitSource;

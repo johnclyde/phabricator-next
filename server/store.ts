@@ -2,6 +2,8 @@ import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
 import { RevisionStackStore } from './revision-stack.ts';
 import { initializeRevisionAuthorship, RevisionAuthorshipStore } from './revision-authorship.ts';
+import { initializeRevisionLifecycle, RevisionLifecycleStore } from './revision-lifecycle.ts';
+import type { RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
 import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
 import type { WikiConduitMethod, WikiConduitReceipt } from '../shared/wiki-conduit.ts';
@@ -41,7 +43,7 @@ type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file' | 'paste';
 export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
-export interface StoreOptions { path?: string }
+export interface StoreOptions { path?: string; revisionLifecycle?: Partial<RevisionLifecycleConfig> }
 type JsonRow = { data: string };
 
 export function parseRevisionDependencyInput(input: unknown): RevisionDependencyInput {
@@ -58,10 +60,11 @@ export function threadPreferenceInput(input: unknown): SetThreadPreferenceInput 
 
 /** Public import metadata contains no source, policy, or provenance supplied by a client. */
 export function gitImportInput(input: unknown): GitImportInput {
-  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'projectId']);
+  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'projectId', 'draft']);
   if (typeof data.commitId !== 'string' || !isGitObjectId(data.commitId)) throw new HttpError(400, 'Select a full lowercase commit object ID.', 'GIT_INVALID_QUERY');
   if (data.projectId !== undefined && data.projectId !== null && (typeof data.projectId !== 'string' || !/^PROJ[1-9]\d{0,14}$/.test(data.projectId))) throw new HttpError(400, 'Reference unavailable.');
-  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), ...(data.projectId === undefined ? {} : { projectId: data.projectId as string | null }) };
+  if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
+  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), ...(data.projectId === undefined ? {} : { projectId: data.projectId as string | null }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
 }
 
 export function gitVersionImportInput(input: unknown): GitVersionImportInput {
@@ -89,9 +92,10 @@ function docxPins(data: Record<string, unknown>): DocxVersionPins {
 }
 export function parseDocxVersionPins(input: unknown): DocxVersionPins { return docxPins(object(input, docxPinKeys)); }
 export function parseDocxImportInput(input: unknown): DocxImportInput {
-  const data = object(input, ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access']);
+  const data = object(input, ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']);
   if (typeof data.shareSource !== 'boolean') throw new HttpError(400, 'shareSource must be an explicit boolean.');
-  return { title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }) };
+  if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
+  return { title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
 }
 export function parseDocxReimportInput(input: unknown): DocxReimportInput {
   const data = object(input, [...docxPinKeys, 'sourceFile', 'shareSource', 'message']);
@@ -161,6 +165,7 @@ export class Store {
   readonly revisionDependencies: RevisionDependencyStore;
   readonly revisionStack: RevisionStackStore;
   readonly revisionAuthorship: RevisionAuthorshipStore;
+  readonly revisionLifecycle: RevisionLifecycleStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -173,7 +178,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 25) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 26) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -422,9 +427,14 @@ export class Store {
       try { this.transaction(() => { initializeRevisionAuthorship(this.database); this.database.exec('PRAGMA user_version = 25'); }); }
       catch (error) { this.database.close(); throw error; }
     }
-    this.revisionAuthorship = new RevisionAuthorshipStore(this.database);
+    if (version < 26) {
+      try { this.transaction(() => { initializeRevisionLifecycle(this.database); this.database.exec('PRAGMA user_version = 26'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
+    this.revisionAuthorship = new RevisionAuthorshipStore(this.database, this.revisionLifecycle.config.closeOnAccept);
     this.revisionDependencies = new RevisionDependencyStore(this.database);
-    this.revisionStack = new RevisionStackStore(this.database);
+    this.revisionStack = new RevisionStackStore(this.database, this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;
@@ -502,7 +512,7 @@ export class Store {
       metadata = rest;
     }
     if (kind === 'document') { const { location: _location, publication: _publication, ...rest } = value as WikiDocument; metadata = rest; }
-    if (kind === 'revision') { const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, ...rest } = value as Revision; metadata = rest; }
+    if (kind === 'revision') { const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, ...rest } = value as Revision; metadata = rest; }
     const json = JSON.stringify(metadata);
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
     if (created.changes) { registerDefaultPolicy(this.database, value.id); if(kind==='document')this.wikiSearch?.ensureDocument(value.id); }
@@ -511,7 +521,7 @@ export class Store {
   }
   private hydrateRevision(value: Revision): Revision {
     const state = this.revisionAuthorship.state(value.id);
-    return { ...value, authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version };
+    return { ...value, authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version };
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -1285,7 +1295,8 @@ export class Store {
     const version: RevisionVersion = { id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: [], docx: source, docxOperation: operation, message, contentHash: contentHash([], [], source), createdAt: new Date().toISOString(), attribution: actor };
     this.database.prepare('INSERT INTO versions(id,revision_id,number,data) VALUES(?,?,?,?)').run(version.id, revision.id, version.number, JSON.stringify(version));
     this.database.prepare('INSERT INTO revision_docx_packages(version_id,sha256,byte_size,data) VALUES(?,?,?,?)').run(version.id, source.sha256, source.bytes, bytes);
-    if (version.number === 1) this.revisionAuthorship.ensure(revision.id);
+    if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); }
+    else this.revisionLifecycle.sourceUpdated(revision.id, actor);
     return version;
   }
   /** Internal commit boundary: projection must come from the isolated DOCX parser, never HTTP input. */
@@ -1295,7 +1306,7 @@ export class Store {
       const file = this.docxFile(data.sourceFile, true), source = this.docxSource(bytes, projection, file.originalName, data.sourceFile);
       if (source.sha256 !== file.sha256 || source.bytes !== file.bytes || !Buffer.from(bytes).equals(this.files.readBytes(file.id))) throw docxMismatch();
       const now = new Date().toISOString();
-      const revision: Revision = { id: this.nextId('revision', 'L'), title: data.title, summary: data.summary ?? '', kind: 'document', status: 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: now, updatedAt: now };
+      const revision: Revision = { id: this.nextId('revision', 'L'), title: data.title, summary: data.summary ?? '', kind: 'document', status: data.draft ? 'draft' : 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: now, updatedAt: now };
       this.save('revision', revision); this.attachDocxSource(revision.id, data.sourceFile, data.shareSource, actor);
       this.saveDocxVersion(revision, source, bytes, 'Imported Word document', actor, { kind: 'import', inputSha256: docxOperationHash(data) });
       this.event(revision.id, 'created', 'Imported Word document as version 1.', actor);
@@ -1331,7 +1342,7 @@ export class Store {
       if (source.sha256 !== file.sha256 || source.bytes !== file.bytes || !Buffer.from(bytes).equals(this.files.readBytes(file.id))) throw docxMismatch();
       const revision = this.get<Revision>('revision', id);
       if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
-      revision.currentVersion++; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      revision.currentVersion++; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.attachDocxSource(id, data.sourceFile, data.shareSource, actor);
       this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'reimport', inputSha256: docxOperationHash(data) });
       this.event(id, 'version_created', `Imported Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
@@ -1354,7 +1365,7 @@ export class Store {
       if (source.sha256 === original.sha256) throw docxMismatch();
       const revision = this.get<Revision>('revision', id);
       if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
-      revision.currentVersion++; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      revision.currentVersion++; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'replace', inputSha256: docxOperationHash(data) });
       this.event(id, 'version_created', `Edited Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
       return this.detail(id);
@@ -1365,7 +1376,7 @@ export class Store {
     return this.discussionMutation(() => {
       const data = gitImportInput(input);
       const { source, gitSource } = this.verifiedGitSnapshot(repositoryId, data.commitId, snapshot);
-      return this.createRevisionRecord({ title: data.title, summary: data.summary, kind: data.kind, projectId: data.projectId, repositoryId, files: source }, attribution, gitSource);
+      return this.createRevisionRecord({ title: data.title, summary: data.summary, kind: data.kind, projectId: data.projectId, repositoryId, files: source, ...(data.draft === undefined ? {} : { draft: data.draft }) }, attribution, gitSource);
     });
   }
   private verifiedGitSnapshot(repositoryId: string, commitId: string, snapshot: GitImportSnapshot): { source: SourceFile[]; gitSource: GitSourceProvenance } {
@@ -1401,19 +1412,20 @@ export class Store {
       const data = gitVersionImportInput(input); const { revision } = this.requireGitImportVersion(id, data);
       if (revision.repositoryId !== snapshot.repositoryId) throw new HttpError(409, 'The linked source repository changed. Reload before importing.');
       const { source, gitSource } = this.verifiedGitSnapshot(revision.repositoryId!, data.commitId, snapshot);
-      revision.currentVersion += 1; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      revision.currentVersion += 1; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveVersion(revision, source, data.message, attribution, gitSource);
       this.event(id, 'version_created', `Imported Git commit ${gitSource.commitId} as version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution);
       return this.detail(id);
     });
   }
   private createRevisionRecord(input: unknown, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionDetail {
-    const data = object(input, ['title', 'summary', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId']);
+    const data = object(input, ['title', 'summary', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId', 'draft']);
+    if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
     const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
     const source = files(data.files);
     const assets = this.sourceAssets(source, data.assets ?? [], []);
     const now = new Date().toISOString();
-    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
+    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: data.draft ? 'draft' : 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
     this.save('revision', revision); this.shareSourceAssets(revision.id, assets, [], data.shareAssets, attribution);
     this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
   }
@@ -1441,7 +1453,8 @@ export class Store {
   private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance, assets: RevisionAsset[] = []): RevisionVersion {
     const version: RevisionVersion = { ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), ...(assets.length ? { assets } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source, assets), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version));
-    if (version.number === 1) this.revisionAuthorship.ensure(revision.id);
+    if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); }
+    else this.revisionLifecycle.sourceUpdated(revision.id, attribution);
     return version;
   }
   requireVersion(id: string, expected: unknown): RevisionDetail {
@@ -1460,21 +1473,13 @@ export class Store {
       if (data.assets !== undefined && (data.expectedVersionId !== current.id || data.expectedContentHash !== current.contentHash || contentHash(current.files, current.assets) !== current.contentHash)) throw new HttpError(409, 'Figure changes require the exact reviewed source version. Reload before continuing.');
       this.shareSourceAssets(id, assets, current.assets ?? [], data.shareAssets, attribution);
       if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'This revision has reached the supported version limit.');
-      revision.currentVersion += 1; revision.status = 'needs_review'; revision.updatedAt = new Date().toISOString();
+      revision.currentVersion += 1; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveVersion(revision, source, message, attribution, undefined, assets); this.event(id, 'version_created', `Uploaded version ${revision.currentVersion}. Previous acceptance no longer applies.`, attribution); return this.detail(id);
     });
   }
   updateRevision(id: string, input: unknown, attribution?: ActorAttribution): Revision {
-    const data = object(input, ['status', 'expectedVersion']);
-    const detail = this.requireVersion(id, data.expectedVersion);
-    const status = choice(data.status, 'status', ['draft', 'needs_review', 'changes_requested', 'accepted', 'closed']);
-    const version = detail.versions.find(item => item.number === detail.revision.currentVersion)!;
-    if (status === 'accepted') {
-      const reviews = detail.reviews.filter(review => review.versionId === version.id && review.contentHash === version.contentHash);
-      if (!reviews.length || reviews.some(review => review.findings.some(finding => finding.severity === 'error'))) throw new HttpError(409, 'Acceptance requires current-version review evidence with no error findings.');
-    }
-    const revision = { ...detail.revision, status, updatedAt: new Date().toISOString() };
-    this.save('revision', revision); this.event(id, status, `${status === 'closed' ? 'Manually closed' : `Set status to ${status.replaceAll('_', ' ')}`} at version ${revision.currentVersion}.`, attribution); return revision;
+    void id; void input; void attribution;
+    throw new HttpError(409, 'Choose an explicit revision lifecycle action with exact source and lifecycle pins.', 'REVISION_LIFECYCLE_ACTION_REQUIRED');
   }
   /** A bounded read snapshot; callers must enforce current revision/source visibility. */
   docxDiscussion(id: string, input: unknown): { input: DocxDiscussionExportInput; version: RevisionVersion; bytes: Uint8Array; comments: DocxPackageComment[] } {
@@ -1705,16 +1710,18 @@ export class Store {
     });
   }
   saveReview(id: string, expectedVersion: number, analysis: ReviewAnalysis, attribution?: ActorAttribution): ReviewRun {
+    return this.discussionMutation(() => {
     const detail = this.requireVersion(id, expectedVersion); const version = detail.versions.find(item => item.number === expectedVersion)!;
     if (version.docx) throw docxUnsupported();
     const summary = version.assets?.length ? `${analysis.summary}\nReview covered text files only; ${version.assets.length} binary figure(s) were not inspected.` : analysis.summary;
     const review: ReviewRun = { ...analysis, summary, ...(attribution ? { attribution } : {}), id: randomUUID(), revisionId: id, versionId: version.id, contentHash: version.contentHash, createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO reviews (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(review.id, id, version.id, JSON.stringify(review));
+    this.revisionLifecycle.reviewSaved(id, attribution);
     if (detail.revision.status === 'accepted' && analysis.findings.some(finding => finding.severity === 'error')) {
-      this.save('revision', { ...detail.revision, status: 'changes_requested', updatedAt: new Date().toISOString() });
       this.event(id, 'acceptance_invalidated', `New review errors invalidated acceptance of version ${expectedVersion}.`, attribution);
     }
     this.event(id, 'reviewed', `${analysis.provider === 'local' ? 'Local checks' : 'AI review'} completed for version ${expectedVersion}: ${analysis.findings.length} findings.`, attribution); return review;
+    });
   }
   detail(id: string): RevisionDetail {
     const revision = this.get<Revision>('revision', id);

@@ -39,8 +39,9 @@ Open Stack in Related Revisions to see the complete visible connected graph,
 including siblings, branches and shared parents. Rows follow a deterministic
 child-before-parent order. Closed revisions stay visible. The advisory open-parent
 count includes distinct transitive parents, traverses closed intermediates and
-excludes the current revision. Accepted revisions remain open under this
-application's manual closure model; the count never gates acceptance or closure.
+excludes the current revision and abandoned ancestors. Accepted revisions remain
+open by default; operator close-on-accept configuration makes them terminal.
+The count never gates acceptance or closure.
 
 Each row shows current status, title and current author, or "Not recorded" when
 ownership is unknown. The selection also shows immutable original attribution
@@ -52,8 +53,8 @@ the graph always describes current relationships and metadata.
 One database read snapshot supplies the graph, current source-head identities,
 relationship versions, authors and access epoch. The browser and CLI verify a
 canonical SHA256 before using it. A changed visible node, edge, source-head identity
-or access epoch changes the snapshot. Format `phabricator.revision-stack.v2`
-includes current author, original author and ownership version; old v1 caches
+or access epoch changes the snapshot. Format `phabricator.revision-stack.v3`
+includes current author, original author, ownership/lifecycle versions and close-on-accept configuration; old v1/v2 caches
 are retired. Stored source hashes identify immutable
 heads; reading Stack does not inspect or rehash manuscript contents. A snapshot
 hash grants no authority, and every server read checks current access.
@@ -179,7 +180,9 @@ determinism. [Revision authorship](revision-authorship.md) separately implements
 mutable ownership, transfer history and commandeering; author profile handles
 remain unfinished.
 
-Configurable accepted-as-closed behavior, summary-derived "Depends on" parsing,
+Summary-derived "Depends on" parsing,
 revision PHIDs and Conduit edge/edit/query interoperability, notifications,
 reviewer assignments and their transfer effects, and working-copy/landing orchestration remain gaps.
 This dependency workflow does not establish full Differential parity.
+
+The [revision lifecycle](revision-lifecycle.md) now provides explicit author actions and operator close-on-accept semantics. Stack v3 binds lifecycle versions and this terminal-status configuration in its canonical identity.

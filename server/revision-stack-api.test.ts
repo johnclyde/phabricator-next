@@ -1,3 +1,4 @@
+import { lifecycleAction, closeRevision } from '../tests/revision-lifecycle-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -39,7 +40,7 @@ for (const basePath of ['/', '/mounted/']) test(`stack API returns a complete vi
     const root = app.revision(), parent = app.revision('paper'), grandparent = app.revision('document'), sibling = app.revision(), child = app.revision('paper');
     app.link(root.revision.id, [parent.revision.id]); app.link(parent.revision.id, [grandparent.revision.id]); app.link(sibling.revision.id, [parent.revision.id]); app.link(child.revision.id, [root.revision.id]);
     app.store.saveReview(parent.revision.id, 1, { provider: 'local', model: 'text-checks-v2', summary: 'Original review', findings: [] }, app.actor);
-    app.store.updateRevision(parent.revision.id, { expectedVersion: 1, status: 'accepted' }, app.actor);
+    lifecycleAction(app.store, parent.revision.id, 'accept_reviewed', app.actor);
     app.store.createVersion(grandparent.revision.id, { expectedVersion: 1, files: [{ path: 'source.txt', content: 'Later original source' }], message: 'New head' }, app.later);
     const before = databaseBytes(app.store), response = await app.request<RevisionStack>(app.path(root.revision.id), 'reader');
     assert.equal(response.status, 200, JSON.stringify(response.body)); assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -63,9 +64,9 @@ test('stack hashes change for transitive status, source, and graph changes while
     const root = app.revision(), parent = app.revision('paper'), distant = app.revision('document'), unrelated = app.revision(), extra = app.revision();
     app.link(root.revision.id, [parent.revision.id]); app.link(parent.revision.id, [distant.revision.id]);
     const read = async () => { const response = await app.request<RevisionStack>(app.path(root.revision.id)); assert.equal(response.status, 200); return response.body; };
-    const first = await read(); app.store.updateRevision(unrelated.revision.id, { status: 'closed', expectedVersion: 1 }, app.actor); assert.equal((await read()).snapshotId, first.snapshotId);
+    const first = await read(); closeRevision(app.store, unrelated.revision.id, app.actor); assert.equal((await read()).snapshotId, first.snapshotId);
     const rootRelationshipVersion = app.store.revisionDependencies.version(root.revision.id);
-    app.store.updateRevision(parent.revision.id, { status: 'closed', expectedVersion: 1 }, app.actor);
+    closeRevision(app.store, parent.revision.id, app.actor);
     const closed = await read(); assert.notEqual(closed.snapshotId, first.snapshotId); assert.deepEqual(closed.openParentIds, [distant.revision.id], 'a closed visible intermediate does not stop ancestor traversal');
     assert.equal((await app.request(app.path(root.revision.id) + `?expectedSnapshotId=${first.snapshotId}`)).body.code, 'REVISION_STACK_CHANGED');
     app.store.createVersion(distant.revision.id, { expectedVersion: 1, files: [{ path: 'source.txt', content: 'A new distant manuscript' }], message: 'Distant source changes' }, app.later);

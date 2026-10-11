@@ -5,10 +5,10 @@ import { canonicalRevisionStack, revisionStackTopology, type RevisionStack, type
 import { revisionStackLayout, STACK_ROW_HEIGHT, stackAccessMatches, stackNarration, verifiedRevisionStack } from '../client/revision-stack.ts';
 
 function fixture(ids = ['D1', 'L2', 'L3', 'P4', 'P5'], pairs = [['D1', 'L2'], ['D1', 'L3'], ['P4', 'L2'], ['L2', 'P5'], ['L3', 'P5']], seed = 'D1'): RevisionStack {
-  const nodes: RevisionStackNode[] = ids.map(id => ({ id, title: `Literal <b>${id}</b>`, kind: id.startsWith('D') ? 'code' : id.startsWith('P') ? 'paper' : 'document', status: id === 'L3' ? 'closed' : 'needs_review', currentVersion: 2, updatedAt: '2026-10-12T00:00:00.000Z', relationshipVersion: 3, head: { versionId: `${id}-v2`, number: 2, contentHash: 'a'.repeat(64) }, author: { principalId: 'U1', displayName: 'Original Writer' }, originalAuthor: { principalId: 'U1', displayName: 'Original Writer' }, authorVersion: 0 }));
+  const nodes: RevisionStackNode[] = ids.map(id => ({ id, title: `Literal <b>${id}</b>`, kind: id.startsWith('D') ? 'code' : id.startsWith('P') ? 'paper' : 'document', status: id === 'L3' ? 'closed' : 'needs_review', currentVersion: 2, updatedAt: '2026-10-12T00:00:00.000Z', relationshipVersion: 3, head: { versionId: `${id}-v2`, number: 2, contentHash: 'a'.repeat(64) }, author: { principalId: 'U1', displayName: 'Original Writer' }, originalAuthor: { principalId: 'U1', displayName: 'Original Writer' }, authorVersion: 0, lifecycleVersion: 0 }));
   const edges = pairs.map(([childId, parentId]) => ({ childId: childId!, parentId: parentId! })).sort((a, b) => a.childId < b.childId ? -1 : a.childId > b.childId ? 1 : a.parentId < b.parentId ? -1 : 1);
   const { order, openParentIds } = revisionStackTopology(seed, nodes, edges);
-  const graph: RevisionStack = { format: 'phabricator.revision-stack.v2', revisionId: seed, accessEpoch: 7, snapshotId: '', nodes: order.map(id => nodes.find(node => node.id === id)!), edges, openParentIds };
+  const graph: RevisionStack = { format: 'phabricator.revision-stack.v3', revisionId: seed, accessEpoch: 7, closeOnAccept: false, snapshotId: '', nodes: order.map(id => nodes.find(node => node.id === id)!), edges, openParentIds };
   graph.snapshotId = createHash('sha256').update(canonicalRevisionStack(graph)).digest('hex'); return graph;
 }
 

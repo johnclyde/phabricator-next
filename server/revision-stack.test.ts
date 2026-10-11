@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { ActorAttribution, Revision, RevisionVersion } from '../shared/types.ts';
 import { canonicalRevisionStack, REVISION_STACK_LIMITS } from '../shared/revision-stack.ts';
 import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
+import { initializeRevisionLifecycle, RevisionLifecycleStore } from './revision-lifecycle.ts';
 import { RevisionStackStore } from './revision-stack.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
 import { initializeRevisionAuthorship, RevisionAuthorshipStore } from './revision-authorship.ts';
@@ -24,6 +25,8 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
     CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),UNIQUE(revision_id,number));`);
   initializeRevisionDependencies(db);
   initializeRevisionAuthorship(db);
+  initializeRevisionLifecycle(db);
+  const lifecycle = new RevisionLifecycleStore(db);
   const authorship = new RevisionAuthorshipStore(db);
   const reader = new RevisionStackStore(db), dependencies = new RevisionDependencyStore(db);
   const version = (id: string, number = 1, attribution: ActorAttribution | undefined = alice, content = 'Original source\n') => {
@@ -34,11 +37,11 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
   };
   const entity = (id: string, attribution: ActorAttribution | undefined = alice) => {
     const value: Revision = { id, title: `Title ${id}`, summary: 'Original summary', kind: id.startsWith('P') ? 'paper' : id.startsWith('L') ? 'document' : 'code', status: 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-    db.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'revision',?)").run(id, JSON.stringify(value)); version(id, 1, attribution); authorship.ensure(id); return value;
+    db.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'revision',?)").run(id, JSON.stringify(value)); version(id, 1, attribution); authorship.ensure(id); lifecycle.ensure(id); return value;
   };
   for (const id of ids) entity(id);
   const mutate = (id: string, add: string[], remove: string[] = []) => dependencies.mutate(id, { direction: 'parents', add, remove, expectedRelationshipVersion: dependencies.version(id), expectedAccessEpoch: 1 }, alice);
-  const snapshot = () => ({ schema: db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY name").all(), rows: Object.fromEntries(['entities', 'versions', 'revision_dependency_versions', 'revision_dependency_edges', 'revision_dependency_operations', 'revision_dependency_transactions', 'revision_authorship', 'revision_author_transactions', 'revision_author_operations'].map(table => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()])), version: db.prepare('PRAGMA user_version').get() });
+  const snapshot = () => ({ schema: db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY name").all(), rows: Object.fromEntries(['entities', 'versions', 'revision_dependency_versions', 'revision_dependency_edges', 'revision_dependency_operations', 'revision_dependency_transactions', 'revision_authorship', 'revision_author_transactions', 'revision_author_operations', 'revision_lifecycle', 'revision_lifecycle_operations', 'revision_lifecycle_transactions'].map(table => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()])), version: db.prepare('PRAGMA user_version').get() });
   // Large boundary fixtures seed only edges; they do not fabricate source bodies
   // or run tens of thousands of mutation requests just to exercise read budgets.
   const seedEdges = (edges: [string, string][]) => {
@@ -48,7 +51,13 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
     db.exec('BEGIN'); try { for (const [child, parent] of edges) insert.run(child, parent, operationId); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; }
   };
   const title = (id: string, value: string) => db.prepare("UPDATE entities SET data=json_set(data,'$.title',?) WHERE id=?").run(value, id);
-  const status = (id: string, value: Revision['status']) => db.prepare("UPDATE entities SET data=json_set(data,'$.status',?) WHERE id=?").run(value, id);
+  // These metadata-only graph fixtures model an observed legacy status at
+  // lifecycle version zero, without inventing actor or action history.
+  const status = (id: string, value: Revision['status']) => {
+    assert.equal(lifecycle.state(id).version, 0);
+    db.prepare("UPDATE entities SET data=json_set(data,'$.status',?) WHERE id=?").run(value, id);
+    db.prepare('DELETE FROM revision_lifecycle WHERE revision_id=?').run(id); lifecycle.ensure(id);
+  };
   return { db, reader, dependencies, entity, version, mutate, seedEdges, title, status, snapshot, close: () => db.close() };
 }
 

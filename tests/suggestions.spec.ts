@@ -1,3 +1,4 @@
+import { chooseLifecycle } from './revision-lifecycle-browser';
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 
 async function createDraft(page: Page, info: TestInfo, source: string) {
@@ -42,7 +43,7 @@ test('an exact suggested replacement creates a new version and resets acceptance
   await createDraft(page, info, source);
   await page.getByRole('button', { name: 'Run Local Checks', exact: true }).click();
   await expect(page.getByText(/Local text checks completed for 1 file/)).toBeVisible();
-  await page.getByRole('combobox', { name: 'Revision status', exact: true }).selectOption('accepted');
+  await chooseLifecycle(page, 'Accept Reviewed Version');
   await expect(page.locator('.revision-title .badge')).toHaveText('Accepted');
   await page.getByRole('button', { name: /^Discussion/ }).click();
   const thread = await suggest(page, 2, replacement, 'The schedule requires three weeks.');
@@ -59,7 +60,7 @@ test('an exact suggested replacement creates a new version and resets acceptance
   await thread.screenshot({ path: `.data/${info.project.name}-suggestion-preview.png` });
   await confirmation.getByRole('button', { name: 'Apply as New Version', exact: true }).click();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
-  await expect(page.getByRole('combobox', { name: 'Revision status', exact: true })).toHaveValue('needs_review');
+  await expect(page.getByTestId('lifecycle-status')).toHaveText('Needs Review');
   await expect(page.getByLabel('Source passage text', { exact: true })).toHaveJSProperty('textContent', source.replace('The requested extension is fourteen days.', replacement));
   await expect(thread.locator('.thread-heading .badge')).toHaveText('Open');
   await expect(thread.locator('.suggestion-application')).toContainText('applied this edit as version 2');

@@ -1,3 +1,4 @@
+import { isRevisionStatus } from './revision-status';
 import type { ActorAttribution, RevisionStatus } from './types';
 import type { ObjectAccess } from './policy';
 import { isRevisionId } from './revision-dependencies';
@@ -45,6 +46,7 @@ export interface RevisionAuthorshipSnapshot {
   authorship: RevisionAuthorship;
   head: RevisionAuthorHead;
   status: RevisionStatus;
+  closeOnAccept: boolean;
   access: ObjectAccess;
   accessEpoch: number;
 }
@@ -111,8 +113,8 @@ export function validRevisionAuthorResult(value: unknown, id: string, input: Rev
 }
 
 export function isRevisionAuthorshipSnapshot(value: unknown, id: string): value is RevisionAuthorshipSnapshot {
-  if (!(object(value) && keys(value, ['authorship', 'head', 'status', 'access', 'accessEpoch']) && isRevisionAuthorship(value.authorship, id) && isRevisionAuthorHead(value.head)
-    && typeof value.status === 'string' && ['draft', 'needs_review', 'changes_requested', 'accepted', 'closed'].includes(value.status) && integer(value.accessEpoch)
+  if (!(object(value) && keys(value, ['authorship', 'head', 'status', 'closeOnAccept', 'access', 'accessEpoch']) && isRevisionAuthorship(value.authorship, id) && isRevisionAuthorHead(value.head)
+    && isRevisionStatus(value.status) && typeof value.closeOnAccept === 'boolean' && integer(value.accessEpoch)
     && object(value.access) && object(value.access.policy) && value.access.policy.objectId === id && object(value.access.capabilities))) return false;
   const capabilities = value.access.capabilities;
   return ['view', 'edit', 'interact', 'managePolicy'].every(key => typeof capabilities[key] === 'boolean');

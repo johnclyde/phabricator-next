@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { revisionDependencyInputHash } from './revision-dependencies.ts';
 import { type RevisionAuthorInput, type RevisionAuthorshipSnapshot, type RevisionAuthorHistory } from '../shared/revision-authorship.ts';
 import { revisionAuthorInputHash } from './revision-authorship.ts';
+import type { RevisionLifecycleInput, RevisionLifecycleSnapshot, RevisionLifecycleHistory } from '../shared/revision-lifecycle.ts';
+import { revisionLifecycleInputHash } from './revision-lifecycle.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -60,6 +62,30 @@ export class AccessLayer {
   revision(id: string): RevisionDetail {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  revisionLifecycle(id: string): RevisionLifecycleSnapshot {
+    this.require(id);
+    const access = this.describe(id), snapshot = this.store.revisionLifecycle.snapshot(id, this.principal);
+    return { ...snapshot, actions: snapshot.actions.map(action => access.capabilities.edit ? action : { ...action, available: false, reason: 'Editing permission is required for lifecycle actions.', targetStatus: null }), access, accessEpoch: this.policies.epoch() };
+  }
+  revisionLifecycleHistory(id: string, query: { before?: number; limit?: number; expectedLifecycleVersion?: number }): RevisionLifecycleHistory {
+    this.require(id);
+    return { ...this.store.revisionLifecycle.history(id, query), accessEpoch: this.policies.epoch() };
+  }
+  presentRevisionLifecycle(id: string, input: RevisionLifecycleInput, response: MutationResponse): MutationResponse {
+    this.require(id, 'edit');
+    const invalid = (): never => { throw new HttpError(409, 'This saved lifecycle receipt does not match the requested operation.', 'REVISION_LIFECYCLE_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.revisionLifecycle.operationRevisionId(body.operationId) !== id) return invalid();
+      operation = this.store.revisionLifecycle.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.attribution.principalId !== this.principal
+      || operation.inputSha256 !== revisionLifecycleInputHash(input) || !isDeepStrictEqual(operation.input, input)
+      || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionAuthorship(id: string): RevisionAuthorshipSnapshot {
     this.require(id);

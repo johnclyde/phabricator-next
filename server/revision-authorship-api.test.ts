@@ -1,3 +1,4 @@
+import { lifecycleAction, closeRevision } from '../tests/revision-lifecycle-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -13,8 +14,8 @@ import { revisionAuthorInputHash } from './revision-authorship.ts';
 const members = (...principalIds: string[]) => ({ kind: 'principals' as const, principalIds });
 const workspace = { kind: 'workspace' as const };
 type ErrorBody = { error: string; code?: string };
-async function start(basePath = '/') {
-  const store = new Store({ path: ':memory:' });
+async function start(basePath = '/', closeOnAccept = false) {
+  const store = new Store({ path: ':memory:', revisionLifecycle: { closeOnAccept } });
   const provision = createAuth({ database: store.database, mode: 'local', basePath: '/', provisioning: true });
   const alice = await provision.createAccount({ username: 'alice', displayName: 'Alice Author', password: 'Alice authorship password' });
   const bob = await provision.createAccount({ username: 'bob', displayName: 'Bob Editor', password: 'Bob authorship password' });
@@ -45,7 +46,7 @@ for (const basePath of ['/', '/mounted/']) test(`authorship is mutable metadata 
     for (const kind of ['code', 'paper', 'document'] as const) {
       const detail = app.revision(kind), id = detail.revision.id;
       app.store.saveReview(id, 1, { provider: 'local', model: 'test-check', summary: 'Recorded check', findings: [] }, app.actor);
-      app.store.updateRevision(id, { status: 'accepted', expectedVersion: 1 }, app.actor);
+      lifecycleAction(app.store, id, 'accept_reviewed', app.actor);
       const before = app.evidence(), epoch = app.policies.epoch(), original = await app.request<RevisionAuthorshipSnapshot>(app.path(id), 'GET', undefined, 'reader');
       assert.equal(original.status, 200); assert.equal(original.headers.get('cache-control'), 'no-store'); assert.equal(original.body.authorship.author?.principalId, app.alice.id);
       const data = app.input(id), saved = await app.request<RevisionAuthorReceipt>(app.path(id), 'POST', data, 'alice', `assign-${id}`);
@@ -112,16 +113,34 @@ test('handoff losing only edit acknowledges minimally; an ordinary editor does n
 test('fresh exact pins and principal validation are atomic; historical replay does not require the former recipient still active', async () => {
   const app = await start();
   try {
-    const id = app.revision().revision.id, original = app.input(id), before = app.evidence();
+    const id = app.revision().revision.id; closeRevision(app.store, id, app.actor); const original = app.input(id), before = app.evidence();
     for (const patch of [{ expectedAuthorVersion: 1 }, { expectedVersion: 2 }, { expectedVersionId: 'other' }, { expectedContentHash: 'f'.repeat(64) }, { expectedAccessEpoch: original.expectedAccessEpoch + 1 }, { authorId: app.alice.id }]) assert.equal((await app.request(app.path(id), 'POST', { ...original, ...patch }, 'alice', `bad-pin-${Object.keys(patch)[0]}`)).status, 409);
     assert.deepEqual(app.evidence(), before); assert.equal(app.store.revisionAuthorship.state(id).version, 0);
     const saved = await app.request<RevisionAuthorReceipt>(app.path(id), 'POST', original, 'alice', 'historical'); assert.equal(saved.status, 200);
     app.auth.setAccountDisabled(app.bob.id, true);
     assert.equal((await app.request(app.path(id), 'POST', original, 'alice', 'historical')).status, 200);
     assert.equal((await app.request(app.path(id), 'POST', app.input(id), 'alice', 'disabled-recipient')).status, 400);
-    app.store.updateRevision(id, { status: 'closed', expectedVersion: 1 }, app.actor);
     assert.equal((await app.request(app.path(id), 'POST', app.input(id, app.alice.id, 'commandeer'), 'alice', 'closed-claim')).status, 409);
     assert.equal((await app.request(app.path(id), 'POST', app.input(id, app.carol.id), 'alice', 'closed-transfer')).status, 200);
+  } finally { await app.close(); }
+});
+
+test('close-on-accept is exposed and prevents commandeering accepted revisions while retaining explicit transfers and abandoned claims', async () => {
+  const app = await start('/', true);
+  try {
+    const id = app.revision().revision.id;
+    const oldClaim = app.input(id, app.bob.id, 'commandeer');
+    const claim = await app.request<RevisionAuthorReceipt>(app.path(id), 'POST', oldClaim, 'bob', 'before-accept'); assert.equal(claim.status, 200);
+    app.store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Recorded evidence', findings: [] }, app.actor);
+    lifecycleAction(app.store, id, 'accept_reviewed', app.actor);
+    const read = await app.request<RevisionAuthorshipSnapshot>(app.path(id)); assert.equal(read.body.closeOnAccept, true); assert.equal(read.body.status, 'accepted');
+    const before = app.store.revisionAuthorship.history(id);
+    const denied = await app.request(app.path(id), 'POST', app.input(id, app.alice.id, 'commandeer'), 'alice', 'accepted-claim');
+    assert.equal(denied.status, 409); assert.equal(denied.body.code, 'REVISION_AUTHOR_CLOSED'); assert.deepEqual(app.store.revisionAuthorship.history(id), before);
+    const replay = await app.request<RevisionAuthorReceipt>(app.path(id), 'POST', oldClaim, 'bob', 'before-accept'); assert.equal(replay.status, 200); assert.deepEqual(replay.body.transaction, claim.body.transaction);
+    assert.equal((await app.request(app.path(id), 'POST', app.input(id, app.carol.id), 'alice', 'accepted-transfer')).status, 200);
+    const abandoned = app.revision().revision.id; lifecycleAction(app.store, abandoned, 'abandon', app.actor);
+    assert.equal((await app.request(app.path(abandoned), 'POST', app.input(abandoned, app.bob.id, 'commandeer'), 'bob', 'abandoned-claim')).status, 200);
   } finally { await app.close(); }
 });
 

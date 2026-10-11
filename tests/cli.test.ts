@@ -1,3 +1,4 @@
+import { lifecycleAction } from './revision-lifecycle-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -111,7 +112,7 @@ test('CLI imports later complete Git versions with explicit pins, source view ac
     assert.equal(initial.code, 0, initial.stderr); const created = JSON.parse(initial.stdout) as RevisionDetail; const id = created.revision.id; const first = created.versions[0]!;
     store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Explicit fixture evidence', findings: [] });
     store.createComment(id, { versionId: first.id, body: 'Keep the discussion attached to the original source.', filePath: 'README.md', line: 1 });
-    store.updateRevision(id, { status: 'accepted', expectedVersion: 1 });
+    lifecycleAction(store, id, 'accept_reviewed');
     const before = store.detail(id); const revisionPolicy = app.policies.policy(id, author.id);
     const policy = app.policies.policy(repository.id, owner.id);
     app.policies.setPolicy(repository.id, { expectedVersion: policy.version, spaceId: policy.spaceId, ...policy.rules, edit: ownerOnly }, owner.id);
@@ -141,7 +142,7 @@ test('CLI imports later complete Git versions with explicit pins, source view ac
     assert.equal(second.gitSource?.manifest.find(file => file.path === 'tools/check.sh')?.mode, '100644'); assert.equal(first.gitSource?.manifest.find(file => file.path === 'tools/check.sh')?.mode, '100755');
     for (const file of second.files) { const bytes = Buffer.from(file.content, 'utf8'); assert.equal(second.gitSource?.manifest.find(entry => entry.path === file.path)?.objectId, createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')); }
     assert.deepEqual(app.policies.policy(id, author.id), revisionPolicy);
-    assert.throws(() => store.updateRevision(id, { expectedVersion: 2, status: 'accepted' }), /current-version review evidence/);
+    assert.throws(() => lifecycleAction(store, id, 'accept_reviewed'), { code: 'REVISION_LIFECYCLE_ACTION_UNAVAILABLE' });
     const append = async (previous: RevisionVersion, commitId: string, key: string): Promise<RevisionDetail> => {
       const next = await command(['import-git-version', id, '--commit', commitId, '--version', String(previous.number), '--version-id', previous.id, '--content-hash', previous.contentHash, '--message', key, '--request-id', key, '--json']); assert.equal(next.code, 0, next.stderr); return JSON.parse(next.stdout) as RevisionDetail;
     };

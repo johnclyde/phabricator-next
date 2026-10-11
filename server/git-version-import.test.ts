@@ -1,3 +1,4 @@
+import { lifecycleAction, lifecycleInput } from '../tests/revision-lifecycle-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -67,7 +68,7 @@ test('a source viewer can append Git provenance to an editable review without ch
     const comment = app.store.createComment(id, { body: 'Retain this proposal', versionId: version.id, filePath: 'old.txt', passage: { start: 0, end: 8, quote: 'Original' }, suggestion: { replacement: 'Earlier' } });
     app.store.updateThread(id, comment.id, { status: 'resolved', expectedThreadVersion: 1, versionId: version.id });
     app.store.saveReview(id, 1, { provider: 'local', model: 'deterministic-checks', summary: 'Old evidence', findings: [] });
-    app.store.updateRevision(id, { status: 'accepted', expectedVersion: 1 });
+    lifecycleAction(app.store, id, 'accept_reviewed');
     const ownSpace = app.policies.createSpace({ name: 'Review Space', view: members(app.alice.id, app.bob.id), edit: members(app.bob.id) }, app.bob.id);
     app.policy(id, { spaceId: ownSpace.id, view: members(app.alice.id, app.bob.id), edit: members(app.alice.id, app.bob.id), interact: members(app.bob.id) });
     app.policy('R1', { edit: members(app.bob.id) });
@@ -76,12 +77,13 @@ test('a source viewer can append Git provenance to an editable review without ch
     const saved = await app.request<RevisionDetail>(route(id), 'POST', input(old), 'alice', 'append'); assert.equal(saved.status, 201, JSON.stringify(saved.body));
     const detail = saved.body; const imported = detail.versions[1]!;
     assert.equal(detail.revision.currentVersion, 2); assert.equal(detail.revision.status, 'needs_review');
-    const stable = ({ currentVersion: _version, status: _status, updatedAt: _updated, ...metadata }: RevisionDetail['revision']) => metadata;
+    const stable = ({ currentVersion: _version, status: _status, updatedAt: _updated, lifecycleVersion: _lifecycle, ...metadata }: RevisionDetail['revision']) => metadata;
+    assert.equal(detail.revision.lifecycleVersion, old.revision.lifecycleVersion! + 1); assert.equal(app.store.revisionLifecycle.history(id).transactions[0]!.action, 'source_updated');
     assert.deepEqual(stable(detail.revision), stable(old.revision)); assert.deepEqual(imported.files, source); assert.equal(imported.contentHash, contentHash(source)); assert.deepEqual(imported.gitSource, snapshot().provenance);
     assert.equal(imported.attribution?.principalId, app.alice.id); assert.equal(imported.message, input(old).message); assert.equal(detail.activity[0]?.attribution?.principalId, app.alice.id);
     for (const table of ['comments', 'review_threads', 'thread_events', 'suggestion_applications', 'reviews', 'object_policies', 'policy_meta']) assert.deepEqual(app.rows(table), before[table], table);
     assert.deepEqual(app.rows('versions').slice(0, 1), before.versions); assert.deepEqual(detail.versions[0], old.versions[0]); assert.equal(detail.threads[0]!.status, 'resolved');
-    assert.equal((await app.request(`/api/revisions/${id}`, 'PATCH', { status: 'accepted', expectedVersion: 2 })).status, 409);
+    assert.equal((await app.request(`/api/revisions/${id}/lifecycle`, 'POST', lifecycleInput(app.store, id, 'accept_reviewed'), 'alice', 'new-source-needs-evidence')).status, 409);
     assert.equal((await app.request(`/api/revisions/${id}/suggestions/${comment.id}/apply`, 'POST', { expectedVersion: 2, expectedVersionId: imported.id, expectedContentHash: imported.contentHash, expectedThreadVersion: 2 })).status, 409);
     const raw = app.rows('versions'); await app.close(); const reopened = createStore({ path: databasePath });
     try { assert.deepEqual(reopened.database.prepare('SELECT * FROM versions ORDER BY rowid').all(), raw); assert.deepEqual(reopened.detail(id).versions[1], imported); } finally { reopened.close(); }
@@ -214,22 +216,29 @@ test('competing writer revocations block fresh and newly visible saved version i
     for (const reference of ['source', 'target'] as const) for (const phase of ['fresh', 'replay'] as const) {
       app.policy('R1', { view: workspace, edit: workspace });
       const initial = app.create(); const id = initial.revision.id; const body = input(initial); const key = `${reference}-${phase}`;
+      const initialEntity = app.store.database.prepare('SELECT data FROM entities WHERE id=?').get(id)!.data as string;
+      const initialLifecycle = app.store.database.prepare('SELECT version,data FROM revision_lifecycle WHERE revision_id=?').get(id)!;
       let replay: { key: string; fingerprint: string; status: number; body: string; created_at: string } | undefined;
-      let committed: { entity: Record<string, unknown>; version: Record<string, unknown>; activity: Record<string, unknown> } | undefined;
+      let committed: { entity: Record<string, unknown>; version: Record<string, unknown>; activity: Record<string, unknown>; lifecycle: Record<string, unknown>; transition: Record<string, unknown> } | undefined;
       if (phase === 'replay') {
         assert.equal((await app.request(route(id), 'POST', body, 'alice', key)).status, 201);
         replay = app.store.database.prepare('SELECT * FROM idempotency ORDER BY created_at DESC LIMIT 1').get() as typeof replay; assert.ok(replay); app.store.database.prepare('DELETE FROM idempotency WHERE key=?').run(replay.key);
-        committed = { entity: app.store.database.prepare('SELECT * FROM entities WHERE id=?').get(id)!, version: app.store.database.prepare('SELECT * FROM versions WHERE revision_id=? AND number=2').get(id)!, activity: app.store.database.prepare('SELECT * FROM activity WHERE object_id=? ORDER BY sequence DESC LIMIT 1').get(id)! };
+        committed = { entity: app.store.database.prepare('SELECT * FROM entities WHERE id=?').get(id)!, version: app.store.database.prepare('SELECT * FROM versions WHERE revision_id=? AND number=2').get(id)!, activity: app.store.database.prepare('SELECT * FROM activity WHERE object_id=? ORDER BY sequence DESC LIMIT 1').get(id)!, lifecycle: app.store.database.prepare('SELECT * FROM revision_lifecycle WHERE revision_id=?').get(id)!, transition: app.store.database.prepare('SELECT * FROM revision_lifecycle_transactions WHERE revision_id=? ORDER BY version DESC LIMIT 1').get(id)! };
       }
       const current = app.policies.policy(reference === 'source' ? 'R1' : id, app.bob.id);
       const policy = { ...current, version: current.version + 1, rules: { ...current.rules, ...(reference === 'source' ? { view: members(app.bob.id) } : {}), edit: members(app.bob.id) } };
-      const before = app.store.detail(id); const versions = app.rows('versions'); const activity = app.rows('activity');
+      const before = app.store.detail(id); const versions = app.rows('versions'); const activity = app.rows('activity'); const lifecycles = app.rows('revision_lifecycle'); const transitions = app.rows('revision_lifecycle_transactions');
       if (committed) {
         // Rewind this disposable fixture to the genuinely uncommitted base.
-        // The competing writer publishes head, version, event and receipt
+        // The competing writer publishes head, version, lifecycle, event and receipt
         // together, so HTTP preflight still sees its pinned v1 through WAL.
         app.store.transaction(() => {
-          app.store.database.prepare('UPDATE entities SET data=? WHERE id=?').run(JSON.stringify(initial.revision), id);
+          const trigger = app.store.database.prepare("SELECT sql FROM sqlite_schema WHERE name='revision_lifecycle_transactions_no_delete'").get()!.sql as string;
+          app.store.database.exec('DROP TRIGGER revision_lifecycle_transactions_no_delete');
+          app.store.database.prepare('DELETE FROM revision_lifecycle_transactions WHERE id=?').run(committed!.transition.id as string);
+          app.store.database.exec(trigger);
+          app.store.database.prepare('UPDATE revision_lifecycle SET version=?,data=? WHERE revision_id=?').run(initialLifecycle.version as number, initialLifecycle.data as string, id);
+          app.store.database.prepare('UPDATE entities SET data=? WHERE id=?').run(initialEntity, id);
           app.store.database.prepare('DELETE FROM versions WHERE id=?').run(committed!.version.id as string);
           app.store.database.prepare('DELETE FROM activity WHERE id=?').run(committed!.activity.id as string);
         });
@@ -239,7 +248,7 @@ test('competing writer revocations block fresh and newly visible saved version i
         const db=new DatabaseSync(workerData.databasePath); db.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
         db.prepare('UPDATE object_policies SET data=? WHERE object_id=?').run(JSON.stringify(workerData.policy),workerData.policy.objectId);
         db.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run();
-        if(workerData.committed){const c=workerData.committed;db.prepare('UPDATE entities SET data=? WHERE id=?').run(c.entity.data,c.entity.id);db.prepare('INSERT INTO versions (id,revision_id,number,data) VALUES (?,?,?,?)').run(c.version.id,c.version.revision_id,c.version.number,c.version.data);db.prepare('INSERT INTO activity (sequence,id,object_id,data) VALUES (?,?,?,?)').run(c.activity.sequence,c.activity.id,c.activity.object_id,c.activity.data);}
+        if(workerData.committed){const c=workerData.committed;db.prepare('UPDATE entities SET data=? WHERE id=?').run(c.entity.data,c.entity.id);db.prepare('INSERT INTO versions (id,revision_id,number,data) VALUES (?,?,?,?)').run(c.version.id,c.version.revision_id,c.version.number,c.version.data);db.prepare('INSERT INTO activity (sequence,id,object_id,data) VALUES (?,?,?,?)').run(c.activity.sequence,c.activity.id,c.activity.object_id,c.activity.data);db.prepare('UPDATE revision_lifecycle SET version=?,data=? WHERE revision_id=?').run(c.lifecycle.version,c.lifecycle.data,c.lifecycle.revision_id);const t=c.transition;db.prepare('INSERT INTO revision_lifecycle_transactions(id,revision_id,version,operation_id,data,before_state,after_state) VALUES(?,?,?,?,?,?,?)').run(t.id,t.revision_id,t.version,t.operation_id,t.data,t.before_state,t.after_state);}
         if(workerData.replay){const r=workerData.replay;db.prepare('INSERT INTO idempotency (key,fingerprint,status,body,created_at) VALUES (?,?,?,?,?)').run(r.key,r.fingerprint,r.status,r.body,r.created_at);}
         parentPort.once('message',()=>{db.exec('COMMIT');db.close();parentPort.close();});parentPort.postMessage('locked');
       `)}`), { workerData: { databasePath, policy, replay, committed } });
@@ -248,6 +257,7 @@ test('competing writer revocations block fresh and newly visible saved version i
         app.store.transaction = function<T>(work: () => T): T { entered++; app.store.transaction = transaction; worker.postMessage('commit'); return transaction(work); };
         const denied = await app.request(route(id), 'POST', body, 'alice', key); assert.equal(entered, 1); assert.equal(denied.status, reference === 'source' ? 404 : 403);
         assert.deepEqual(app.store.detail(id), before); assert.deepEqual(app.rows('versions'), versions); assert.deepEqual(app.rows('activity'), activity);
+        assert.deepEqual(app.rows('revision_lifecycle'), lifecycles); assert.deepEqual(app.rows('revision_lifecycle_transactions'), transitions);
         if (replay) assert.equal(app.store.database.prepare('SELECT body FROM idempotency WHERE key=?').get(replay.key)!.body, replay.body);
       } finally { app.store.transaction = transaction; await worker.terminate(); }
     }

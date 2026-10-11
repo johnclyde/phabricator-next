@@ -1,8 +1,10 @@
+import { isRevisionStatus } from '../shared/revision-status.ts';
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { isRevisionId } from '../shared/revision-dependencies.ts';
 import { canonicalRevisionStack, revisionStackTopology, REVISION_STACK_LIMITS, type RevisionStack, type RevisionStackNode, type RevisionStackEdge } from '../shared/revision-stack.ts';
 import { HttpError } from './validation.ts';
+import { RevisionLifecycleStore } from './revision-lifecycle.ts';
 import { RevisionAuthorshipStore } from './revision-authorship.ts';
 
 const invalid = () => new HttpError(409, 'The revision stack cannot be verified.', 'REVISION_STACK_INVALID');
@@ -17,7 +19,7 @@ let savepoint = 0;
 /** Metadata-only graph reads. Stored source identities are bound to the result;
  * manuscript bodies and package bytes are not loaded or reverified here. */
 export class RevisionStackStore {
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(private readonly database: DatabaseSync, private readonly closeOnAccept = false) {}
 
   read(id: string, visible: (id: string) => boolean, accessEpoch: number, expectedSnapshotId?: string): RevisionStack {
     if (!isRevisionId(id)) throw unavailable();
@@ -40,7 +42,7 @@ export class RevisionStackStore {
       AND json_type(data,'$.updatedAt')='text') AS validTypes FROM entities WHERE id=? AND kind='revision'`).get(id) as Record<string, unknown> | undefined;
     if (!row) throw root ? unavailable() : invalid();
     if (row.validTypes !== 1 || row.id !== id || !text(row.title, 1000) || !['code', 'paper', 'document'].includes(String(row.kind))
-      || !['draft', 'needs_review', 'changes_requested', 'accepted', 'closed'].includes(String(row.status))
+      || !isRevisionStatus(row.status)
       || !natural(row.currentVersion) || row.currentVersion < 1 || !text(row.updatedAt, 64) || !Number.isFinite(Date.parse(row.updatedAt))) throw invalid();
     const version = this.database.prepare(`SELECT id,revision_id,number,json_extract(data,'$.id') AS storedId,
       json_extract(data,'$.revisionId') AS storedRevisionId,json_extract(data,'$.number') AS storedNumber,
@@ -69,12 +71,12 @@ export class RevisionStackStore {
     }
     const relationship = this.database.prepare('SELECT version FROM revision_dependency_versions WHERE revision_id=?').get(id) as { version: unknown } | undefined;
     if (relationship && !natural(relationship.version)) throw invalid();
-    let authorship;
-    try { authorship = new RevisionAuthorshipStore(this.database).state(id); } catch { throw invalid(); }
-    if (authorship.originalAuthor?.principalId !== author?.principalId || authorship.originalAuthor?.displayName !== author?.displayName) throw invalid();
+    let authorship, lifecycle;
+    try { authorship = new RevisionAuthorshipStore(this.database).state(id); lifecycle = new RevisionLifecycleStore(this.database).state(id); } catch { throw invalid(); }
+    if (lifecycle.status !== row.status || authorship.originalAuthor?.principalId !== author?.principalId || authorship.originalAuthor?.displayName !== author?.displayName) throw invalid();
     return { id, title: row.title, kind: row.kind as RevisionStackNode['kind'], status: row.status as RevisionStackNode['status'], currentVersion: row.currentVersion, updatedAt: row.updatedAt,
       relationshipVersion: relationship ? relationship.version as number : 0,
-      head: { versionId: version.id, number: row.currentVersion, contentHash: version.contentHash }, author: authorship.author, originalAuthor: author, authorVersion: authorship.version };
+      head: { versionId: version.id, number: row.currentVersion, contentHash: version.contentHash }, author: authorship.author, originalAuthor: author, authorVersion: authorship.version, lifecycleVersion: lifecycle.version };
   }
 
   private snapshot(id: string, visible: (id: string) => boolean, accessEpoch: number): RevisionStack {
@@ -114,8 +116,8 @@ export class RevisionStackStore {
     }
     const sortedEdges = [...edges.values()].sort((a, b) => compare(a.childId, b.childId) || compare(a.parentId, b.parentId));
     let topology: ReturnType<typeof revisionStackTopology>;
-    try { topology = revisionStackTopology(id, [...nodes.values()], sortedEdges); } catch { throw invalid(); }
-    const payload: Omit<RevisionStack, 'snapshotId'> = { format: 'phabricator.revision-stack.v2', revisionId: id, accessEpoch,
+    try { topology = revisionStackTopology(id, [...nodes.values()], sortedEdges, this.closeOnAccept); } catch { throw invalid(); }
+    const payload: Omit<RevisionStack, 'snapshotId'> = { format: 'phabricator.revision-stack.v3', revisionId: id, accessEpoch, closeOnAccept: this.closeOnAccept,
       nodes: topology.order.map(key => nodes.get(key)!), edges: sortedEdges, openParentIds: topology.openParentIds };
     const canonical = canonicalRevisionStack(payload);
     if (Buffer.byteLength(canonical, 'utf8') > REVISION_STACK_LIMITS.bytes) throw limited();

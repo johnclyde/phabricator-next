@@ -203,7 +203,7 @@ test('access controls share readable documents while gating wiki edits, source e
     await expect(bob.page.getByRole('button', { name: 'Add Comment', exact: true })).toHaveCount(0);
     await expect(bob.page.getByText('Read-only discussion. Interact access is required to comment.', { exact: true })).toBeVisible();
     await expect(bob.page.getByRole('button', { name: 'Run Local Checks', exact: true })).toBeDisabled();
-    await expect(bob.page.getByRole('combobox', { name: 'Revision status', exact: true })).toBeDisabled();
+    await expect(bob.page.getByRole('region', { name: 'Revision Lifecycle', exact: true }).locator('.revision-lifecycle-actions button').first()).toBeDisabled();
     await expect(bob.page.getByRole('button', { name: 'Download source', exact: true })).toBeEnabled();
     expect(await bob.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await bob.page.screenshot({ path: `.data/${info.project.name}-policies.png`, fullPage: true });

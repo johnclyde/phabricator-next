@@ -1,3 +1,4 @@
+import { lifecycleAction } from './revision-lifecycle-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -40,7 +41,7 @@ test('applying a stored proposal creates exact new source, invalidates acceptanc
     assert.deepEqual(comment.suggestion, { replacement }); assert.deepEqual(comment.attribution, reviewer);
     store.updateThread(id, comment.id, { status: 'resolved', expectedThreadVersion: 1, versionId: first.id }, reviewer);
     store.saveReview(id, 1, { provider: 'local', model: 'deterministic', summary: 'No blocking findings.', findings: [] }, author);
-    store.updateRevision(id, { expectedVersion: 1, status: 'accepted' }, author);
+    lifecycleAction(store, id, 'accept_reviewed', author);
     const before = store.detail(id); const versionJson = (raw(store, 'versions')[0] as { data: string }).data;
     const applied = store.applySuggestion(id, comment.id, expected(before, comment.id), author);
     assert.equal(applied.revision.currentVersion, 2); assert.equal(applied.revision.status, 'needs_review');
@@ -177,7 +178,7 @@ test('source, acceptance, thread, application, activity and replay writes roll b
   try {
     const detail = create(store); const id = detail.revision.id; const root = proposal(store, detail);
     store.saveReview(id, 1, { provider: 'local', model: 'deterministic', summary: 'No blockers.', findings: [] }, author);
-    store.updateRevision(id, { expectedVersion: 1, status: 'accepted' }, author);
+    lifecycleAction(store, id, 'accept_reviewed', author);
     const input = expected(store.detail(id), root.id); const before = snapshot(store);
     const apply = () => store.mutate('apply-once', 'apply-fingerprint', () => ({ status: 201, body: store.applySuggestion(id, root.id, input, author) }));
     for (const trigger of [
@@ -246,8 +247,8 @@ test('schema 5 migration preserves original bytes and provenance; old replay get
   const directory = mkdtempSync(join(tmpdir(), 'phab-suggestion-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaFive(path); const store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 25);
-    assert.deepEqual(store.detail('P1'), { ...old.detail, revision: { ...old.detail.revision, authorId: null, authorDisplayName: null, authorVersion: 0 }, suggestionApplications: [] });
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 26);
+    assert.deepEqual(store.detail('P1'), { ...old.detail, revision: { ...old.detail.revision, authorId: null, authorDisplayName: null, authorVersion: 0, lifecycleVersion: 0 }, suggestionApplications: [] });
     for (const [table, bytes] of old.bytes) assert.deepEqual((raw(store, table) as { data: string }[]).map(row => row.data), bytes);
     assert.equal(store.detail('P1').comments[0]!.attribution, undefined);
     const auth = createAuth({ database: store.database, mode: 'local', basePath: '/' });

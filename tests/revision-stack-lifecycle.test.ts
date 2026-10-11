@@ -7,9 +7,9 @@ import { canonicalRevisionStack, type RevisionStack, type RevisionStackContent, 
 import type { ObjectAccess } from '../shared/policy.ts';
 
 const time = '2026-10-11T12:00:00Z', path = '/api/revisions/D1/dependencies/graph', key = 'revision-stack:D1';
-const nodes: RevisionStackNode[] = ['D1', 'P2'].map((id, index) => ({ id, title: index ? 'Private parent title' : 'Source title', kind: index ? 'paper' : 'code', status: 'needs_review', currentVersion: 1, updatedAt: time, relationshipVersion: 1, head: { versionId: `${id}-v1`, number: 1, contentHash: 'a'.repeat(64) }, author: { principalId: 'U1', displayName: 'Original author' }, originalAuthor: { principalId: 'U1', displayName: 'Original author' }, authorVersion: 0 }));
+const nodes: RevisionStackNode[] = ['D1', 'P2'].map((id, index) => ({ id, title: index ? 'Private parent title' : 'Source title', kind: index ? 'paper' : 'code', status: 'needs_review', currentVersion: 1, updatedAt: time, relationshipVersion: 1, head: { versionId: `${id}-v1`, number: 1, contentHash: 'a'.repeat(64) }, author: { principalId: 'U1', displayName: 'Original author' }, originalAuthor: { principalId: 'U1', displayName: 'Original author' }, authorVersion: 0, lifecycleVersion: 0 }));
 function graph(root = 'D1', overrides: Partial<RevisionStackContent> = {}): RevisionStack {
-  const content: RevisionStackContent = { format: 'phabricator.revision-stack.v2', revisionId: root, accessEpoch: 1, nodes, edges: [{ childId: 'D1', parentId: 'P2' }], openParentIds: root === 'D1' ? ['P2'] : [], ...overrides };
+  const content: RevisionStackContent = { format: 'phabricator.revision-stack.v3', revisionId: root, accessEpoch: 1, closeOnAccept: false, nodes, edges: [{ childId: 'D1', parentId: 'P2' }], openParentIds: root === 'D1' ? ['P2'] : [], ...overrides };
   return { ...content, snapshotId: createHash('sha256').update(canonicalRevisionStack(content)).digest('hex') };
 }
 const access = (id: string): ObjectAccess => ({ policy: { objectId: id, version: 1, spaceId: 'S1', rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit: false, interact: false, managePolicy: false }, viewLabel: 'Workspace', editLabel: 'Workspace', interactLabel: 'Workspace' });
@@ -71,7 +71,7 @@ test('known historical File or repository denial retires a peer and its graph wi
 });
 
 test('same-epoch workspace metadata changes retire graph snapshots and already-decoding graph responses', async () => {
-  for (const change of [{ title: 'Changed title' }, { kind: 'document' }, { status: 'closed' }, { currentVersion: 2 }, { updatedAt: '2026-10-12T12:00:00Z' }]) {
+  for (const change of [{ title: 'Changed title' }, { kind: 'document' }, { status: 'closed' }, { currentVersion: 2 }, { updatedAt: '2026-10-12T12:00:00Z' }, { authorVersion: 1 }, { lifecycleVersion: 1 }]) {
     const current = fixture(), previous = globalThis.fetch; let release!: (data: unknown) => void, signal: AbortSignal | undefined;
     try {
       const response = Response.json({}); Object.defineProperty(response, 'json', { value: () => new Promise(resolve => { release = resolve; }) });

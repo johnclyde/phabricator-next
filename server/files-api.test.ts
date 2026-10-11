@@ -1,3 +1,4 @@
+import { lifecycleAction } from '../tests/revision-lifecycle-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -203,7 +204,7 @@ test('version manifests bind exact immutable bytes, preserve legacy hashes and i
     assert.equal(current.contentHash, contentHash(source, [asset(figure)])); assert.notEqual(current.contentHash, original.contentHash); assert.deepEqual(app.rows('versions')[0], rawOriginal);
     assert.deepEqual((await app.request<RevisionDetail>(`/api/revisions/${plain.revision.id}`, 'GET', undefined, 'bob')).body.versions[1]?.assets, [asset(figure)]);
     app.store.saveReview(plain.revision.id, current.number, { provider: 'local', model: 'deterministic-checks', summary: 'Checked exact version', findings: [] });
-    app.store.updateRevision(plain.revision.id, { status: 'accepted', expectedVersion: current.number });
+    lifecycleAction(app.store, plain.revision.id, 'accept_reviewed');
     const replaced = await app.request<RevisionDetail>(`/api/revisions/${plain.revision.id}/versions`, 'POST', { ...pins(current), files: source, assets: [asset(duplicate)], shareAssets: true, expectedAccessEpoch: app.policies.epoch(), message: 'Replace same bytes with a new File identity' });
     assert.equal(replaced.status, 201); assert.equal(replaced.body.revision.status, 'needs_review'); assert.notEqual(version(replaced.body).contentHash, current.contentHash); current = version(replaced.body);
     const inherited = await app.request<RevisionDetail>(`/api/revisions/${plain.revision.id}/versions`, 'POST', { expectedVersion: current.number, files: [{ path: 'main.tex', content: 'Edited text.\n' }], message: 'Legacy text-only save' }, 'bob');

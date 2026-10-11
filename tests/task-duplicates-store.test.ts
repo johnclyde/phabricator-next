@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { once } from 'node:events';
 import { Worker } from 'node:worker_threads';
-import { Store } from '../server/store.ts';
+import { Store, contentHash } from '../server/store.ts';
 import { initializePolicies } from '../server/policy.ts';
 import type { ActorAttribution, Task, TaskTransaction } from '../shared/types.ts';
 
@@ -274,8 +274,9 @@ function schemaEight(path: string): { task: LegacyTask; rows: unknown[]; replay:
     }
     db.prepare('INSERT INTO task_dependencies (task_id, dependency_id) VALUES (?, ?)').run(target.id, task.id);
     db.prepare('INSERT INTO task_subscriptions (task_id, principal_id, state, version, updated_at) VALUES (?, ?, ?, ?, ?)').run(task.id, alice.principalId, 'unsubscribed', 3, now);
-    db.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?)').run('D1', 'revision', '{ "id": "D1", "title": "Old source" }');
-    db.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run('v1', 'D1', 1, '{ "id": "v1", "files": [{"path":"paper.tex","content":"Exact evidence"}] }');
+    const source = [{ path: 'paper.tex', content: 'Exact evidence' }];
+    db.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?)').run('D1', 'revision', JSON.stringify({ id: 'D1', kind: 'code', title: 'Old source', summary: '', status: 'needs_review', currentVersion: 1, projectId: null, repositoryId: null, createdAt: now, updatedAt: now }, null, 2));
+    db.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run('v1', 'D1', 1, JSON.stringify({ id: 'v1', revisionId: 'D1', number: 1, files: source, contentHash: contentHash(source), message: 'Historical source', createdAt: now }, null, 2));
     const replay = JSON.stringify({ task, history: { transactions: [], nextBefore: null, firstAvailableSequence: null }, dependsOn: [], blocks: [], activity: [] }, null, 2);
     db.prepare('INSERT INTO idempotency (key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)').run('historical', 'historical-input', 200, replay, now);
     initializePolicies(db); db.exec('PRAGMA user_version = 8');
@@ -287,7 +288,7 @@ test('schema 9 adds empty duplicate storage while preserving actual schema 8 tas
   const directory = mkdtempSync(join(tmpdir(), 'phab-merge-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaEight(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 25);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 26);
     assert.deepEqual([...tables.filter(table => table !== 'task_duplicates'), 'versions'].map(table => raw(store, table)), old.rows);
     const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(current(store, old.task.id), { ...metadata, projectIds: [] }); assert.deepEqual(store.taskDetail(old.task.id).duplicateOf, []); assert.deepEqual(store.taskDetail('T2').duplicates, []);
     assert.deepEqual(raw(store, 'task_duplicates'), []);

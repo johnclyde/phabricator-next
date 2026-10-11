@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { canonicalRevisionStack, isRevisionStack, REVISION_STACK_FORMAT, REVISION_STACK_LIMITS, revisionStackTopology, type RevisionStack, type RevisionStackNode, type RevisionStackEdge } from '../shared/revision-stack.ts';
 
-const node = (id: string, status: RevisionStackNode['status'] = 'needs_review'): RevisionStackNode => ({ id, title: `Manuscript ${id}`, kind: 'paper', status, currentVersion: 1, updatedAt: '2026-10-11T00:00:00Z', relationshipVersion: 0, head: { versionId: `source-${id}`, number: 1, contentHash: 'a'.repeat(64) }, author: { principalId: 'U1', displayName: 'Original author' }, originalAuthor: { principalId: 'U1', displayName: 'Original author' }, authorVersion: 0 });
+const node = (id: string, status: RevisionStackNode['status'] = 'needs_review'): RevisionStackNode => ({ id, title: `Manuscript ${id}`, kind: 'paper', status, currentVersion: 1, updatedAt: '2026-10-11T00:00:00Z', relationshipVersion: 0, head: { versionId: `source-${id}`, number: 1, contentHash: 'a'.repeat(64) }, author: { principalId: 'U1', displayName: 'Original author' }, originalAuthor: { principalId: 'U1', displayName: 'Original author' }, authorVersion: 0, lifecycleVersion: 0 });
 function make(nodes: RevisionStackNode[], edges: RevisionStackEdge[], revisionId = 'P1'): RevisionStack {
   const topology = revisionStackTopology(revisionId, nodes, edges);
-  const stack: RevisionStack = { format: REVISION_STACK_FORMAT, revisionId, accessEpoch: 3, snapshotId: '', nodes: topology.order.map(id => nodes.find(item => item.id === id)!), edges: [...edges].sort((a, b) => a.childId < b.childId ? -1 : a.childId > b.childId ? 1 : a.parentId < b.parentId ? -1 : 1), openParentIds: topology.openParentIds };
+  const stack: RevisionStack = { format: REVISION_STACK_FORMAT, revisionId, accessEpoch: 3, closeOnAccept: false, snapshotId: '', nodes: topology.order.map(id => nodes.find(item => item.id === id)!), edges: [...edges].sort((a, b) => a.childId < b.childId ? -1 : a.childId > b.childId ? 1 : a.parentId < b.parentId ? -1 : 1), openParentIds: topology.openParentIds };
   stack.snapshotId = createHash('sha256').update(canonicalRevisionStack(stack)).digest('hex'); return stack;
 }
 
@@ -39,8 +39,8 @@ test('canonical stack identity covers current metadata, source, original author,
   const stack = make([node('P1')], []), digest = (value: RevisionStack) => createHash('sha256').update(canonicalRevisionStack(value)).digest('hex');
   assert.equal(digest(stack), stack.snapshotId); assert.equal(digest({ ...stack, snapshotId: 'b'.repeat(64) }), stack.snapshotId);
   // Canonical field order must not depend on the order used to construct an object.
-  assert.equal(canonicalRevisionStack({ ...stack, nodes: stack.nodes.map(item => ({ author: item.author, originalAuthor: item.originalAuthor, authorVersion: item.authorVersion, head: item.head, relationshipVersion: item.relationshipVersion, updatedAt: item.updatedAt, currentVersion: item.currentVersion, status: item.status, kind: item.kind, title: item.title, id: item.id })) }), canonicalRevisionStack(stack));
-  for (const patch of [{ title: 'Changed title' }, { status: 'accepted' }, { relationshipVersion: 2 }, { author: null, originalAuthor: null, authorVersion: 0 }, { head: { ...stack.nodes[0]!.head, contentHash: 'b'.repeat(64) } }]) assert.notEqual(digest({ ...stack, nodes: [{ ...stack.nodes[0]!, ...patch } as RevisionStackNode] }), stack.snapshotId);
+  assert.equal(canonicalRevisionStack({ ...stack, nodes: stack.nodes.map(item => ({ author: item.author, originalAuthor: item.originalAuthor, authorVersion: item.authorVersion, lifecycleVersion: item.lifecycleVersion, head: item.head, relationshipVersion: item.relationshipVersion, updatedAt: item.updatedAt, currentVersion: item.currentVersion, status: item.status, kind: item.kind, title: item.title, id: item.id })) }), canonicalRevisionStack(stack));
+  for (const patch of [{ title: 'Changed title' }, { status: 'accepted' }, { relationshipVersion: 2 }, { author: null, originalAuthor: null, authorVersion: 0, lifecycleVersion: 0 }, { head: { ...stack.nodes[0]!.head, contentHash: 'b'.repeat(64) } }]) assert.notEqual(digest({ ...stack, nodes: [{ ...stack.nodes[0]!, ...patch } as RevisionStackNode] }), stack.snapshotId);
   assert.notEqual(digest({ ...stack, accessEpoch: 4 }), stack.snapshotId);
 });
 

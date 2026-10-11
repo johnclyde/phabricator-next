@@ -1,3 +1,4 @@
+import { lifecycleAction } from './revision-lifecycle-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -76,7 +77,7 @@ test('replies inherit the original anchor and resolutions retain selected-versio
     const changed = store.createVersion(id, { expectedVersion: 1, message: 'Rework the paragraph.', files: [{ path: 'main.tex', content: 'A replacement paragraph.' }] }, actor);
     const second = changed.versions[1]!;
     store.saveReview(id, 2, { provider: 'local', model: 'deterministic', summary: 'No error findings.', findings: [] }, responder);
-    store.updateRevision(id, { status: 'accepted', expectedVersion: 2 }, actor);
+    lifecycleAction(store, id, 'accept_reviewed', actor);
     const before = store.detail(id);
     const reply = store.createReply(id, root.id, { body: 'Addressed in the revision I am viewing.', viewedVersionId: second.id }, responder);
     assert.equal(reply.threadId, root.id); assert.equal(reply.versionId, first.id); assert.equal(reply.viewedVersionId, second.id);
@@ -217,9 +218,9 @@ test('schema 4 migration preserves legacy comment bytes, provenance and replay w
   const directory = mkdtempSync(join(tmpdir(), 'phab-thread-migration-')); const path = join(directory, 'workspace.sqlite');
   const legacy = legacyDatabase(path); let store = new Store({ path });
   try {
-    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 25);
+    assert.equal(store.fresh, false); assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 26);
     const detail = store.detail(legacy.revision.id);
-    assert.deepEqual(detail.revision, { ...legacy.revision, authorId: null, authorDisplayName: null, authorVersion: 0 }); assert.deepEqual(detail.versions, [legacy.version]); assert.deepEqual(detail.comments, legacy.comments);
+    assert.deepEqual(detail.revision, { ...legacy.revision, authorId: null, authorDisplayName: null, authorVersion: 0, lifecycleVersion: 0 }); assert.deepEqual(detail.versions, [legacy.version]); assert.deepEqual(detail.comments, legacy.comments);
     assert.deepEqual((raw(store, 'comments') as { data: string }[]).map(row => row.data), legacy.commentJson);
     assert.equal(detail.comments[0]!.attribution, undefined); assert.equal(detail.comments[0]!.threadId, undefined);
     assert.equal(detail.comments[0]!.anchor, undefined);

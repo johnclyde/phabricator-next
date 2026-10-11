@@ -1,3 +1,4 @@
+import { lifecycleAction, closeRevision } from './revision-lifecycle-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage } from 'node:http';
@@ -213,8 +214,8 @@ test('local revision ownership requires explicit terminal handoff and preserves 
     const revisions = (['paper', 'document'] as const).map(kind => store.createRevision({ kind, title: 'An owner-only manuscript', files: [{ path: 'draft.txt', content: `Exact ${kind} source` }] }, attribution));
     for (const detail of revisions) policies.configureNew(detail.revision.id, { spaceId: 'S1', view: workspace, edit: selected(), interact: selected() }, identity);
     store.saveReview(revisions[0]!.revision.id, 1, { provider: 'local', model: 'fixture', summary: 'Historical evidence', findings: [] }, attribution);
-    store.updateRevision(revisions[0]!.revision.id, { status: 'accepted', expectedVersion: 1 }, attribution);
-    store.updateRevision(revisions[1]!.revision.id, { status: 'closed', expectedVersion: 1 }, attribution);
+    lifecycleAction(store, revisions[0]!.revision.id, 'accept_reviewed', attribution);
+    closeRevision(store, revisions[1]!.revision.id, attribution);
     assert.equal(policies.access(revisions[0]!.revision.id, identity).edit, true);
     assert.equal(policies.access(revisions[0]!.revision.id, alice.id).edit, false);
     assert.throws(() => createAuth({ database: store.database, mode: 'password', basePath: '/' }), /revision ownership references the local-only principal/);

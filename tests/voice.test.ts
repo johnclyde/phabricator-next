@@ -35,3 +35,7 @@ test('stack voice commands read and navigate the visible graph without accepting
   for (const command of ['read stack revision', 'read selected stack revision', 'read the current stack revision']) assert.deepEqual(parseCommand(command), { type: 'currentStackRevision' });
   for (const command of ['close stack', 'accept stack', 'land stack', 'next stack revision and approve it', 'add parent P1', 'remove stack']) assert.equal(parseCommand(command).type, 'unknown');
 });
+test('revision lifecycle filters navigate without voice mutation commands', () => {
+  for (const value of ['changes planned', 'changes requested', 'closed', 'abandoned']) assert.deepEqual(parseCommand(`show ${value}`), { type: 'filter', value: value.replaceAll(' ', '_') });
+  for (const value of ['abandon revision', 'reclaim revision', 'close revision', 'request review', 'accept reviewed version']) assert.equal(parseCommand(value).type, 'unknown');
+});

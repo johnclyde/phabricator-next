@@ -1,3 +1,4 @@
+import { isRevisionStatus } from '../shared/revision-status';
 import { isRevisionId, revisionDependencyInput, type RevisionDependencyDirection, type RevisionDependencyHistory, type RevisionDependencyInput, type RevisionDependencyPage } from '../shared/revision-dependencies';
 
 export const DEPENDENCY_DISPLAY_LIMIT = 500;
@@ -23,7 +24,7 @@ export function dependencyPage(value: unknown, id: string, direction: RevisionDe
     && Array.isArray(page.revisions) && page.revisions.length <= DEPENDENCY_DISPLAY_LIMIT && new Set(page.revisions.map(item => item?.id)).size === page.revisions.length
     && (page.nextAfter === null || page.nextAfter === page.revisions.at(-1)?.id)
     && page.revisions.every((item, index) => item && isRevisionId(item.id) && item.id !== id && (!index || item.id > page.revisions[index - 1]!.id) && typeof item.title === 'string' && item.title.length <= 1000
-      && ['code', 'paper', 'document'].includes(item.kind) && ['draft', 'needs_review', 'changes_requested', 'accepted', 'closed'].includes(item.status)
+      && ['code', 'paper', 'document'].includes(item.kind) && isRevisionStatus(item.status)
       && integer(item.currentVersion) && item.currentVersion > 0 && date(item.updatedAt));
 }
 export function dependencyHistory(value: unknown, id: string): value is RevisionDependencyHistory {

@@ -12,7 +12,8 @@ recorded” instead of an invented owner.
 The Current Author panel shows both authors, the ownership version and paged
 immutable handoff history. Any current editor may transfer a revision to an
 active member, including a closed revision. Commandeer assigns the acting editor
-as author and is unavailable on closed revisions. Assigning the current author
+as author and is unavailable on closed revisions, including Accepted when the
+operator enables close-on-accept. Abandoned revisions remain commandeerable. Assigning the current author
 again is a conflict. Ownership starts at version zero; each transfer increments
 it once and records the actor, previous and new authors, message, exact source
 head, operation identity and time.
@@ -56,7 +57,7 @@ qualify.
 ## API and CLI
 
 - `GET /api/revisions/:id/authorship` returns current and original authors,
-  ownership version, exact source head, status, access and access epoch.
+  ownership version, exact source head, status, close-on-accept configuration, access and access epoch.
 - `GET /api/revisions/:id/authorship/history` returns immutable transfers in
   descending ownership-version order. Optional `before`, `limit` and
   `expectedAuthorVersion` support stable paging (25 by default, at most 100).
@@ -109,8 +110,8 @@ preserving original attribution, source and evidence. It is atomic with other
 local policy/task/project handoffs and is unavailable after activation. See
 [authentication](authentication.md).
 
-Stack format `phabricator.revision-stack.v2` includes current author, original
-author and ownership version in its canonical digest. Old v1 caches are retired
+Stack format `phabricator.revision-stack.v3` includes current author, original
+author, ownership/lifecycle versions and close-on-accept configuration in its canonical digest. Old v1/v2 caches are retired
 instead of silently interpreting original attribution as current ownership.
 
 The pinned upstream [author transaction](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/xaction/DifferentialRevisionAuthorTransaction.php)
@@ -126,5 +127,6 @@ also removes the new author from reviewers, adds the former author and
 recalculates review state. Reviewer assignments are not implemented here;
 model/check evidence is not substituted for people in that workflow. This slice
 therefore preserves existing evidence and acceptance. Reviewer effects,
-notifications, profile handles, PHIDs/Conduit author edits and the broader
-author-gated abandon/reclaim/reopen lifecycle remain explicit parity gaps.
+notifications, profile handles and PHIDs/Conduit author edits remain explicit parity gaps.
+
+The [revision lifecycle](revision-lifecycle.md) now provides explicit author actions and operator close-on-accept semantics. Stack v3 binds lifecycle versions and this terminal-status configuration in its canonical identity.

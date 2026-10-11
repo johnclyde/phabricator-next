@@ -18,7 +18,8 @@ export type { Workboard, WorkboardColumn, WorkboardColumnSnapshot, WorkboardCard
 export type { Project, ProjectKind, ProjectMembershipMode, ProjectMembershipStatus, ProjectReference, ProjectHierarchy, ProjectChildPreview, ProjectSnapshot, ProjectField, ProjectFieldChange, ProjectStatus, ProjectIcon, ProjectColorKey, ProjectRelation, ProjectRelationStatus, ProjectPreferences, ProjectTransaction, ProjectHistory, ProjectMembersPage, ProjectWatchersPage, ProjectDetail, ProjectAccessLostAcknowledgement, ProjectLegacyAcknowledgement, ProjectUpdateResult, ProjectInput, UpdateProjectInput, ProjectMembersInput, ProjectMembershipInput, ProjectWatcherInput, ProjectSilenceInput } from './projects';
 
 export type RevisionKind = 'code' | 'paper' | 'document';
-export type RevisionStatus = 'draft' | 'needs_review' | 'changes_requested' | 'accepted' | 'closed';
+import type { RevisionStatus } from './revision-status';
+export type { RevisionStatus } from './revision-status';
 export type TaskStatus = 'open' | 'in_progress' | 'resolved' | 'duplicate';
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 export interface ActorAttribution { principalId: string; displayName: string; credentialId: string | null; requestId: string }
@@ -43,7 +44,7 @@ export interface WikiVersion { accessEpoch?: number; location?: WikiLocation; mo
 export type WikiVersionSummary = Omit<WikiVersion, 'content'>;
 export interface WikiHistory { accessEpoch?: number; versions: WikiVersionSummary[]; nextBefore: number | null; firstAvailableVersion: number }
 export interface WikiDetail { head?:WikiVersion; lifecycle?:WikiLifecycleHistory; document: WikiDocument; history: WikiHistory; activity: Activity[]; hierarchy?: WikiHierarchy; access?: ObjectAccess; accessEpoch?: number }
-export interface Revision { id: string; title: string; summary: string; kind: RevisionKind; status: RevisionStatus; repositoryId: string | null; projectId: string | null; currentVersion: number; createdAt: string; updatedAt: string; authorId?: string | null; authorVersion?: number; authorDisplayName?: string | null }
+export interface Revision { id: string; title: string; summary: string; kind: RevisionKind; status: RevisionStatus; repositoryId: string | null; projectId: string | null; currentVersion: number; createdAt: string; updatedAt: string; authorId?: string | null; authorVersion?: number; authorDisplayName?: string | null; lifecycleVersion?: number }
 export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: GitSourceProvenance; docx?: DocxSource; docxOperation?: { kind: 'import' | 'reimport' | 'replace'; inputSha256: string }; id: string; revisionId: string; number: number; files: SourceFile[]; assets?: RevisionAsset[]; message: string; contentHash: string; createdAt: string }
 /** Source offsets are UTF-16 code units, start inclusive and end exclusive. */
 export interface PassageAnchor { versionId: string; contentHash: string; filePath: string; start: number; end: number; quote: string; prefix: string; suffix: string }
@@ -60,7 +61,7 @@ export interface Activity { attribution?: ActorAttribution; id: string; objectId
 export type SpaceSummary = Space & { capabilities: EffectiveAccess };
 export interface AppState { pastes?: PasteRecord[]; files?: FileRecord[]; projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
 export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; threads: ReviewThread[]; threadEvents: ReviewThreadEvent[]; suggestionApplications: SuggestionApplication[]; reviews: ReviewRun[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
-export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; assets?: RevisionAsset[]; shareAssets?: boolean; expectedAccessEpoch?: number; repositoryId?: string | null; projectId?: string | null }
+export interface CreateRevisionInput { draft?: boolean; access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; assets?: RevisionAsset[]; shareAssets?: boolean; expectedAccessEpoch?: number; repositoryId?: string | null; projectId?: string | null }
 export interface CreateVersionInput { files: SourceFile[]; assets?: RevisionAsset[]; message: string; expectedVersion: number; expectedVersionId?: string; expectedContentHash?: string; shareAssets?: boolean; expectedAccessEpoch?: number }
 export interface ReviewInput { provider: 'local' | 'openai' | 'ollama'; expectedVersion: number }
 export interface CreateCommentInput { body: string; versionId: string; filePath?: string | null; line?: number | null; passage?: PassageInput; docxPassage?: DocxPassageInput; suggestion?: SuggestedReplacement }

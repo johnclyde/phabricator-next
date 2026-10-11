@@ -1,3 +1,4 @@
+import { isRevisionStatus } from '../shared/revision-status.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
@@ -73,7 +74,7 @@ export function initializeRevisionAuthorship(db: DatabaseSync): void {
 /** Storage boundary: the caller checks current revision authority and validates
  * an assignment target as an active workspace principal before calling mutate. */
 export class RevisionAuthorshipStore {
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(private readonly database: DatabaseSync, private readonly closeOnAccept = false) {}
   private requireRevision(id: string): void {
     if (!isRevisionId(id) || !this.database.prepare("SELECT 1 FROM entities WHERE id=? AND kind='revision'").get(id)) throw unavailable();
   }
@@ -109,12 +110,12 @@ export class RevisionAuthorshipStore {
     const head = { versionId: row.id, number: row.number, contentHash: row.content_hash };
     if (!isRevisionAuthorHead(head)) throw invalid(); return head;
   }
-  snapshot(id: string): { authorship: RevisionAuthorship; head: RevisionAuthorHead; status: RevisionStatus } {
+  snapshot(id: string): { authorship: RevisionAuthorship; head: RevisionAuthorHead; status: RevisionStatus; closeOnAccept: boolean } {
     return scope(this.database, () => {
       const authorship = this.readState(id), head = this.versionHead(id);
       const row = this.database.prepare("SELECT json_extract(data,'$.id') AS id,json_extract(data,'$.status') AS status,json_extract(data,'$.currentVersion') AS version,json_type(data,'$.currentVersion') AS version_type FROM entities WHERE id=? AND kind='revision'").get(id) as Record<string, unknown>;
-      if (row.id !== id || typeof row.status !== 'string' || !['draft', 'needs_review', 'changes_requested', 'accepted', 'closed'].includes(row.status) || row.version !== head.number || !['integer', 'real'].includes(String(row.version_type))) throw invalid();
-      return { authorship, head, status: row.status as RevisionStatus };
+      if (row.id !== id || !isRevisionStatus(row.status) || row.version !== head.number || !['integer', 'real'].includes(String(row.version_type))) throw invalid();
+      return { authorship, head, status: row.status as RevisionStatus, closeOnAccept: this.closeOnAccept };
     });
   }
   private transactionAt(id: string, version: number): RevisionAuthorTransaction {
@@ -144,7 +145,7 @@ export class RevisionAuthorshipStore {
       if (!epoch || !natural(epoch.value) || !Number.isSafeInteger(epoch.value + 1)) throw invalid();
       if (epoch.value !== request.expectedAccessEpoch) throw new HttpError(409, 'Access changed. Reload before transferring this revision.', 'ACCESS_EPOCH_CHANGED');
       if (authorship.version !== request.expectedAuthorVersion || head.number !== request.expectedVersion || head.versionId !== request.expectedVersionId || head.contentHash !== request.expectedContentHash) throw changed();
-      if (request.action === 'commandeer' && status === 'closed') throw new HttpError(409, 'Closed revisions cannot be commandeered.', 'REVISION_AUTHOR_CLOSED');
+      if (request.action === 'commandeer' && (status === 'closed' || this.closeOnAccept && status === 'accepted')) throw new HttpError(409, 'Closed revisions cannot be commandeered.', 'REVISION_AUTHOR_CLOSED');
       if (authorship.author?.principalId === author.principalId) throw new HttpError(409, 'This principal is already the revision author.', 'REVISION_AUTHOR_NO_EFFECT');
       if (!Number.isSafeInteger(authorship.version + 1)) throw new HttpError(422, 'The revision author history reached its version limit.', 'REVISION_AUTHOR_LIMIT');
       const now = new Date().toISOString(), operationId = randomUUID(), inputSha256 = revisionAuthorInputHash(request);

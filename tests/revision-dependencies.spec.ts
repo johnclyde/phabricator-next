@@ -1,3 +1,4 @@
+import { lifecycleRequest } from './revision-lifecycle-browser';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
@@ -24,7 +25,7 @@ async function exported(page: Page, name: string) { const waiting = page.waitFor
 test('parent and child revision edits preserve source, acceptance and historical selection with mobile navigation', async ({ page, request, baseURL }, info) => {
   const a = await create(request, baseURL!, 'Manuscript with related work'), b = await create(request, baseURL!, 'Companion paper', 'paper'), c = await create(request, baseURL!, 'Supporting code', 'code'), id = a.revision.id;
   await api(request, baseURL!, `/revisions/${id}/versions`, { expectedVersion: 1, files: [{ path: 'draft.md', content: 'A later exact manuscript source.\n' }], message: 'Second source version' });
-  await api(request, baseURL!, `/revisions/${id}/reviews`, { provider: 'local', expectedVersion: 2 }); await api(request, baseURL!, `/revisions/${id}`, { status: 'accepted', expectedVersion: 2 }, 'PATCH');
+  await api(request, baseURL!, `/revisions/${id}/reviews`, { provider: 'local', expectedVersion: 2 }); await lifecycleRequest(request, baseURL!, id, 'accept_reviewed');
   const before = await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`);
   await page.goto(`./#${id}`); await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');
   await start(page, 'parents'); await pick(page, 'parents', b.revision.id); await save(page, 'parents'); await expect(list(page, 'parents').getByRole('link')).toContainText(b.revision.id);

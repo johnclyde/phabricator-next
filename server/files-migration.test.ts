@@ -13,6 +13,7 @@ function schema15(path: string) {
   const store = new Store({ path }); seedDemo(store);
   const db = store.database;
   db.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+    DROP TABLE revision_lifecycle_transactions; DROP TABLE revision_lifecycle_operations; DROP TABLE revision_lifecycle;
     DROP TABLE revision_author_transactions; DROP TABLE revision_author_operations; DROP TABLE revision_authorship;
     DROP TABLE revision_dependency_edges; DROP TABLE revision_dependency_transactions; DROP TABLE revision_dependency_operations; DROP TABLE revision_dependency_versions;
     DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete;
@@ -47,7 +48,7 @@ test('schema 15 upgrade preserves old evidence bytes, entity rowids, schema obje
   const directory = mkdtempSync(join(tmpdir(), 'files-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema15(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path }); const db = store.database;
-    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 25); assert.equal(db.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
+    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 26); assert.equal(db.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(db);
     for (const [table, records] of Object.entries(before.records)) {
@@ -62,7 +63,7 @@ test('schema 15 upgrade preserves old evidence bytes, entity rowids, schema obje
     assert.throws(() => db.prepare("UPDATE wiki_versions SET data='{}' WHERE id=?").run(wiki.id), /immutable/);
     db.prepare("UPDATE entities SET data=data WHERE id='PROJ1'").run();
     assert.equal((db.prepare("SELECT COUNT(*) AS n FROM legacy_entity_updates WHERE id='PROJ1'").get() as { n: number }).n, 1);
-    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 25, 'migration is not repeated on reopen');
+    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 26, 'migration is not repeated on reopen');
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

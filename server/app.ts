@@ -30,6 +30,7 @@ import { conduitRequest } from './conduit.ts';
 import { wikiDocumentQuery } from './wiki-query.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { revisionAuthorInput } from '../shared/revision-authorship.ts';
+import { revisionLifecycleInput, type RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -40,6 +41,7 @@ export interface AppOptions {
   distPath?: string;
   basePath?: string;
   authMode?: AuthMode;
+  revisionLifecycle?: RevisionLifecycleConfig;
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
@@ -140,9 +142,10 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
 
 export function createApp(options: AppOptions = {}): App {
   if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
+  if (options.store && options.revisionLifecycle) throw new Error('Configure revisionLifecycle on the supplied Store, or let createApp create the Store.');
   const git = options.gitObserver ?? createGitObserver(options.gitRepositories ?? {});
   const basePath = normalizeBasePath(options.basePath ?? '/');
-  const store = options.store ?? createStore({ path: options.databasePath });
+  const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle });
   let auth: Auth;
   try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
   catch (error) { if (!options.store) store.close(); throw error; }
@@ -278,6 +281,27 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const lifecycle = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/lifecycle$/.exec(path) : null;
+    if (lifecycle) {
+      const id = lifecycle[1]!;
+      const authorize = () => { auth.revalidate(context, 'write'); access.require(id, 'edit'); };
+      store.read(authorize);
+      if (!rawKey) throw new HttpError(400, 'Lifecycle actions require an Idempotency-Key.');
+      let data;
+      try { data = revisionLifecycleInput(input); } catch { throw new HttpError(400, 'Provide an exact lifecycle action, message and current lifecycle, author, source, access, configuration and evidence pins.'); }
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionLifecycle.mutate(id, data, actor) }), authorize, response => access.presentRevisionLifecycle(id, data, response));
+    }
+    if (method === 'PATCH' && /^\/api\/revisions\/[DPL][1-9]\d{0,14}$/.test(path)) {
+      store.read(() => { auth.revalidate(context, 'write'); access.authorize(method, path, input); });
+      // Old saved status JSON has no immutable action record. Preserve its bytes,
+      // but never treat it as proof of an action or borrow a current result.
+      const key = rawKey && (context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`);
+      if (key && store.database.prepare('SELECT 1 FROM idempotency WHERE key=?').get(key)) throw new HttpError(409, 'This historical status receipt cannot prove a lifecycle action. Reload the revision; its saved record has been preserved.', 'REVISION_LIFECYCLE_LEGACY_RECEIPT');
+      throw new HttpError(409, 'Choose an explicit revision lifecycle action with current source and lifecycle pins.', 'REVISION_LIFECYCLE_ACTION_REQUIRED');
+    }
     const authorship = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/authorship$/.exec(path) : null;
     if (authorship) {
       auth.revalidate(context, 'write');
@@ -658,6 +682,18 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const lifecycle = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/lifecycle(\/history)?$/.exec(path);
+          if (lifecycle) {
+            const id = lifecycle[1]!; access.require(id);
+            const allowed = lifecycle[2] ? ['before', 'limit', 'expectedLifecycleVersion'] : [];
+            for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid revision lifecycle query.');
+            const parameter = (name: string): number | undefined => {
+              const raw = url.searchParams.get(name); if (raw === null) return undefined;
+              if (!(name === 'expectedLifecycleVersion' ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(raw) || !Number.isSafeInteger(Number(raw))) throw new HttpError(400, 'Provide a valid lifecycle history cursor and limit.');
+              return Number(raw);
+            };
+            send(res, 200, lifecycle[2] ? access.revisionLifecycleHistory(id, { before: parameter('before'), limit: parameter('limit'), expectedLifecycleVersion: parameter('expectedLifecycleVersion') }) : access.revisionLifecycle(id)); return;
+          }
           const authorship = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/authorship(\/history)?$/.exec(path);
           if (authorship) {
             const id = authorship[1]!; access.require(id);

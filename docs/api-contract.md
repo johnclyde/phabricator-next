@@ -27,8 +27,11 @@ Paths below are relative to the configured `APP_BASE_PATH` (default `/`). For ex
 - `POST /api/documents/:id/restore` `{version,expectedVersion,message?}` → WikiDocument: append selected historical title/content as a new version, retain the current slug and all historical records. Never queued offline; this is not upstream draft/publication-pointer behavior.
 - `POST /api/revisions` CreateRevisionInput → RevisionDetail
 - `GET /api/revisions/:id` → RevisionDetail
-- `POST /api/revisions/:id/versions` CreateVersionInput → RevisionDetail; append immutable version; always reset to needs_review; reject stale expectedVersion
-- `PATCH /api/revisions/:id` `{status,expectedVersion}` → Revision; version required for every transition. Acceptance requires current-version local/AI review with no error findings. Do not allow accepted state on stale evidence. Closing is an explicit manual action, never automatic merge.
+- `POST /api/revisions/:id/versions` CreateVersionInput → RevisionDetail; append immutable version and lifecycle history, invalidate acceptance and reject stale expectedVersion. Closed and Draft retain their status; other revisions return to Needs Review if review previously started, otherwise Draft. See [source-change lifecycle rules](revision-lifecycle.md#drafts-and-source-changes).
+- `GET /api/revisions/:id/lifecycle` → current lifecycle/source/author/evidence/configuration/access snapshot and action availability.
+- `GET /api/revisions/:id/lifecycle/history` → immutable paged manual/source/review transitions; supports `before`, `limit`, `expectedLifecycleVersion`.
+- `POST /api/revisions/:id/lifecycle` → exact immutable action receipt; requires Idempotency-Key and source/author/lifecycle/evidence/configuration/access pins. See [lifecycle contract](revision-lifecycle.md).
+- Legacy `PATCH /api/revisions/:id` status requests now return 409; old saved receipt bytes remain but cannot prove a lifecycle action.
 - `POST /api/revisions/:id/comments` CreateCommentInput → ReviewComment
 - `POST /api/revisions/:id/threads/:threadId/replies` CreateReplyInput → ReviewComment; inherits the original thread anchor and records the viewed version
 - `PATCH /api/revisions/:id/threads/:threadId` UpdateThreadInput → ReviewThread; current edit permission, optimistic thread version, exact source-version resolution provenance

@@ -1,3 +1,4 @@
+import { lifecycleRequest } from './revision-lifecycle-browser';
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { readFile, rename } from 'node:fs/promises';
 import type { RevisionDetail, AppState } from '../shared/types';
@@ -18,7 +19,7 @@ async function open(page: Page, detail: RevisionDetail, commitId: string) {
 for (const kind of ['code', 'paper', 'document']) test(`${kind} review imports a complete pinned Git tree as the next immutable version`, async ({ page, request, baseURL }, info) => {
   const data = await fixture(); const initial = await create(request, baseURL!, kind); const id = initial.revision.id;
   await api(request, baseURL!, `/revisions/${id}/reviews`, { provider: 'local', expectedVersion: 1 });
-  const accepted = await request.patch(new URL(`api/revisions/${id}`, baseURL!).href, { data: { status: 'accepted', expectedVersion: 1 } }); expect(accepted.ok()).toBe(true);
+  await lifecycleRequest(request, baseURL!, id, 'accept_reviewed');
   const before = await api(request, baseURL!, `/revisions/${id}`) as RevisionDetail;
   await open(page, initial, data.importCommit); await expect(form(page)).toContainText('Files absent from the selected commit will be deleted'); await expect(form(page)).toContainText('Version 1');
   const submit = form(page).getByRole('button', { name: 'Replace Source with Git Commit', exact: true }); await submit.evaluate(element => element.scrollIntoView({ block: 'center' }));

@@ -1,3 +1,4 @@
+import { chooseLifecycle } from './revision-lifecycle-browser';
 import { test, expect } from '@playwright/test';
 import { storageKey } from '../client/mount';
 import type { AppState } from '../shared/types';
@@ -40,8 +41,8 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   await expect(page.getByRole('heading', { level: 1 })).toContainText(title);
   await page.getByRole('button', { name: 'Run Local Checks', exact: true }).click();
   await expect(page.getByText(/Local text checks completed for 1 file/)).toBeVisible();
-  await page.getByRole('combobox', { name: 'Revision status', exact: true }).selectOption('accepted');
-  await expect(page.getByRole('combobox', { name: 'Revision status', exact: true })).toHaveValue('accepted');
+  await chooseLifecycle(page, 'Accept Reviewed Version');
+  await expect(page.getByTestId('lifecycle-status')).toHaveText('Accepted');
   await page.getByRole('button', { name: 'Discussion', exact: false }).click();
   await page.getByRole('textbox', { name: 'Review comment', exact: true }).fill('Please make the requested duration precise.');
   await page.getByRole('button', { name: 'Add Comment', exact: true }).click();
@@ -50,10 +51,10 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   await page.getByRole('textbox', { name: 'File content', exact: true }).fill('The applicant requests a seven-day extension.\n');
   await page.getByRole('textbox', { name: 'What changed?', exact: true }).fill('Specify the duration.');
   await page.getByRole('button', { name: 'Save New Version', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Revision status', exact: true })).toHaveValue('needs_review');
+  await expect(page.getByTestId('lifecycle-status')).toHaveText('Needs Review');
   await expect(page.locator('.prose-content ins')).toContainText('seven-day');
   await expect(page.locator('.prose-content del')).toContainText('short');
-  await expect(page.getByRole('combobox', { name: 'Revision status', exact: true }).locator('option[value="accepted"]')).toHaveJSProperty('disabled', true);
+  await expect(page.getByRole('button', { name: 'Accept Reviewed Version', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Discussion', exact: false }).click();
   await expect(page.getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');

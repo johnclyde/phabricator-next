@@ -51,10 +51,11 @@ export async function docxCommand({ command, args, options, optionNames, request
   if (creation && option('intent')) throw new Error('import-docx accepts its request file as the sole positional argument.');
   const intentPath = creation ? id : option('intent'); if (!intentPath) throw new Error('--intent must name the original Word request JSON file.');
   const input = await readDocxIntent(intentPath);
-  const fields = creation ? ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access']
+  const fields = creation ? ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']
     : command === 'reimport-docx' ? ['sourceFile', 'shareSource', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch']
       : ['rangeId', 'start', 'end', 'quote', 'replacement', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch'];
   if (Object.keys(input).some(key => !fields.includes(key))) throw new Error('The Word request contains unsupported fields.');
+  if (creation && input.draft !== undefined && typeof input.draft !== 'boolean') throw new Error('draft must be true or false.');
   positive(input.expectedAccessEpoch, 'expectedAccessEpoch');
   if (!creation) {
     positive(input.expectedVersion, 'expectedVersion');

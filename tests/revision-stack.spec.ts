@@ -1,3 +1,4 @@
+import { closeReviewedRevision } from './revision-lifecycle-browser';
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
@@ -19,7 +20,7 @@ const create = (request: APIRequestContext, base: string, title: string, kind?: 
 async function edge(request: APIRequestContext, base: string, id: string, add: string[], remove: string[] = []) { const current = await api<RevisionDependencyPage>(request, base, `/revisions/${id}/dependencies?direction=parents`); return api(request, base, `/revisions/${id}/dependencies`, { direction: 'parents', add, remove, expectedRelationshipVersion: current.relationshipVersion, expectedAccessEpoch: current.accessEpoch }); }
 async function branch(request: APIRequestContext, base: string) {
   const seed = await create(request, base, 'Seed manuscript'), parent = await create(request, base, 'Open parent paper', 'paper'), closed = await create(request, base, 'Closed branch', 'code'), ancestor = await create(request, base, 'Shared transitive parent'), sibling = await create(request, base, 'Sibling <script>literal</script>');
-  await edge(request, base, seed.revision.id, [parent.revision.id, closed.revision.id]); await edge(request, base, parent.revision.id, [ancestor.revision.id]); await edge(request, base, closed.revision.id, [ancestor.revision.id]); await edge(request, base, sibling.revision.id, [parent.revision.id]); await api(request, base, `/revisions/${closed.revision.id}`, { status: 'closed', expectedVersion: 1 }, 'PATCH');
+  await edge(request, base, seed.revision.id, [parent.revision.id, closed.revision.id]); await edge(request, base, parent.revision.id, [ancestor.revision.id]); await edge(request, base, closed.revision.id, [ancestor.revision.id]); await edge(request, base, sibling.revision.id, [parent.revision.id]); await closeReviewedRevision(request, base, closed.revision.id);
   return { seed, parent, closed, ancestor, sibling };
 }
 
@@ -28,7 +29,7 @@ test('whole visible stack preserves branch merges, original authors, closed node
   await api(request, baseURL!, `/revisions/${id}/versions`, { expectedVersion: 1, files: [{ path: 'draft.md', content: 'Later exact source.\n' }], message: 'Second version' });
   const before = await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`), graph = await api<RevisionStack>(request, baseURL!, `/revisions/${id}/dependencies/graph`);
   await page.goto(`./#${id}`); await page.getByLabel('Version to inspect', { exact: true }).selectOption('1'); await open(page);
-  await expect(stack(page).locator('.revision-stack-node')).toHaveCount(5); await expect(stack(page).locator('.revision-stack-count')).toContainText('2 open transitive parent revisions'); await expect(row(page, f.closed.revision.id)).toContainText('closed'); await expect(row(page, f.sibling.revision.id)).toContainText('<script>literal</script>');
+  await expect(stack(page).locator('.revision-stack-node')).toHaveCount(5); await expect(stack(page).locator('.revision-stack-count')).toContainText('2 open transitive parent revisions'); await expect(row(page, f.closed.revision.id)).toContainText('Closed'); await expect(row(page, f.sibling.revision.id)).toContainText('<script>literal</script>');
   await expect(stack(page).locator('.revision-stack-seed')).toContainText(id); expect(await stack(page).locator('svg path').count()).toBe(5); await expect(selected(page)).toContainText(`Original author: ${graph.nodes.find(node => node.id === id)!.originalAuthor?.displayName ?? 'Not recorded'}`);
   await expect(selected(page)).toContainText(`Current author: ${graph.nodes.find(node => node.id === id)!.author?.displayName ?? 'Unassigned'}`);
   await row(page, f.parent.revision.id).focus(); await page.keyboard.press('Enter'); await expect(selected(page)).toContainText(f.sibling.revision.id); await expect(selected(page)).toContainText(f.ancestor.revision.id);
@@ -57,7 +58,7 @@ test.describe('stack snapshot verification and local navigation', () => {
   test('same-epoch status and distant relationship changes replace the stack and reject altered snapshots', async ({ page, request, baseURL }) => {
     const f = await branch(request, baseURL!), extra = await create(request, baseURL!, 'Distant new parent'), id = f.seed.revision.id;
     await page.goto(`./#${id}`); await open(page); await expect(stack(page).locator('.revision-stack-count')).toContainText('2 open');
-    await api(request, baseURL!, `/revisions/${f.ancestor.revision.id}`, { status: 'closed', expectedVersion: 1 }, 'PATCH'); await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await expect(stack(page).locator('.revision-stack-count')).toContainText('1 open');
+    await closeReviewedRevision(request, baseURL!, f.ancestor.revision.id); await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await expect(stack(page).locator('.revision-stack-count')).toContainText('1 open');
     await edge(request, baseURL!, f.sibling.revision.id, [extra.revision.id]); await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await expect(row(page, extra.revision.id)).toBeVisible(); await expect(stack(page).locator('.revision-stack-node')).toHaveCount(6);
     const relationships = page.getByRole('region', { name: 'Related Revisions', exact: true }); await relationships.getByRole('button', { name: 'Edit Parent Revisions', exact: true }).click(); const editing = relationships.getByRole('region', { name: 'Edit Parent Revisions', exact: true }); await editing.getByRole('checkbox', { name: new RegExp(`^Add ${extra.revision.id}:`) }).check(); await editing.getByRole('button', { name: 'Save Parent Revisions', exact: true }).click(); await expect(stack(page).locator('svg path')).toHaveCount(7); await expect(stack(page).locator('.revision-stack-count')).toContainText('2 open');
     await page.route(`**/api/revisions/${id}/dependencies/graph`, async route => { const response = await route.fetch(), graph = await response.json(); graph.snapshotId = '0'.repeat(64); await route.fulfill({ response, json: graph }); }); await stack(page).getByRole('button', { name: 'Reload Stack', exact: true }).click(); await expect(stack(page).getByRole('alert')).toContainText('does not match its snapshot'); await expect(stack(page).locator('.revision-stack-node')).toHaveCount(0); await page.unrouteAll({ behavior: 'wait' });
@@ -79,7 +80,7 @@ test('a newer verified stack survives storage quota failure when going offline i
   const f = await branch(request, baseURL!); await page.goto(`./#${f.seed.revision.id}`); await open(page);
   await page.evaluate(() => { const original = Storage.prototype.setItem; Object.assign(window, { restoreStackStorage: () => { Storage.prototype.setItem = original; } }); Storage.prototype.setItem = function(key: string, value: string) { if (key.includes('revision-stack:')) throw new DOMException('Quota', 'QuotaExceededError'); return original.call(this, key, value); }; });
   try {
-    await api(request, baseURL!, `/revisions/${f.ancestor.revision.id}`, { status: 'closed', expectedVersion: 1 }, 'PATCH'); await stack(page).getByRole('button', { name: 'Reload Stack', exact: true }).click(); await expect(stack(page).locator('.revision-stack-count')).toContainText('1 open'); await expect(stack(page)).toContainText('only retained in this tab');
+    await closeReviewedRevision(request, baseURL!, f.ancestor.revision.id); await stack(page).getByRole('button', { name: 'Reload Stack', exact: true }).click(); await expect(stack(page).locator('.revision-stack-count')).toContainText('1 open'); await expect(stack(page)).toContainText('only retained in this tab');
     await context.setOffline(true); await expect(stack(page)).toContainText('Saved stack snapshot'); await expect(stack(page).locator('.revision-stack-count')).toContainText('1 open'); await expect(stack(page)).toContainText('only retained in this tab');
   } finally { await page.evaluate(() => (window as unknown as { restoreStackStorage: () => void }).restoreStackStorage()); await context.setOffline(false); }
 });

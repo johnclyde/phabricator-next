@@ -1,3 +1,4 @@
+import { lifecycleAction, closeRevision } from '../tests/revision-lifecycle-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,7 +11,7 @@ import type { RevisionAuthor, RevisionAuthorInput } from '../shared/revision-aut
 import type { GitImportSnapshot } from '../shared/repositories.ts';
 import type { DocxProjection } from '../shared/docx.ts';
 import { Store } from './store.ts';
-import { initializeRevisionAuthorship, revisionAuthorInputHash } from './revision-authorship.ts';
+import { initializeRevisionAuthorship, revisionAuthorInputHash, RevisionAuthorshipStore } from './revision-authorship.ts';
 
 const alice: ActorAttribution = { principalId: 'alice', displayName: 'Original Alice', credentialId: 'alice-key', requestId: 'request-alice' };
 const bob: ActorAttribution = { principalId: 'bob', displayName: 'Bob', credentialId: null, requestId: 'request-bob' };
@@ -52,7 +53,7 @@ test('assign and commandeer change only ownership sidecars and the access epoch,
   const store = new Store({ path: ':memory:' }); try {
     const detail = create(store), id = detail.revision.id;
     store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Preserved evidence', findings: [] }, alice);
-    store.updateRevision(id, { status: 'accepted', expectedVersion: 1 }, alice);
+    lifecycleAction(store, id, 'accept_reviewed', alice);
     const before = snapshot(store.database, true), previousEpoch = epoch(store), input = request(store, id);
     const receipt = store.revisionAuthorship.mutate(id, input, alice, ref(bob));
     assert.equal(receipt.accessEpoch, previousEpoch + 1); assert.equal(receipt.transaction.message, input.message);
@@ -89,10 +90,32 @@ test('assignment permits closed revisions while commandeer and same-owner action
     const id = create(store).revision.id;
     assert.throws(() => store.revisionAuthorship.mutate(id, request(store, id, 'commandeer'), alice), { code: 'REVISION_AUTHOR_NO_EFFECT' });
     assert.throws(() => store.revisionAuthorship.mutate(id, request(store, id, 'assign', 'alice'), bob, ref(alice)), { code: 'REVISION_AUTHOR_NO_EFFECT' });
-    store.updateRevision(id, { expectedVersion: 1, status: 'closed' }, alice); const before = snapshot(store.database);
+    closeRevision(store, id, alice); const before = snapshot(store.database);
     assert.throws(() => store.revisionAuthorship.mutate(id, request(store, id, 'commandeer'), bob), { code: 'REVISION_AUTHOR_CLOSED' }); assert.deepEqual(snapshot(store.database), before);
     store.revisionAuthorship.mutate(id, request(store, id), alice, ref(bob)); assert.equal(store.detail(id).revision.status, 'closed');
     assert.equal(store.revisionAuthorship.history(id).transactions.length, 1);
+  } finally { store.close(); }
+});
+
+test('close-on-accept prohibits fresh commandeering but preserves assignments, abandoned claims and historical receipts', () => {
+  const store = new Store({ path: ':memory:', revisionLifecycle: { closeOnAccept: true } }); try {
+    const id = create(store).revision.id;
+    const receipt = store.revisionAuthorship.mutate(id, request(store, id, 'commandeer'), bob);
+    store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Exact evidence', findings: [] }, bob);
+    lifecycleAction(store, id, 'accept_reviewed', bob);
+    assert.equal(store.revisionAuthorship.snapshot(id).closeOnAccept, true);
+    const before = snapshot(store.database);
+    assert.throws(() => store.revisionAuthorship.mutate(id, request(store, id, 'commandeer'), alice), { code: 'REVISION_AUTHOR_CLOSED' });
+    assert.deepEqual(snapshot(store.database), before);
+    assert.deepEqual(store.revisionAuthorship.operation(receipt.operationId).receipt, receipt);
+    store.revisionAuthorship.mutate(id, request(store, id, 'assign', alice.principalId), bob, ref(alice));
+    assert.equal(store.revisionAuthorship.state(id).author?.principalId, alice.principalId);
+    const openConfig = new RevisionAuthorshipStore(store.database);
+    assert.equal(openConfig.snapshot(id).closeOnAccept, false);
+    openConfig.mutate(id, request(store, id, 'commandeer'), bob);
+    const abandoned = create(store).revision.id; lifecycleAction(store, abandoned, 'abandon', alice);
+    store.revisionAuthorship.mutate(abandoned, request(store, abandoned, 'commandeer'), bob);
+    assert.equal(store.revisionAuthorship.state(abandoned).author?.principalId, bob.principalId);
   } finally { store.close(); }
 });
 
@@ -158,7 +181,7 @@ test('schema25 preserves every schema24 row and schema definition, establishes t
     assert.equal(store.database.prepare("SELECT json_type(data,'$.attribution') AS type FROM versions WHERE revision_id=? AND number=1").get(encoded)!.type, 'text');
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('historic', 'exact', 201, '{"saved":"bytes"}', '2026-01-01T00:00:00Z');
     oldSchema(store); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 25); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 26); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.deepEqual(store.revisionAuthorship.state(id).author, ref(alice)); assert.equal(store.revisionAuthorship.state(id).version, 0);
@@ -177,7 +200,7 @@ test('schema25 collision rolls back partial schema and version updates, allowing
     create(store); oldSchema(store); store.database.exec("CREATE TABLE revision_author_operations(operator_note TEXT); INSERT INTO revision_author_operations VALUES('Retain operator data')");
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|no such column/);
     db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 24); assert.deepEqual(snapshot(db), before);
-    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 25);
+    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 26);
   } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

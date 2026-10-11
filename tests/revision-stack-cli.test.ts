@@ -9,6 +9,7 @@ import { createAuth } from '../server/auth.ts';
 import { createApp } from '../server/app.ts';
 import { revisionDependenciesCommand } from '../cli/revision-dependencies.ts';
 import type { PaperCLI } from '../cli/paper-builds.ts';
+import type { RevisionLifecycleSnapshot } from '../shared/revision-lifecycle.ts';
 import type { RevisionDetail } from '../shared/types.ts';
 import { canonicalRevisionStack, type RevisionStack } from '../shared/revision-stack.ts';
 
@@ -40,7 +41,8 @@ for (const basePath of ['/', '/review/']) test(`stack CLI verifies complete snap
     assert.equal(createHash('sha256').update(canonicalRevisionStack(stack)).digest('hex'), stack.snapshotId);
     assert.ok(stack.nodes.every(node => node.author?.principalId === author.id));
     const pinned = await cli([...args, '--snapshot', stack.snapshotId], reader.token); assert.equal(pinned.code, 0, pinned.stderr); assert.deepEqual(JSON.parse(pinned.stdout), stack);
-    await call(`/revisions/${parent.revision.id}`, { expectedVersion: 1, status: 'closed' }, 'PATCH');
+    const lifecycle = await call<RevisionLifecycleSnapshot>(`/revisions/${parent.revision.id}/lifecycle`);
+    await call(`/revisions/${parent.revision.id}/lifecycle`, { action: 'abandon', message: '', expectedLifecycleVersion: lifecycle.lifecycle.version, expectedAuthorVersion: lifecycle.authorship.version, expectedVersion: lifecycle.head.number, expectedVersionId: lifecycle.head.versionId, expectedContentHash: lifecycle.head.contentHash, expectedAccessEpoch: lifecycle.accessEpoch, expectedConfigId: lifecycle.configId, expectedEvidenceSha256: lifecycle.evidence.sha256 });
     const stale = await cli([...args, '--snapshot', stack.snapshotId], reader.token); assert.notEqual(stale.code, 0); assert.equal(stale.stdout, '');
     const fresh = await cli(args, reader.token); assert.equal(fresh.code, 0, fresh.stderr); const next = JSON.parse(fresh.stdout) as RevisionStack; assert.deepEqual(next.openParentIds, []); assert.notEqual(next.snapshotId, stack.snapshotId); assert.equal(next.nodes.length, 3);
     assert.deepEqual(store.detail(paper.revision.id).versions, paper.versions); assert.deepEqual(store.detail(parent.revision.id).versions, parent.versions);
@@ -53,6 +55,6 @@ test('stack CLI rejects incomplete graphs, wrong hashes and ambiguous options wi
   const run = (options: Record<string, string> = {}, optionNames: string[] = []) => revisionDependenciesCommand({ command: 'revision-stack', args: ['P1'], options, optionNames, request, download: async () => new Uint8Array() });
   for (const [options, names] of [[{ snapshot: 'x' }, ['snapshot']], [{ direction: 'parents' }, ['direction']], [{ snapshot: 'a'.repeat(64) }, ['snapshot', 'snapshot']]] as const) await assert.rejects(run(options, [...names]));
   assert.equal(calls, 0); await assert.rejects(run(), /could not be verified/); assert.equal(calls, 1);
-  const value: RevisionStack = { format: 'phabricator.revision-stack.v2', revisionId: 'P1', accessEpoch: 0, snapshotId: 'b'.repeat(64), nodes: [{ id: 'P1', title: 'Private source label', kind: 'paper', status: 'needs_review', currentVersion: 1, updatedAt: '2026-10-11T00:00:00Z', relationshipVersion: 0, head: { versionId: 'head', number: 1, contentHash: 'a'.repeat(64) }, author: null, originalAuthor: null, authorVersion: 0 }], edges: [], openParentIds: [] };
+  const value: RevisionStack = { format: 'phabricator.revision-stack.v3', revisionId: 'P1', accessEpoch: 0, closeOnAccept: false, snapshotId: 'b'.repeat(64), nodes: [{ id: 'P1', title: 'Private source label', kind: 'paper', status: 'needs_review', currentVersion: 1, updatedAt: '2026-10-11T00:00:00Z', relationshipVersion: 0, head: { versionId: 'head', number: 1, contentHash: 'a'.repeat(64) }, author: null, originalAuthor: null, authorVersion: 0, lifecycleVersion: 0 }], edges: [], openParentIds: [] };
   await assert.rejects(revisionDependenciesCommand({ command: 'revision-stack', args: ['P1'], options: {}, optionNames: [], request: async <T>() => value as T, download: async () => new Uint8Array() }), /could not be verified/);
 });

@@ -9,6 +9,7 @@ import type { AppState, RevisionDetail, Revision, ReviewRun, ReviewComment, Wiki
 import { createApp, type AppOptions } from './app.ts';
 import { createStore } from './store.ts';
 import { seedDemo } from './seed.ts';
+import type { RevisionLifecycleAction, RevisionLifecycleInput, RevisionLifecycleReceipt, RevisionLifecycleSnapshot } from '../shared/revision-lifecycle.ts';
 
 async function start(options: AppOptions = {}) {
   const app = createApp({ databasePath: ':memory:', seed: false, ...options });
@@ -18,7 +19,13 @@ async function start(options: AppOptions = {}) {
     const response = await fetch(`${base}${path}`, { method, headers: { ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
     return { status: response.status, body: await response.json() as T, headers: response.headers };
   };
-  return { ...app, base, request };
+  const lifecycleInput = async (id: string, action: RevisionLifecycleAction): Promise<RevisionLifecycleInput> => {
+    const result = await request<RevisionLifecycleSnapshot>(`/api/revisions/${id}/lifecycle`);
+    assert.equal(result.status, 200); const s = result.body;
+    return { action, message: '', expectedLifecycleVersion: s.lifecycle.version, expectedAuthorVersion: s.authorship.version, expectedVersion: s.head.number, expectedVersionId: s.head.versionId, expectedContentHash: s.head.contentHash, expectedAccessEpoch: s.accessEpoch, expectedConfigId: s.configId, expectedEvidenceSha256: s.evidence.sha256 };
+  };
+  const lifecycle = async (id: string, action: RevisionLifecycleAction) => request<RevisionLifecycleReceipt>(`/api/revisions/${id}/lifecycle`, 'POST', await lifecycleInput(id, action), { 'Idempotency-Key': crypto.randomUUID() });
+  return { ...app, base, request, lifecycleInput, lifecycle };
 }
 const revisionInput = { title: 'A precise revision', kind: 'code', files: [{ path: 'main.ts', content: 'export const answer = 42;\n' }] };
 const goodAnalysis: ReviewAnalysis = { provider: 'openai', model: 'test-model', summary: 'No supported errors in this snapshot.', findings: [] };
@@ -29,18 +36,22 @@ test('immutable revisions retain anchored comments and invalidate acceptance on 
     const created = await app.request<RevisionDetail>('/api/revisions', 'POST', revisionInput);
     assert.equal(created.status, 201);
     const id = created.body.revision.id; const first = created.body.versions[0]!;
-    assert.equal((await app.request(`/api/revisions/${id}`, 'PATCH', { status: 'accepted', expectedVersion: 1 })).status, 409);
+    assert.equal((await app.lifecycle(id, 'accept_reviewed')).status, 409);
     const review = await app.request<ReviewRun>(`/api/revisions/${id}/reviews`, 'POST', { provider: 'local', expectedVersion: 1 });
     assert.equal(review.status, 201); assert.equal(review.body.provider, 'local'); assert.equal(review.body.contentHash, first.contentHash);
-    assert.equal((await app.request<Revision>(`/api/revisions/${id}`, 'PATCH', { status: 'accepted', expectedVersion: 1 })).body.status, 'accepted');
+    assert.equal((await app.lifecycle(id, 'accept_reviewed')).body.transaction.toStatus, 'accepted');
+    const oldClose = await app.lifecycleInput(id, 'close');
     const comment = await app.request<ReviewComment>(`/api/revisions/${id}/comments`, 'POST', { body: 'Keep this line precise.', versionId: first.id, filePath: 'main.ts', line: 1 });
     assert.equal(comment.status, 201);
     const changed = await app.request<RevisionDetail>(`/api/revisions/${id}/versions`, 'POST', { expectedVersion: 1, message: 'Refine the answer', files: [{ path: 'main.ts', content: 'export const answer = 43;\n' }] });
     assert.equal(changed.status, 201); assert.equal(changed.body.revision.status, 'needs_review'); assert.equal(changed.body.revision.currentVersion, 2);
     assert.deepEqual(changed.body.versions[0], first); assert.equal(changed.body.comments[0]!.versionId, first.id);
     assert.notEqual(changed.body.versions[1]!.contentHash, first.contentHash);
-    assert.equal((await app.request(`/api/revisions/${id}`, 'PATCH', { status: 'accepted', expectedVersion: 2 })).status, 409);
-    assert.equal((await app.request(`/api/revisions/${id}`, 'PATCH', { status: 'closed', expectedVersion: 1 })).status, 409);
+    const sourceEvent = app.store.revisionLifecycle.history(id).transactions[0]!;
+    assert.equal(sourceEvent.action, 'source_updated'); assert.equal(sourceEvent.fromStatus, 'accepted'); assert.equal(sourceEvent.toStatus, 'needs_review');
+    assert.equal(sourceEvent.beforeHead.versionId, first.id); assert.equal(sourceEvent.head.versionId, changed.body.versions[1]!.id);
+    assert.equal((await app.lifecycle(id, 'accept_reviewed')).status, 409);
+    assert.equal((await app.request(`/api/revisions/${id}/lifecycle`, 'POST', oldClose, { 'Idempotency-Key': crypto.randomUUID() })).status, 409);
     const exported = await app.request<{ revision: Revision; version: RevisionDetail['versions'][number] }>(`/api/revisions/${id}/export?version=1`);
     assert.deepEqual(exported.body.version, first);
     assert.equal((await app.request(`/api/revisions/${id}/export?version=1junk`)).status, 400);
@@ -229,7 +240,7 @@ test('document revisions and explicitly configured offline AI use the same versi
     assert.equal((await app.request(`/api/revisions/${created.revision.id}/reviews`, 'POST', { provider: 'openai', expectedVersion: 1 })).status, 400);
     const review = await app.request<ReviewRun>(`/api/revisions/${created.revision.id}/reviews`, 'POST', { provider: 'ollama', expectedVersion: 1 });
     assert.equal(review.status, 201); assert.equal(providerUsed, 'ollama'); assert.equal(review.body.provider, 'ollama');
-    assert.equal((await app.request(`/api/revisions/${created.revision.id}`, 'PATCH', { status: 'accepted', expectedVersion: 1 })).status, 200);
+    assert.equal((await app.lifecycle(created.revision.id, 'accept_reviewed')).status, 200);
   } finally { await app.close(); }
 });
 
@@ -244,17 +255,21 @@ test('new blocking review evidence invalidates acceptance and provider failures 
     const created = (await app.request<RevisionDetail>('/api/revisions', 'POST', revisionInput)).body;
     const path = `/api/revisions/${created.revision.id}`;
     assert.equal((await app.request(`${path}/reviews`, 'POST', { provider: 'local', expectedVersion: 1 })).status, 201);
-    assert.equal((await app.request(path, 'PATCH', { status: 'accepted', expectedVersion: 1 })).status, 200);
+    assert.equal((await app.lifecycle(created.revision.id, 'accept_reviewed')).status, 200);
     blocking = true;
     assert.equal((await app.request(`${path}/reviews`, 'POST', { provider: 'openai', expectedVersion: 1 })).status, 201);
     let detail = (await app.request<RevisionDetail>(path)).body;
     assert.equal(detail.revision.status, 'changes_requested'); assert.equal(detail.reviews.length, 2);
     assert.ok(detail.activity.some(event => event.action === 'acceptance_invalidated'));
-    assert.equal((await app.request(path, 'PATCH', { status: 'accepted', expectedVersion: 1 })).status, 409);
+    const recorded = app.store.revisionLifecycle.history(created.revision.id);
+    assert.equal(recorded.transactions[0]!.action, 'review_invalidated'); assert.equal(recorded.transactions[0]!.fromStatus, 'accepted'); assert.equal(recorded.transactions[0]!.toStatus, 'changes_requested');
+    assert.deepEqual(new Set(recorded.transactions[0]!.reviewIds), new Set(detail.reviews.map(review => review.id)));
+    assert.equal((await app.lifecycle(created.revision.id, 'accept_reviewed')).status, 409);
     fail = true;
     assert.equal((await app.request(`${path}/reviews`, 'POST', { provider: 'openai', expectedVersion: 1 })).status, 502);
     detail = (await app.request<RevisionDetail>(path)).body;
     assert.equal(detail.reviews.length, 2);
+    assert.deepEqual(app.store.revisionLifecycle.history(created.revision.id), recorded, 'a provider failure creates neither evidence nor a lifecycle transition');
   } finally { await app.close(); }
 });
 
