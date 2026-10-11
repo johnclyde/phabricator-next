@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
-import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry, GitComparison, GitComparisonFile, GitComparisonQuery, GitComparisonFileQuery, GitComparisonEntry, GitComparisonChange, GitComparisonSide } from '../shared/repositories.ts';
+import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry, GitComparison, GitComparisonFile, GitComparisonQuery, GitComparisonFileQuery, GitComparisonEntry, GitComparisonChange, GitComparisonSide, GitBlame, GitBlameLine } from '../shared/repositories.ts';
 import type { SourceFile } from '../shared/types.ts';
 import { files, HttpError } from './validation.ts';
 
@@ -14,6 +14,7 @@ export interface GitObserver {
   commit(repositoryId: string, commit: string, signal?: AbortSignal): Promise<GitCommitResult>;
   tree(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitTree>;
   blob(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitBlob>;
+  blame(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitBlame>;
   history(repositoryId: string, query: GitHistoryQuery, signal?: AbortSignal): Promise<GitHistory>;
   compare(repositoryId: string, query: GitComparisonQuery, signal?: AbortSignal): Promise<GitComparison>;
   compareFile(repositoryId: string, query: GitComparisonFileQuery, signal?: AbortSignal): Promise<GitComparisonFile>;
@@ -76,18 +77,19 @@ const gitOptions = [
   '-c', 'maintenance.auto=false', '-c', 'core.commitGraph=false', '-c', 'core.multiPackIndex=false',
 ];
 
-function run(args: string[], signal: AbortSignal, maximum: number = GIT_LIMITS.outputBytes): Promise<{ data: Buffer; code: number | null }> {
+function run(args: string[], signal: AbortSignal, maximum: number = GIT_LIMITS.outputBytes, input?: Buffer): Promise<{ data: Buffer; code: number | null }> {
   checkAbort(signal);
   return new Promise((resolve, reject) => {
-    const child = spawn('git', [...gitOptions, ...args], { cwd: '/', env: environment, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn('git', [...gitOptions, ...args], { cwd: '/', env: environment, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], windowsHide: true });
     let failure: HttpError | undefined; let size = 0; let errorSize = 0; const chunks: Buffer[] = [];
     const stop = (error: HttpError) => { failure ??= error; child.kill('SIGKILL'); };
     const cancel = () => stop(aborted()); signal.addEventListener('abort', cancel, { once: true });
-    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maximum) stop(limit()); else if (!failure) chunks.push(chunk); });
+    child.stdout!.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maximum) stop(limit()); else if (!failure) chunks.push(chunk); });
     // Diagnostics can contain operator paths, URLs and credentials. Discard them.
-    child.stderr.on('data', (chunk: Buffer) => { errorSize += chunk.length; if (errorSize > 32_000) stop(limit()); });
+    child.stderr!.on('data', (chunk: Buffer) => { errorSize += chunk.length; if (errorSize > 32_000) stop(limit()); });
     child.once('error', () => { failure ??= unavailable(); });
     child.once('close', code => { signal.removeEventListener('abort', cancel); if (failure) reject(failure); else resolve({ data: Buffer.concat(chunks), code }); });
+    if (input) { child.stdin!.on('error', () => undefined); child.stdin!.end(input); }
     if (signal.aborted) cancel();
   });
 }
@@ -190,7 +192,10 @@ function person(value: string): GitPerson {
 }
 
 async function readCommit(repository: RepositoryHandle, id: string): Promise<GitCommit> {
-  const data = await rawObject(repository, id, 'commit'); const boundary = data.indexOf('\n\n');
+  return decodeCommit(repository, id, await rawObject(repository, id, 'commit'));
+}
+function decodeCommit(repository: RepositoryHandle, id: string, data: Buffer): GitCommit {
+  const boundary = data.indexOf('\n\n');
   if (boundary < 0 || boundary > 100_000) throw corrupt();
   const headers = utf8(data.subarray(0, boundary)).split('\n');
   const one = (key: string): string => { const lines = headers.filter(line => line.startsWith(`${key} `)); if (lines.length !== 1) throw corrupt(); return lines[0]!.slice(key.length + 1); };
@@ -205,7 +210,10 @@ async function readCommit(repository: RepositoryHandle, id: string): Promise<Git
 }
 
 async function readTree(repository: RepositoryHandle, id: string, path: string): Promise<GitTreeEntry[]> {
-  const data = await rawObject(repository, id, 'tree'); const entries: GitTreeEntry[] = []; const hashLength = repository.format === 'sha256' ? 32 : 20; let offset = 0;
+  return decodeTree(repository, await rawObject(repository, id, 'tree'), path);
+}
+function decodeTree(repository: RepositoryHandle, data: Buffer, path: string): GitTreeEntry[] {
+  const entries: GitTreeEntry[] = []; const hashLength = repository.format === 'sha256' ? 32 : 20; let offset = 0;
   while (offset < data.length) {
     if (entries.length >= GIT_LIMITS.treeEntries) throw limit();
     const space = data.indexOf(32, offset); const zero = data.indexOf(0, space + 1);
@@ -353,6 +361,240 @@ async function comparisonSide(repositoryId:string,commitId:string,entry:GitCompa
   try{return {...common,state:'text',content:new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(data)};}catch{return {...common,state:'unsupported_encoding'};}
 }
 
+interface BlameObject { id: string; type: 'commit' | 'tree' | 'blob'; size: number }
+
+/** Hash a bounded batch as it streams; historical blob bodies are never retained. */
+function verifyBlameObjects(repository: RepositoryHandle, objects: BlameObject[]): Promise<Map<string, Buffer>> {
+  checkAbort(repository.signal);
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', [...gitOptions, '--git-dir', repository.path, 'cat-file', '--batch'], { cwd: '/', env: environment, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const metadata = new Map<string, Buffer>();
+    let index = 0, state: 'header' | 'body' | 'separator' = 'header', header = Buffer.alloc(0), remaining = 0;
+    let digest: ReturnType<typeof createHash> | undefined; let chunks: Buffer[] = []; let failure: HttpError | undefined;
+    let output = 0, errors = 0;
+    const maximum = objects.reduce((total, object) => total + object.size + object.id.length + object.type.length + String(object.size).length + 4, 0);
+    const stop = (error: HttpError) => { failure ??= error; child.kill('SIGKILL'); };
+    const cancel = () => stop(aborted()); repository.signal.addEventListener('abort', cancel, { once: true });
+    child.stdout!.on('data', (chunk: Buffer) => {
+      if (failure) return; output += chunk.length; if (output > maximum) { stop(limit()); return; }
+      try {
+        let offset = 0;
+        while (offset < chunk.length) {
+          checkAbort(repository.signal); const object = objects[index]; if (!object) throw corrupt();
+          if (state === 'header') {
+            const end = chunk.indexOf(10, offset), next = end < 0 ? chunk.length : end;
+            if (header.length + next - offset > 128) throw corrupt();
+            header = Buffer.concat([header, chunk.subarray(offset, next)]); offset = end < 0 ? chunk.length : end + 1;
+            if (end < 0) continue;
+            if (!header.equals(Buffer.from(`${object.id} ${object.type} ${object.size}`))) throw corrupt();
+            header = Buffer.alloc(0); digest = createHash(repository.format).update(`${object.type} ${object.size}\0`);
+            remaining = object.size; chunks = []; state = remaining ? 'body' : 'separator';
+          } else if (state === 'body') {
+            const length = Math.min(remaining, chunk.length - offset), body = chunk.subarray(offset, offset + length);
+            digest!.update(body); if (object.type !== 'blob') chunks.push(Buffer.from(body));
+            remaining -= length; offset += length; if (!remaining) state = 'separator';
+          } else {
+            if (chunk[offset++] !== 10 || digest!.digest('hex') !== object.id) throw corrupt();
+            if (object.type !== 'blob') metadata.set(object.id, Buffer.concat(chunks));
+            chunks = []; digest = undefined; index += 1; state = 'header';
+          }
+        }
+      } catch (error) { stop(error instanceof HttpError ? error : corrupt()); }
+    });
+    child.stderr!.on('data', (chunk: Buffer) => { errors += chunk.length; if (errors > 32_000) stop(limit()); });
+    child.once('error', () => { failure ??= unavailable(); });
+    child.once('close', code => {
+      repository.signal.removeEventListener('abort', cancel);
+      if (failure) reject(failure);
+      else if (code !== 0) reject(missing());
+      else if (index !== objects.length || state !== 'header' || header.length) reject(corrupt());
+      else resolve(metadata);
+    });
+    child.stdin.on('error', () => undefined); child.stdin.end(objects.map(object => `${object.id}\n`).join(''));
+    if (repository.signal.aborted) cancel();
+  });
+}
+
+/** Verify the complete reachable graph, including ancestors which blame may omit.
+ * Merely verifying reported origins permits corrupted older objects to reassign
+ * lines to a later valid commit. Enumeration is untrusted until all its edges
+ * close over the hash-verified objects and every object is reachable from head.
+ */
+async function verifyBlameGraph(repository: RepositoryHandle, target: string): Promise<Set<string>> {
+  const output = await command(repository, ['rev-list', '--objects', '--no-object-names', target, '--'], (GIT_LIMITS.blameGraphObjects + 1) * (repository.format === 'sha1' ? 41 : 65));
+  if (!output.every(byte => byte < 128)) throw corrupt();
+  const identifiers = output.toString('ascii').split('\n'); if (identifiers.pop() !== '') throw corrupt();
+  if (identifiers.length > GIT_LIMITS.blameGraphObjects) throw limit();
+  if (!identifiers.length || identifiers.some(id => !isGitObjectId(id, repository.format)) || new Set(identifiers).size !== identifiers.length || !identifiers.includes(target)) throw corrupt();
+  const types = await run(['--git-dir', repository.path, 'cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], repository.signal, GIT_LIMITS.outputBytes, Buffer.from(identifiers.map(id => `${id}\n`).join('')));
+  if (types.code !== 0) throw missing();
+  if (!types.data.every(byte => byte < 128)) throw corrupt();
+  const records = types.data.toString('ascii').split('\n'); if (records.pop() !== '' || records.length !== identifiers.length) throw corrupt();
+  const objects: BlameObject[] = []; let commits = 0, sourceBytes = 0, metadataBytes = 0;
+  for (const [index, record] of records.entries()) {
+    const parsed = /^([0-9a-f]+) (commit|tree|blob) (\d+)$/.exec(record); if (!parsed || parsed[1] !== identifiers[index]) throw missing();
+    const type = parsed[2] as BlameObject['type'], size = Number(parsed[3]); if (!Number.isSafeInteger(size)) throw limit();
+    if (type === 'blob') {
+      sourceBytes += size; if (size > GIT_LIMITS.blameBlobBytes || sourceBytes > GIT_LIMITS.blameSourceBytes) throw limit();
+    } else {
+      metadataBytes += size; if (size > GIT_LIMITS.outputBytes || metadataBytes > GIT_LIMITS.blameMetadataBytes) throw limit();
+      if (type === 'commit' && ++commits > GIT_LIMITS.blameHistoryCommits) throw limit();
+    }
+    objects.push({ id: parsed[1]!, type, size });
+  }
+  const metadata = await verifyBlameObjects(repository, objects), byId = new Map(objects.map(object => [object.id, object]));
+  const edges = new Map<string, string[]>(); let entries = 0;
+  const requireType = (id: string, type: BlameObject['type']) => { if (byId.get(id)?.type !== type) throw corrupt(); return id; };
+  for (const object of objects) {
+    if (object.type === 'commit') {
+      const commit = decodeCommit(repository, object.id, metadata.get(object.id)!);
+      edges.set(object.id, [requireType(commit.treeId, 'tree'), ...commit.parentIds.map(id => requireType(id, 'commit'))]);
+    } else if (object.type === 'tree') {
+      const children = decodeTree(repository, metadata.get(object.id)!, ''); entries += children.length; if (entries > GIT_LIMITS.blameTreeEntries) throw limit();
+      edges.set(object.id, children.filter(entry => entry.type !== 'submodule').map(entry => requireType(entry.objectId, entry.type === 'tree' ? 'tree' : 'blob')));
+    }
+  }
+  requireType(target, 'commit'); const visited = new Set<string>(), pending = [target];
+  while (pending.length) {
+    const id = pending.pop()!; if (visited.has(id)) continue; visited.add(id);
+    pending.push(...edges.get(id) ?? []);
+  }
+  if (visited.size !== objects.length) throw corrupt();
+  return new Set(objects.filter(object => object.type === 'commit').map(object => object.id));
+}
+
+/** Keep the LF in each logical line so final-newline edits are verified too. */
+function sourceLines(data: Buffer, maximum: number): Buffer[] {
+  const lines: Buffer[] = []; let start = 0;
+  while (start < data.length) {
+    if (lines.length >= maximum) throw limit();
+    const end = data.indexOf(10, start); const next = end < 0 ? data.length : end + 1;
+    lines.push(data.subarray(start, next)); start = next;
+  }
+  return lines;
+}
+
+/** Git's quoted filenames contain C escapes and octal UTF-8 bytes, not JS escapes. */
+function blamePath(value: Buffer): string {
+  let bytes = value;
+  if (value[0] === 34) {
+    if (value.length < 2 || value.at(-1) !== 34) throw corrupt();
+    const decoded: number[] = [];
+    const escapes: Record<number, number> = { 97: 7, 98: 8, 116: 9, 110: 10, 118: 11, 102: 12, 114: 13, 34: 34, 92: 92 };
+    for (let index = 1; index < value.length - 1; index += 1) {
+      const byte = value[index]!;
+      if (byte === 34) throw corrupt();
+      if (byte !== 92) { decoded.push(byte); continue; }
+      const escaped = value[++index]; if (escaped === undefined || index >= value.length - 1) throw corrupt();
+      if (Object.hasOwn(escapes, escaped)) decoded.push(escapes[escaped]!);
+      else {
+        const digits = value.subarray(index, index + 3);
+        if (digits.length !== 3 || index + 3 > value.length - 1 || !digits.every(digit => digit >= 48 && digit <= 55)) throw corrupt();
+        const decodedByte = Number.parseInt(digits.toString('ascii'), 8); if (decodedByte > 255) throw corrupt();
+        decoded.push(decodedByte); index += 2;
+      }
+    }
+    bytes = Buffer.from(decoded);
+  }
+  const path = utf8(bytes); if (!path || !isGitPath(path)) throw corrupt(); return path;
+}
+
+function parseBlame(data: Buffer, target: Buffer[], format: GitObjectFormat): GitBlameLine[] {
+  const lines: GitBlameLine[] = []; let offset = 0;
+  const next = (): Buffer => {
+    const end = data.indexOf(10, offset); if (end < 0) throw corrupt();
+    const line = data.subarray(offset, end); offset = end + 1; return line;
+  };
+  const origins = new Set<string>(), files = new Set<string>();
+  while (offset < data.length) {
+    const headerBytes = next(); if (!headerBytes.every(byte => byte < 128)) throw corrupt();
+    const header = /^([0-9a-f]+) ([1-9]\d*) ([1-9]\d*)(?: ([1-9]\d*))?$/.exec(headerBytes.toString('ascii'));
+    if (!header || !isGitObjectId(header[1]!, format)) throw corrupt();
+    const commitId = header[1]!, originalLine = Number(header[2]), lineNumber = Number(header[3]), group = header[4] ? Number(header[4]) : 1;
+    if (!Number.isSafeInteger(originalLine) || originalLine > GIT_LIMITS.blameBlobBytes || lineNumber !== lines.length + 1 || lineNumber > target.length
+      || !Number.isSafeInteger(group) || group > target.length - lineNumber + 1) throw corrupt();
+    let path: string | undefined; let content: Buffer | undefined;
+    while (offset < data.length) {
+      const record = next();
+      if (record[0] === 9) { content = record.subarray(1); break; }
+      if (record.includes(0)) throw corrupt();
+      if (record.subarray(0, 9).equals(Buffer.from('filename '))) {
+        if (path !== undefined) throw corrupt(); path = blamePath(record.subarray(9));
+      }
+    }
+    const full = target[lineNumber - 1]!; const literal = full.at(-1) === 10 ? full.subarray(0, -1) : full;
+    if (path === undefined || content === undefined || !content.equals(literal)) throw corrupt();
+    origins.add(commitId); files.add(JSON.stringify([commitId, path]));
+    if (origins.size > GIT_LIMITS.blameOrigins || files.size > GIT_LIMITS.blameOrigins) throw limit();
+    lines.push({ lineNumber, commitId, originalLine, path });
+  }
+  if (lines.length !== target.length) throw corrupt(); return lines;
+}
+
+async function readBlame(repositoryId: string, commitId: string, path: string, repository: RepositoryHandle): Promise<GitBlame> {
+  const commit = await readCommit(repository, commitId), entry = await entryAt(repository, commit, path);
+  if (entry.type === 'tree') throw missing();
+  const identity = { repositoryId, objectFormat: repository.format, commitId, path, objectId: entry.objectId, mode: entry.mode };
+  let blob: GitBlob; let targetData: Buffer | null = null;
+  if (entry.type === 'submodule') blob = { ...identity, size: null, state: 'submodule' };
+  else {
+    const size = await objectSize(repository, entry.objectId); if (size > GIT_LIMITS.blameBlobBytes) throw limit();
+    const data = await rawObject(repository, entry.objectId, 'blob', GIT_LIMITS.blameBlobBytes); if (data.length !== size) throw corrupt();
+    const common = { ...identity, size };
+    if (entry.type === 'symlink') blob = { ...common, state: 'symlink' };
+    else if (size > GIT_LIMITS.blobBytes) blob = { ...common, state: 'oversized' };
+    else if (data.includes(0)) blob = { ...common, state: 'binary' };
+    else {
+      try { blob = { ...common, state: 'text', content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data) }; targetData = data; }
+      catch { blob = { ...common, state: 'unsupported_encoding' }; }
+    }
+  }
+  const result: GitBlame = { repositoryId, objectFormat: repository.format, algorithm: 'git-blame-root', commit, blob, lines: null, commits: [] };
+  if (!targetData) return result;
+  const target = sourceLines(targetData, GIT_LIMITS.blameLines);
+  if (!target.length) { result.lines = []; return result; }
+  const history = await verifyBlameGraph(repository, commitId);
+  const porcelain = await command(repository, ['-c', 'core.quotePath=true', 'blame', '--line-porcelain', '--root', '--no-textconv', '--no-progress', commitId, '--', path]);
+  const lines = parseBlame(porcelain, target, repository.format);
+  if (lines.some(line => !history.has(line.commitId))) throw corrupt();
+  const commits = new Map<string, GitCommit>(), groups = new Map<string, GitBlameLine[]>();
+  for (const line of lines) {
+    const key = JSON.stringify([line.commitId, line.path]), group = groups.get(key) ?? [];
+    group.push(line); groups.set(key, group);
+  }
+  const verified = new Map<string, Buffer>([[entry.objectId, targetData]]); let bytes = targetData.length;
+  for (const group of groups.values()) {
+    checkAbort(repository.signal); const first = group[0]!;
+    let origin = commits.get(first.commitId);
+    if (!origin) { origin = first.commitId === commit.id ? commit : await readCommit(repository, first.commitId); commits.set(origin.id, origin); }
+    const source = await entryAt(repository, origin, first.path);
+    if (source.type !== 'file') throw corrupt();
+    let data = verified.get(source.objectId);
+    if (!data) {
+      const size = await objectSize(repository, source.objectId);
+      if (size > GIT_LIMITS.blameBlobBytes || bytes + size > GIT_LIMITS.blameSourceBytes) throw limit(); bytes += size;
+      data = source.objectId === entry.objectId ? targetData : await rawObject(repository, source.objectId, 'blob', GIT_LIMITS.blameBlobBytes);
+      if (data.length !== size) throw corrupt(); verified.set(source.objectId, data);
+    }
+    const requested = new Map<number, GitBlameLine[]>();
+    for (const line of group) { const at = requested.get(line.originalLine) ?? []; at.push(line); requested.set(line.originalLine, at); }
+    let start = 0, number = 1;
+    while (start < data.length && requested.size) {
+      const end = data.indexOf(10, start), next = end < 0 ? data.length : end + 1;
+      const attributed = requested.get(number);
+      if (attributed) {
+        const literal = data.subarray(start, next);
+        for (const line of attributed) if (!literal.equals(target[line.lineNumber - 1]!)) throw corrupt();
+        requested.delete(number);
+      }
+      number += 1; start = next;
+    }
+    if (requested.size) throw corrupt();
+  }
+  result.lines = lines; result.commits = [...commits.values()];
+  if (Buffer.byteLength(JSON.stringify(result)) > GIT_LIMITS.outputBytes) throw limit(); return result;
+}
+
 class LocalGitObserver implements GitObserver {
   private readonly gate = new Gate();
   private readonly bindings: Readonly<Record<string, string>>;
@@ -434,6 +676,10 @@ class LocalGitObserver implements GitObserver {
       try { return { ...identity, state: 'text', content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data) }; }
       catch { return { ...identity, state: 'unsupported_encoding' }; }
     });
+  }
+  async blame(id: string, commit: string, path: string, signal?: AbortSignal): Promise<GitBlame> {
+    if (typeof commit !== 'string' || !isGitObjectId(commit) || typeof path !== 'string' || !path || !isGitPath(path)) throw invalid();
+    return this.observe(id, signal, repository => readBlame(id, commit, path, repository));
   }
   async history(id: string, query: GitHistoryQuery, signal?: AbortSignal): Promise<GitHistory> {
     const path = query.path ?? ''; const after = query.after ?? 0; const page = query.limit ?? GIT_LIMITS.historyDefault;

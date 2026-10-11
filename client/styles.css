@@ -837,3 +837,36 @@
 .wiki-path-preview nav { display: flex; flex-wrap: wrap; gap: 12px; }
 .wiki-moved { border-left: 3px solid #d5a028; }
 @media(max-width:600px) { .wiki-child-row { padding: 14px; } .wiki-breadcrumbs { gap: 6px; } .wiki-path-search { flex-basis: 100%; } }
+
+.repository-blame { min-width: 0; }
+.repository-blame-heading, .repository-blame-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+.repository-blame > .card-body > p, .repository-blame-origin { overflow-wrap: anywhere; }
+.repository-blame-origin { border-block: 1px solid var(--border); background: #f6f9fc; }
+.repository-blame-origin:focus { outline: 2px solid var(--blue); outline-offset: -2px; }
+.repository-blame-origin h3 { margin-bottom: 9px; }
+.repository-blame-parent { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.repository-blame-parent .field { flex: 1; min-width: 200px; }
+.repository-blame-parent p { flex-basis: 100%; margin: 0; }
+.repository-blame-controls { padding: 16px; }
+.repository-blame-controls form { display: flex; align-items: end; gap: 8px; }
+.repository-blame-controls input { width: 110px; }
+.repository-blame-lines { overflow: auto; max-height: 700px; border-top: 1px solid var(--border); }
+.repository-blame-line { display: flex; width: max-content; min-width: 100%; border-bottom: 1px solid #edf0f3; }
+.repository-blame-line > button { display: flex; align-items: center; gap: 12px; width: 162px; flex-shrink: 0; padding: 8px 12px; background: #f5f7f9; border: 0; border-right: 1px solid var(--border); color: var(--blue); text-align: left; cursor: pointer; }
+.repository-blame-line > button strong { min-width: 25px; color: var(--muted); }
+.repository-blame-line > button code { font-size: 11px; }
+.repository-blame-line > pre { margin: 0; padding: 8px 12px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.repository-blame-line.selected { background: #fff9df; }
+.repository-blame-line.selected > button { background: #e2eff9; }
+@media(max-width:600px) {
+  .repository-blame-heading { align-items: stretch; }
+  .repository-blame-heading .button { width: 100%; }
+  .repository-blame-origin .small-actions .button { flex: 0 0 auto; min-height: 44px; }
+  .repository-blame-parent .button { flex: 1 1 160px; }
+  .repository-blame-parent .field { min-width: 0; flex-basis: 100%; }
+  .repository-blame-controls { padding: 12px; gap: 8px; }
+  .repository-blame-controls form { flex-basis: 100%; }
+  .repository-blame-controls input { font-size: 16px; }
+  .repository-blame-line > button { min-height: 44px; width: 145px; gap: 6px; padding-inline: 8px; }
+  .repository-blame-line > pre { display: flex; align-items: center; }
+}

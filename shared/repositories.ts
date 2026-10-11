@@ -10,6 +10,10 @@ export const GIT_LIMITS = Object.freeze({
   comparisonEntries: 2_000, comparisonChanges: 1_000,
   comparisonBlobBytes: 8 * 1024 * 1024, comparisonSourceBytes: 64 * 1024 * 1024,
   comparisonCandidates: 1_000, comparisonCandidatePairs: 250_000,
+  blameLines: 10_000, blameOrigins: 200,
+  blameHistoryCommits: 1_000, blameGraphObjects: 10_000, blameTreeEntries: 20_000,
+  blameMetadataBytes: 8 * 1024 * 1024,
+  blameBlobBytes: 8 * 1024 * 1024, blameSourceBytes: 64 * 1024 * 1024,
 });
 export type GitObjectFormat = 'sha1' | 'sha256';
 export function isGitObjectId(value: string, format?: GitObjectFormat): boolean {
@@ -32,6 +36,9 @@ export interface GitTreeEntry { name: string; path: string; objectId: string; mo
 export interface GitTree extends GitResponse { commitId: string; path: string; treeId: string; entries: GitTreeEntry[] }
 interface GitBlobIdentity extends GitResponse { commitId: string; path: string; objectId: string; mode: string }
 export type GitBlob = GitBlobIdentity & ({ state: 'text'; content: string; size: number } | { state: 'binary' | 'oversized' | 'unsupported_encoding' | 'symlink'; size: number } | { state: 'submodule'; size: null });
+export interface GitBlameLine { lineNumber: number; commitId: string; originalLine: number; path: string }
+/** Literal line origins for one immutable file; nontext states have no invented attribution. */
+export interface GitBlame extends GitResponse { algorithm: 'git-blame-root'; commit: GitCommit; blob: GitBlob; lines: GitBlameLine[] | null; commits: GitCommit[] }
 export interface GitHistoryQuery { commit: string; path?: string; after?: number; limit?: number }
 export interface GitHistory extends GitResponse { commitId: string; path: string; commits: GitCommit[]; nextAfter: number | null }
 

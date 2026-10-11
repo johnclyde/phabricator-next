@@ -52,11 +52,11 @@ Object IDs must be complete lowercase SHA-1 or SHA-256 values, consistent with t
 
 Query parameters must occur at most once and unknown parameters are rejected. Paths address entries within a Git tree, never the server filesystem. Empty components, `.` and `..` components, NUL bytes, and paths over 4,096 UTF-16 code units are rejected. URL-encode paths when building requests. Symbolic links and submodule entries are reported as such and are not followed.
 
-History defaults to 25 commits per page, allows 1–100, and uses a nonnegative numeric `after` offset up to 100,000; use the returned `nextAfter` with the same commit/path. Reads are bounded to 1,000 refs or tree entries and 2 MB of command output. Text blobs are limited to 256,000 bytes. Binary, oversized, unsupported-encoding, symlink, and submodule files have explicit states instead of fabricated empty contents. Commit messages are bounded to 16,000 bytes with an explicit truncation indicator. Limit errors are not empty result sets.
+History defaults to 25 commits per page, allows 1–100, and uses a nonnegative numeric `after` offset up to 100,000; use the returned `nextAfter` with the same commit/path. Reference and directory results are bounded to 1,000 entries; ordinary command output is bounded to 2 MB. Comparison and blame verification admit larger object reads under their dedicated limits below. Text blobs are limited to 256,000 bytes. Binary, oversized, unsupported-encoding, symlink, and submodule files have explicit states instead of fabricated empty contents. Commit messages are bounded to 16,000 bytes with an explicit truncation indicator. Limit errors are not empty result sets.
 
 Responses include a current `accessEpoch` and are served with `Cache-Control: no-store`. A missing or hidden repository has the same `OBJECT_UNAVAILABLE` response. Missing Git objects use `GIT_OBJECT_UNAVAILABLE`, which does not imply that the repository itself became hidden. Invalid inputs use `GIT_INVALID_QUERY`; limit, queue, availability, and cancellation failures have distinct `GIT_*` codes. Errors do not disclose configured host paths.
 
-Repository browsing is read-only. It never changes Git objects or references, and viewing source does not create review evidence. Repository hosting, clone/fetch orchestration, SSH or HTTP serving, push policy, commit-record import, commit review and blame remain separate work. Explicit source import into a revision is described below.
+Repository browsing is read-only. It never changes Git objects or references, and viewing source does not create review evidence. Repository hosting, clone/fetch orchestration, SSH or HTTP serving, push policy, commit-record import and commit review remain separate work. Explicit source import into a revision is described below.
 
 ## Compare exact committed trees
 
@@ -140,6 +140,89 @@ branch or chooses a newer base, and works with a read-only token. Human output
 escapes terminal controls; `--json` preserves the bounded exact source response.
 This does not change the CLI's separate review-creation `diff` command.
 
+## Trace a source line to its origin
+
+Open an exact file and select **Blame** to inspect its line provenance. Git
+attributes each line to an origin commit and original path; whole-file renames
+are followed by Git's standard blame behavior. The pinned file stays fixed when
+branches move. Select a line to see the full origin commit, original line/path,
+author, date and commit message. **Open Origin Source** opens that exact historical
+file; **Show Origin Commit Changes** compares the origin with its first parent
+or the empty tree. Merge parents remain selectable in the comparison view.
+
+The reader displays 100 lines at a time, with previous/next pages and direct
+line navigation. Empty files have zero attributed lines. Source preserves BOM,
+CRLF, blank lines and an unterminated final line. Binary, invalid UTF-8,
+oversized, symlink and submodule entries have explicit unavailable states,
+never invented line origins or substituted text. The attributed Git author is
+commit metadata, not a verified workspace identity or an authorship attestation.
+This operation creates no review or acceptance evidence and uses no AI provider.
+
+**Blame Parent at Same Path** explicitly opens the origin's path in a selected
+parent. The path may not exist there, and no old filename is inferred by that
+action. This is not upstream's skip-past behavior. Imported commit identities,
+Differential revision links, age coloring and the full upstream skip-past
+workflow remain separate work.
+
+```sh
+npm run arc -- blame R1 --commit FULL_ID --path paper.tex
+npm run arc -- blame R1 --commit FULL_ID --path paper.tex --json
+```
+
+The CLI makes one exact read and works with a read-only token at root or a
+configured path prefix. Human output escapes terminal and directional controls
+in source, paths, commit messages and author metadata. JSON preserves exact
+source text. The native endpoint is:
+
+`GET /api/repositories/R1/blame?commit=<full-id>&path=<exact-path>`
+
+Both selectors are required. Mutable refs, short IDs, empty paths and duplicate
+or unknown parameters fail. The response includes the selected commit, exact
+`blob` identity/content or nontext state, the `git-blame-root` algorithm marker,
+complete `lines` and unique origin `commits`. Each line has a one-based
+`lineNumber`, `commitId`, `originalLine` and original `path`. Nontext states use
+`lines: null` and no origin commits; empty text uses an empty line list.
+
+The observer uses a fixed `git blame --root --line-porcelain --no-textconv`
+operation. Whitespace ignoring and extra moved/copied-line detection are not
+enabled. C-quoted filenames are decoded as bytes before strict UTF-8 validation.
+The selected commit/tree/blob is hash-verified. Before attributing nonempty
+text, every commit, tree and blob reachable from that exact commit is also
+verified. The verified parent/tree edges must form the complete enumerated
+graph. This includes ancestors which Git does not report as line origins:
+damage there can otherwise make Git assign a line to a different valid commit.
+Objects reachable only from other refs and unreachable objects are excluded;
+gitlinks are not followed. Each attributed original source line is additionally
+checked against the selected literal line, including its final LF. Links,
+submodules, external diff/text conversion, network fetches and Git writes are
+never executed.
+
+A result is complete or fails explicitly. Display limits are the existing
+256,000-byte text preview, 10,000 lines, 200 unique origin commits, 200
+commit/path pairs and a 2 MB result. The integrity preflight admits at most
+1,000 reachable commits, 10,000 distinct objects, 20,000 tree entries,
+8 MiB combined commit/tree metadata, 8 MiB per blob and 64 MiB distinct blob
+bytes. Blobs are hash-verified while streaming, without retaining the complete
+history's bodies. Reachable files unrelated to the selected path count toward
+these limits. A small current file can therefore be unavailable for attribution
+when its repository history exceeds this bounded verification contract; large
+history support remains a gap. Objects outside the selected ancestry do not
+consume these graph budgets.
+
+Target files above 8 MiB fail before attribution; files between the text
+preview and admission limits return an explicit oversized state. Nontext and
+empty targets return their verified target state without traversing attribution
+history. One operation uses the existing 10-second deadline and Git queue
+permit. No partial successful attribution is returned when any budget is
+exceeded.
+
+Current session, read scope, repository and Space authority are checked before
+and after Git work, including failures. Responses have current access epochs
+and `Cache-Control: no-store`. Exact visited blame snapshots share the bounded
+repository cache: durable only in local mode, memory-only in a verified
+password session. Late responses cannot replace a newer selection or restore
+source after access loss, session retirement or cache invalidation.
+
 ## Import a complete text tree into review
 
 From a pinned repository snapshot, explicitly import the entire commit as a new code, paper or document review. The browser asks for the kind and title; the CLI equivalent is:
@@ -185,12 +268,13 @@ The browser retains each submitted request, its base pins and key independently 
 
 ## Upstream correspondence and verification
 
-These are the GIT-01/P303a browsing, P303b initial import, P303c later-version import and P303d committed-tree comparison subsets, based on Phabricator `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`:
+These are the GIT-01/P303a browsing, P303b initial import, P303c later-version import, P303d committed-tree comparison and P303e line-provenance subsets, based on Phabricator `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`:
 
 - [Browse queries](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionBrowseQueryConduitAPIMethod.php) identify a commit and path and distinguish trees, files and submodules. Our API requires an explicit full commit and reads exact tree objects; directory pagination and upstream deleted-path recovery remain gaps.
 - [Git file content](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/filecontent/DiffusionGitFileContentQuery.php) reads the blob at a commit/path. Our adapter verifies raw object hashes and exposes bounded UTF-8 content with explicit unsupported states.
 - [History queries](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionHistoryQueryConduitAPIMethod.php) use commit/path, offset/limit and parent relationships. Our initial history supports one exact starting commit and optional literal path. Two-commit ranges, direct/child change details and imported commit metadata remain gaps.
 - [Git raw diff](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/rawdiff/DiffusionGitRawDiffQuery.php) compares explicit trees with rename/copy detection, using the first parent or empty tree by default. P303d exposes this source-comparison behavior through native inventory and selected-file endpoints. It does not implement `diffusion.rawdiffquery`'s temporary File response, `diffusion.diffquery`'s last-modification selection, or the [Compare controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/controller/DiffusionCompareController.php)'s branch reachability report. Unlike upstream's commit UI, the native inventory includes directory entries. Combined merge diffs, patch export, exhaustive copy discovery and Conduit wire compatibility remain gaps.
+- [Git blame](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/blame/DiffusionGitBlameQuery.php) uses root-aware, whitespace-sensitive Git attribution without extra move/copy flags. P303e adds exact native file reads with verified origin source, mobile/offline navigation and CLI output. It does not implement [diffusion.blame](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionBlameConduitAPIMethod.php)'s multi-path map, partial-success omission, repository selectors or shared immutable cache. Imported identities/revision links, upstream skip-past controls, Mercurial/SVN blame and Conduit wire compatibility remain gaps.
 - [Differential diff creation](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/conduit/DifferentialCreateDiffConduitAPIMethod.php) records repository/VCS/base provenance. Our import records a complete immutable text-tree snapshot. It does not reproduce working-copy ranges, hunk/changeset submission or upstream Conduit request formats.
 - [Differential revision updates](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/conduit/DifferentialUpdateRevisionConduitAPIMethod.php) require an editable revision and visible diff. Our later-version import similarly requires target edit and source view access, and adds exact version/hash checks. The upstream [update transaction](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/xaction/DifferentialRevisionUpdateTransaction.php) can change the repository with the active diff and conditionally retain acceptance. Our repository link stays fixed and every new version invalidates acceptance. These are deliberate differences. Published/closed revision states and upstream diff publication remain separate parity work.
 

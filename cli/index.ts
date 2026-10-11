@@ -21,6 +21,7 @@ import { docxCommand } from './docx';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
+import { gitBlameCommand } from './git-blame';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -35,6 +36,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- refs R1 [--json]
   npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
   npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
+  npm run arc -- blame R1 --commit FULL_ID --path PATH [--json]
   npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
   npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--project ID|NAME] [--request-id KEY] [--json]
   npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
@@ -167,6 +169,8 @@ compare-commits reads an explicit ordered commit pair. Omit file paths for the
 complete change inventory; supply the listed before/after paths for one change.
 An absent side is omitted, distinct from an existing empty file. Rename/copy
 similarity is Git's inference; comparisons do not create review evidence.
+blame attributes every line of an exact text file to its original commit and
+path, including whole-file renames. It never changes source or review evidence.
 `;
 
 function terminalText(value: string, multiline = false): string {
@@ -273,6 +277,7 @@ async function main() {
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiWriteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await gitComparisonCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await gitBlameCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

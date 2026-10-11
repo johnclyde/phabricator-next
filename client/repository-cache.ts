@@ -1,10 +1,14 @@
 import { isGitObjectId, isGitPath } from '../shared/repositories';
 
-export interface RepositorySelection { commitId: string; path: string; view: 'tree' | 'file' | 'history' | 'changes'; historyFrom?: 'tree' | 'file'; baseCommitId?: string | null; beforePath?: string | null; afterPath?: string | null }
+export interface RepositorySelection { commitId: string; path: string; view: 'tree' | 'file' | 'history' | 'changes' | 'blame'; historyFrom?: 'tree' | 'file'; baseCommitId?: string | null; beforePath?: string | null; afterPath?: string | null; selectedLine?: number }
 export function repositorySelection(value: unknown): RepositorySelection | null {
   if (!value || typeof value !== 'object') return null;
   const item = value as Record<string, unknown>;
-  if (typeof item.commitId !== 'string' || !isGitObjectId(item.commitId) || typeof item.path !== 'string' || !isGitPath(item.path) || !['tree', 'file', 'history', 'changes'].includes(String(item.view)) || typeof item.view !== 'string') return null;
+  if (typeof item.commitId !== 'string' || !isGitObjectId(item.commitId) || typeof item.path !== 'string' || !isGitPath(item.path) || !['tree', 'file', 'history', 'changes', 'blame'].includes(String(item.view)) || typeof item.view !== 'string') return null;
+  if (item.view === 'blame') {
+    if (!item.path || item.selectedLine !== undefined && (!Number.isSafeInteger(item.selectedLine) || Number(item.selectedLine) < 1)) return null;
+    return { commitId: item.commitId, path: item.path, view: 'blame', ...(item.selectedLine === undefined ? {} : { selectedLine: Number(item.selectedLine) }) };
+  }
   if (item.view === 'changes') {
     if (item.baseCommitId !== null && (typeof item.baseCommitId !== 'string' || !isGitObjectId(item.baseCommitId) || item.baseCommitId.length !== item.commitId.length)) return null;
     for (const key of ['beforePath', 'afterPath']) if (item[key] !== null && item[key] !== undefined && (typeof item[key] !== 'string' || !item[key] || !isGitPath(item[key]))) return null;

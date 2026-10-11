@@ -72,6 +72,16 @@ test('reference refresh leaves a comparison pinned and exact visited files reope
 
 test.describe('comparison response races', () => {
   test.use({ serviceWorkers: 'block' });
+  test('automatic first-change selection preserves a newly typed exact commit selector', async ({ page }) => {
+    const data = await fixture(); await open(page, data.head);
+    let release!: () => void, captured!: () => void; const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { captured = resolve; });
+    await page.route('**/api/repositories/R1/compare?**', async route => { if (new URL(route.request().url()).searchParams.get('base') !== 'empty') { await route.continue(); return; } const response = await route.fetch(); captured(); await held; await route.fulfill({ response }); });
+    try {
+      await compare(page, 'empty', data.base); await reached; await page.getByLabel('Exact commit ID', { exact: true }).fill(data.head); release(); await page.unrouteAll({ behavior: 'wait' });
+      await expect(page.locator('.repository-selected-change h3')).toContainText('README.md'); await expect(page.getByLabel('Exact commit ID', { exact: true })).toHaveValue(data.head);
+      await page.getByRole('button', { name: 'Open Commit', exact: true }).click(); await expect(page.locator('.repository-commit-id')).toHaveText(data.head); await expect(page.locator('.repository-entry')).not.toHaveCount(0);
+    } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+  });
   test('late file and pair responses cannot replace newer exact selections', async ({ page }) => {
     const data = await fixture(); await open(page, data.head); await compare(page, data.base, data.head); await selected(page, '<script>.txt');
     let release!: () => void, captured!: () => void; const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { captured = resolve; });

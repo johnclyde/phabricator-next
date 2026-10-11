@@ -12,7 +12,7 @@ const short = (value: string) => value.slice(0, 12);
 const labels = { added: 'Added', deleted: 'Deleted', modified: 'Modified', type_changed: 'Type changed', renamed: 'Renamed', copied: 'Copied' };
 const types = { file: 'File', tree: 'Directory', symlink: 'Symbolic link', submodule: 'Submodule' };
 const title = (change: GitComparisonChange) => change.before && change.after && change.before.path !== change.after.path ? `${change.before.path} → ${change.after.path}` : change.after?.path ?? change.before!.path;
-type Props = { id: string; selection: RepositorySelection; online: boolean; generation: number; choose: (selection: RepositorySelection) => void; cached: <T>(key: string) => T | null; saveCache: (key: string, value: unknown) => void; dropCache: (key: string) => void };
+type Props = { id: string; selection: RepositorySelection; online: boolean; generation: number; choose: (selection: RepositorySelection, automatic?: boolean) => void; cached: <T>(key: string) => T | null; saveCache: (key: string, value: unknown) => void; dropCache: (key: string) => void };
 export default function RepositoryComparison({ id, selection, online, generation, choose, cached, saveCache, dropCache }: Props) {
   const { request, isActive, unavailableObject, onRepositorySnapshotChange, onAccessChange } = useWorkspace();
   const pair = comparisonPair(selection), inventoryKey = comparisonCacheKey(selection), fileKey = comparisonCacheKey(selection, true);
@@ -52,7 +52,7 @@ export default function RepositoryComparison({ id, selection, online, generation
   useEffect(() => {
     if (!visible || chosen || selection.beforePath != null || selection.afterPath != null || !visible.changes.length || !active()) return;
     const first = visible.changes[0]!;
-    actions.current.choose({ ...current.current, beforePath: first.before?.path ?? null, afterPath: first.after?.path ?? null });
+    actions.current.choose({ ...current.current, beforePath: first.before?.path ?? null, afterPath: first.after?.path ?? null }, true);
   }, [visible, chosen, fileKey]);
   useEffect(() => {
     const sequence = ++fileReads.current; setFile(null); setFileError(''); setFileLoading(false);

@@ -169,7 +169,7 @@ export function createApp(options: AppOptions = {}): App {
     store.read(authorize);
     const comparison = section === 'compare' || section === 'compare/file';
     const allowed = comparison ? ['base', 'target', ...(section === 'compare/file' ? ['beforePath', 'afterPath'] : [])]
-      : section === 'tree' || section === 'blob' ? ['commit', 'path'] : section === 'history' ? ['commit', 'path', 'after', 'limit'] : [];
+      : section === 'tree' || section === 'blob' || section === 'blame' ? ['commit', 'path'] : section === 'history' ? ['commit', 'path', 'after', 'limit'] : [];
     for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid repository read parameters.', 'GIT_INVALID_QUERY');
     const commit = commitPath ?? url.searchParams.get('commit');
     if (section && section !== 'refs' && !comparison && (!commit || !isGitObjectId(commit))) throw new HttpError(400, 'Select a full lowercase commit object ID.', 'GIT_INVALID_QUERY');
@@ -178,7 +178,7 @@ export function createApp(options: AppOptions = {}): App {
     const beforePath = url.searchParams.get('beforePath'), afterPath = url.searchParams.get('afterPath');
     if (section === 'compare/file' && ((beforePath === null && afterPath === null) || (base === 'empty' && beforePath !== null) || [beforePath, afterPath].some(value => value !== null && (!value || !isGitPath(value))))) throw new HttpError(400, 'Select the exact before and after paths of one committed change.', 'GIT_INVALID_QUERY');
     const path = url.searchParams.get('path') ?? '';
-    if (!isGitPath(path) || (section === 'blob' && !path)) throw new HttpError(400, 'Select a valid Git tree path.', 'GIT_INVALID_QUERY');
+    if (!isGitPath(path) || ((section === 'blob' || section === 'blame') && !path)) throw new HttpError(400, 'Select a valid Git tree path.', 'GIT_INVALID_QUERY');
     const bounded = (name: string, fallback: number, min: number, max: number): number => {
       const raw = url.searchParams.get(name);
       if (raw === null) return fallback;
@@ -209,6 +209,7 @@ export function createApp(options: AppOptions = {}): App {
           : section === 'commits' ? git.commit(id, commit!, signal)
             : section === 'tree' ? git.tree(id, commit!, path, signal)
               : section === 'blob' ? git.blob(id, commit!, path, signal)
+                : section === 'blame' ? git.blame(id, commit!, path, signal)
                 : git.history(id, { commit: commit!, path, after, limit }, signal)]);
       store.read(() => {
         const current = authorize();
@@ -549,7 +550,7 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, bootstrap.session); return;
       }
       if (req.method === 'GET') {
-        const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|history|compare(?:\/file)?)|\/(commits)\/([^/]+))?$/.exec(path);
+        const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|blame|history|compare(?:\/file)?)|\/(commits)\/([^/]+))?$/.exec(path);
         if (repository) { await repositoryRead(req, res, context, repository[1]!, repository[2] ?? repository[3], repository[4], url); return; }
         const docxInspection = /^\/api\/files\/(F[1-9]\d{0,14})\/docx$/.exec(path);
         if (docxInspection) {
