@@ -7,6 +7,8 @@ import type { RevisionLifecycleInput, RevisionLifecycleSnapshot, RevisionLifecyc
 import { revisionLifecycleInputHash } from './revision-lifecycle.ts';
 import { revisionReviewerPermission, type RevisionReviewerInput, type RevisionReviewerSnapshot, type RevisionReviewerHistory } from '../shared/revision-reviewers.ts';
 import { revisionReviewerInputHash } from './revision-reviewers.ts';
+import type { RevisionMetadataInput, RevisionMetadataSnapshot, RevisionMetadataHistory } from '../shared/revision-metadata.ts';
+import { revisionMetadataInputHash } from './revision-metadata.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -77,6 +79,29 @@ export class AccessLayer {
       const permission = revisionReviewerPermission(action.action);
       return access.capabilities[permission] ? action : { ...action, available: false, reason: `${permission === 'edit' ? 'Editing' : 'Interaction'} permission is required for this reviewer action.` };
     }), access, accessEpoch: this.policies.epoch() };
+  }
+  revisionMetadata(id: string): RevisionMetadataSnapshot {
+    this.require(id);
+    return { ...this.store.revisionMetadata.snapshot(id), access: this.describe(id), accessEpoch: this.policies.epoch() };
+  }
+  revisionMetadataHistory(id: string, query: { before?: number; limit?: number; expectedMetadataVersion?: number }): RevisionMetadataHistory {
+    this.require(id);
+    return { ...this.store.revisionMetadata.history(id, query), accessEpoch: this.policies.epoch() };
+  }
+  presentRevisionMetadata(id: string, input: RevisionMetadataInput, response: MutationResponse): MutationResponse {
+    this.require(id, 'edit');
+    const invalid = (): never => { throw new HttpError(409, 'This saved metadata receipt does not match the requested operation.', 'REVISION_METADATA_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.revisionMetadata.operationRevisionId(body.operationId) !== id) return invalid();
+      operation = this.store.revisionMetadata.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.attribution.principalId !== this.principal
+      || operation.inputSha256 !== revisionMetadataInputHash(input) || !isDeepStrictEqual(operation.input, input)
+      || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionReviewerHistory(id: string, query: { before?: number; limit?: number; expectedReviewerVersion?: number }): RevisionReviewerHistory {
     this.require(id);

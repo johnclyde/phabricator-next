@@ -20,7 +20,7 @@ import type { ObjectAccess } from '../shared/policy.ts';
 const commitId = 'a'.repeat(40); const treeId = 'b'.repeat(40);
 const source = [{ path: 'README.md', content: '\ufeffImported text.\n' }, { path: 'run.sh', content: '#!/bin/sh\nexit 0\n' }];
 const snapshot = (): GitImportSnapshot => ({ repositoryId: 'R1', objectFormat: 'sha1', files: structuredClone(source), provenance: { kind: 'git', repositoryId: 'R1', objectFormat: 'sha1', commitId, treeId, scope: 'complete-text-tree', manifest: source.map((file, index) => ({ path: file.path, mode: index ? '100755' : '100644', objectId: createHash('sha1').update(`blob ${Buffer.byteLength(file.content)}\0`).update(file.content).digest('hex') })) } });
-const input = (title = 'Imported review') => ({ commitId, kind: 'code', title });
+const input = (title = 'Imported review') => ({ testPlan: 'Fixture verification plan.', commitId, kind: 'code', title });
 const route = '/api/repositories/R1/import-revision';
 const members = (...principalIds: string[]) => ({ kind: 'principals' as const, principalIds });
 const workspace = { kind: 'workspace' as const };
@@ -70,7 +70,7 @@ test('Git imports atomically retain exact files, modes, attribution, source rule
     assert.deepEqual(version.files, source); assert.equal(version.contentHash, contentHash(source)); assert.deepEqual(version.gitSource, snapshot().provenance);
     assert.equal(version.attribution?.principalId, app.alice.id); assert.equal(detail.activity[0]?.attribution?.principalId, app.alice.id);
     assert.deepEqual(detail.access!.policy.rules, policy.rules); assert.equal(detail.access!.policy.spaceId, space.id); assert.match(detail.access!.viewLabel, /linked repository view/);
-    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 27);
+    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 28);
     const raw = app.store.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id);
     await app.close(); const reopened = createStore({ path });
     try { assert.deepEqual(reopened.detail(detail.revision.id).versions[0], version); assert.deepEqual(reopened.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id), raw); } finally { reopened.close(); }
@@ -82,7 +82,7 @@ test('ordinary uploads and suggestion applications never inherit or accept Git p
   try {
     const imported = await app.request<RevisionDetail>(route, 'POST', { ...input(), kind: 'paper' }); assert.equal(imported.status, 201); const detail = imported.body; const id = detail.revision.id;
     for (const spoof of ['gitSource', 'provenance']) {
-      assert.equal((await app.request('/api/revisions', 'POST', { kind: 'code', title: 'Spoofed', files: source, [spoof]: snapshot().provenance })).status, 400);
+      assert.equal((await app.request('/api/revisions', 'POST', { testPlan: 'Fixture verification plan.', kind: 'code', title: 'Spoofed', files: source, [spoof]: snapshot().provenance })).status, 400);
       assert.equal((await app.request(`/api/revisions/${id}/versions`, 'POST', { expectedVersion: 1, files: source, message: 'Spoofed', [spoof]: snapshot().provenance })).status, 400);
     }
     const root = await app.request<{ id: string }>(`/api/revisions/${id}/comments`, 'POST', { body: 'Clarify text', versionId: detail.versions[0]!.id, filePath: 'README.md', passage: { start: 1, end: 9, quote: 'Imported' }, suggestion: { replacement: 'Revised' } }); assert.equal(root.status, 201);
@@ -145,7 +145,7 @@ test('repository visibility gates every linked revision surface and capability, 
   const app = await start();
   try {
     const imported = (await app.request<RevisionDetail>(route, 'POST', input(), 'alice', 'gated-import')).body;
-    const legacy = app.store.createRevision({ kind: 'code', title: 'Earlier linked source', repositoryId: 'R1', files: source });
+    const legacy = app.store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'code', title: 'Earlier linked source', repositoryId: 'R1', files: source });
     assert.equal(legacy.versions[0]!.gitSource, undefined);
     app.policy('R1', { view: members(app.bob.id), edit: members(app.bob.id) });
     for (const detail of [imported, legacy]) {

@@ -119,8 +119,8 @@ newer edits intact.
 npm run arc -- revision-lifecycle P2
 npm run arc -- revision-lifecycle-history P2 --lifecycle-version 3 --limit 25
 npm run arc -- edit-revision-lifecycle P2 --intent action.json --request-id stable-key
-npm run arc -- diff --title 'Draft argument' --kind paper --draft main.tex
-npm run arc -- import-git R1 --commit FULL_COMMIT_ID --title 'Draft change' --draft
+npm run arc -- diff --title 'Draft argument' --kind paper --draft --test-plan 'Read the argument and checked its assumptions.' main.tex
+npm run arc -- import-git R1 --commit FULL_COMMIT_ID --title 'Draft change' --draft --test-plan 'Inspect the committed source.'
 ```
 
 `import-docx` also accepts `draft: true` in its request file. The action CLI prints

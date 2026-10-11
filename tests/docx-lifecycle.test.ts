@@ -68,8 +68,8 @@ test('DOCX edit loss and destination Space loss hold exact requests without hidi
     const { client } = current; client.writeStored(draftKey, draft); client.writeStored('docx-request:L1', intent);
     client.reconcileAccess({ L1: access('L1', false), F1: access('F1'), F2: access('F2') }, 2, ['S1', 'S2']);
     assert.equal(client.unavailableObject('L1'), false); assert.equal(client.draftIsHeld(draftKey), true); assert.equal(client.draftIsHeld('docx-request:L1'), true);
-    const key = 'docx-draft:S2:create', creation = { title: 'Keep new draft', summary: '', message: '', sourceFile: source(), shareSource: false };
-    const request = { id: 'new-docx', path: '/api/revisions/docx', body: { title: creation.title, sourceFile: source(), expectedAccessEpoch: 2, shareSource: false, access: { spaceId: 'S2' } }, sourceFile: source(), draftKey: key, draft: creation };
+    const key = 'docx-draft:S2:create', creation = { testPlan: 'Fixture verification plan.', title: 'Keep new draft', summary: '', message: '', sourceFile: source(), shareSource: false };
+    const request = { id: 'new-docx', path: '/api/revisions/docx', body: { testPlan: 'Fixture verification plan.', title: creation.title, sourceFile: source(), expectedAccessEpoch: 2, shareSource: false, access: { spaceId: 'S2' } }, sourceFile: source(), draftKey: key, draft: creation };
     client.writeStored(key, creation); client.writeStored('docx-request:S2', request);
     client.reconcileAccess({ L1: access('L1', false), F1: access('F1'), F2: access('F2') }, 3, ['S1']);
     assert.equal(client.draftIsHeld(key), true); assert.equal(client.draftIsHeld('docx-request:S2'), true); assert.deepEqual(client.quarantinedDrafts().find(item => item.key === key)!.value, creation);

@@ -283,7 +283,7 @@ function schemaTen(path: string): { projects: ProjectSnapshot[]; preserved: Map<
 test('schema 11 migration preserves old bytes, invents no authorship/membership, and deterministically resolves colliding legacy names', () => {
   const directory = mkdtempSync(join(tmpdir(), 'phab-project-migrate-')); const path = join(directory, 'workspace.sqlite'); const legacy = schemaTen(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 27);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 28);
     for (const [table, rows] of legacy.preserved) assert.deepEqual(raw(store, table), rows, `${table} retains its exact historical data`);
     const projects = legacy.projects.map(project => store.getProject(project.id)); assert.deepEqual(projects.map(project => project.primarySlug), ['legacy-proj1-2', 'legacy-proj2', 'legacy-proj1', 'legacy-proj4', '日本語研究', 'unrelated', 'legacy-proj7']);
     assert.deepEqual(projects.map(project => project.primarySlugSource), ['generated', 'generated', 'name', 'generated', 'name', 'name', 'generated']);

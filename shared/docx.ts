@@ -35,7 +35,7 @@ export interface DocxSource {
   projection: DocxProjection;
 }
 export interface DocxInspection { sourceFile: DocxFileIdentity; fileName: string; projection: DocxProjection; accessEpoch: number }
-export interface DocxImportInput { draft?: boolean; title: string; summary?: string; sourceFile: DocxFileIdentity; expectedAccessEpoch: number; shareSource: boolean; access?: NewObjectAccessInput }
+export interface DocxImportInput { draft?: boolean; title: string; summary?: string; testPlan?: string; sourceFile: DocxFileIdentity; expectedAccessEpoch: number; shareSource: boolean; access?: NewObjectAccessInput }
 export interface DocxVersionPins { expectedVersion: number; expectedVersionId: string; expectedContentHash: string; expectedAccessEpoch: number }
 export interface DocxReimportInput extends DocxVersionPins { sourceFile: DocxFileIdentity; shareSource: boolean; message: string }
 export interface DocxReplacement { rangeId: string; start: number; end: number; quote: string; replacement: string }

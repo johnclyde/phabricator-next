@@ -6,6 +6,7 @@ import { canonicalRevisionStack, revisionStackTopology, REVISION_STACK_LIMITS, t
 import { HttpError } from './validation.ts';
 import { RevisionLifecycleStore } from './revision-lifecycle.ts';
 import { RevisionAuthorshipStore } from './revision-authorship.ts';
+import type { RevisionMetadataState } from '../shared/revision-metadata.ts';
 
 const invalid = () => new HttpError(409, 'The revision stack cannot be verified.', 'REVISION_STACK_INVALID');
 const limited = () => new HttpError(422, 'This revision stack exceeds the supported read limit.', 'REVISION_STACK_LIMIT');
@@ -19,7 +20,7 @@ let savepoint = 0;
 /** Metadata-only graph reads. Stored source identities are bound to the result;
  * manuscript bodies and package bytes are not loaded or reverified here. */
 export class RevisionStackStore {
-  constructor(private readonly database: DatabaseSync, private readonly closeOnAccept = false) {}
+  constructor(private readonly database: DatabaseSync, private readonly readMetadata: (id: string) => Pick<RevisionMetadataState, 'title' | 'updatedAt'>, private readonly closeOnAccept = false) {}
 
   read(id: string, visible: (id: string) => boolean, accessEpoch: number, expectedSnapshotId?: string): RevisionStack {
     if (!isRevisionId(id)) throw unavailable();
@@ -41,7 +42,7 @@ export class RevisionStackStore {
       AND json_type(data,'$.kind')='text' AND json_type(data,'$.status')='text' AND json_type(data,'$.currentVersion') IN ('integer','real')
       AND json_type(data,'$.updatedAt')='text') AS validTypes FROM entities WHERE id=? AND kind='revision'`).get(id) as Record<string, unknown> | undefined;
     if (!row) throw root ? unavailable() : invalid();
-    if (row.validTypes !== 1 || row.id !== id || !text(row.title, 1000) || !['code', 'paper', 'document'].includes(String(row.kind))
+    if (row.validTypes !== 1 || row.id !== id || typeof row.title !== 'string' || !row.title.length || row.title.length > 1000 || row.title.includes('\0') || /[\uD800-\uDFFF]/u.test(row.title) || !['code', 'paper', 'document'].includes(String(row.kind))
       || !isRevisionStatus(row.status)
       || !natural(row.currentVersion) || row.currentVersion < 1 || !text(row.updatedAt, 64) || !Number.isFinite(Date.parse(row.updatedAt))) throw invalid();
     const version = this.database.prepare(`SELECT id,revision_id,number,json_extract(data,'$.id') AS storedId,
@@ -71,10 +72,12 @@ export class RevisionStackStore {
     }
     const relationship = this.database.prepare('SELECT version FROM revision_dependency_versions WHERE revision_id=?').get(id) as { version: unknown } | undefined;
     if (relationship && !natural(relationship.version)) throw invalid();
-    let authorship, lifecycle;
-    try { authorship = new RevisionAuthorshipStore(this.database).state(id); lifecycle = new RevisionLifecycleStore(this.database).state(id); } catch { throw invalid(); }
+    let authorship, lifecycle, metadata;
+    try { authorship = new RevisionAuthorshipStore(this.database).state(id); lifecycle = new RevisionLifecycleStore(this.database).state(id); metadata = this.readMetadata(id); } catch { throw invalid(); }
     if (lifecycle.status !== row.status || authorship.originalAuthor?.principalId !== author?.principalId || authorship.originalAuthor?.displayName !== author?.displayName) throw invalid();
-    return { id, title: row.title, kind: row.kind as RevisionStackNode['kind'], status: row.status as RevisionStackNode['status'], currentVersion: row.currentVersion, updatedAt: row.updatedAt,
+    if (typeof metadata.title !== 'string' || !metadata.title.length || metadata.title.length > 1000 || metadata.title.includes('\0') || metadata.updatedAt !== null && (!text(metadata.updatedAt, 64) || !Number.isFinite(Date.parse(metadata.updatedAt)))) throw invalid();
+    const updatedAt = metadata.updatedAt !== null && Date.parse(metadata.updatedAt) > Date.parse(row.updatedAt) ? metadata.updatedAt : row.updatedAt;
+    return { id, title: metadata.title, kind: row.kind as RevisionStackNode['kind'], status: row.status as RevisionStackNode['status'], currentVersion: row.currentVersion, updatedAt,
       relationshipVersion: relationship ? relationship.version as number : 0,
       head: { versionId: version.id, number: row.currentVersion, contentHash: version.contentHash }, author: authorship.author, originalAuthor: author, authorVersion: authorship.version, lifecycleVersion: lifecycle.version };
   }

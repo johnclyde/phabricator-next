@@ -13,7 +13,7 @@ import { lifecycleAction, lifecycleInput, closeRevision } from '../tests/revisio
 const alice: ActorAttribution = { principalId: 'alice', displayName: 'Original Alice', credentialId: 'alice-key', requestId: 'request-alice' };
 const bob: ActorAttribution = { principalId: 'bob', displayName: 'Bob', credentialId: null, requestId: 'request-bob' };
 const files = [{ path: 'source.txt', content: '\ufeffExact original\r\n' }];
-const create = (store: Store, draft = false, actor: ActorAttribution | undefined = alice) => store.createRevision({ title: 'Lifecycle manuscript', kind: 'paper', files, draft }, actor).revision.id;
+const create = (store: Store, draft = false, actor: ActorAttribution | undefined = alice) => store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Lifecycle manuscript', kind: 'paper', files, draft }, actor).revision.id;
 const state = (store: Store, id: string) => store.revisionLifecycle.state(id);
 const review = (store: Store, id: string, error = false) => store.saveReview(id, store.detail(id).revision.currentVersion, { provider: 'local', model: 'fixture', summary: 'Exact source evidence', findings: error ? [{ id: 'error', source: 'local', severity: 'error', filePath: 'source.txt', line: 1, title: 'Error', body: 'Blocking finding' }] : [] }, bob);
 const update = (store: Store, id: string) => store.createVersion(id, { expectedVersion: store.detail(id).revision.currentVersion, files: [{ path: 'source.txt', content: 'Next immutable source' }], message: 'New content' }, bob);
@@ -28,7 +28,7 @@ test('draft and ordinary creation initialize truthful version-zero baselines wit
       assert.equal(JSON.parse(store.database.prepare('SELECT data FROM entities WHERE id=?').get(id)!.data as string).lifecycleVersion, undefined);
     }
     for (const draft of [null, 1, 'true']) assert.throws(() => store.createRevision({ title: 'Invalid draft', files, draft }), { status: 400 });
-    const unknown = store.createRevision({ kind: 'paper', title: 'Legacy-style unowned', files }).revision.id;
+    const unknown = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Legacy-style unowned', files }).revision.id;
     assert.equal(store.revisionLifecycle.snapshot(unknown).authorship.author, null);
     assert.throws(() => lifecycleAction(store, unknown, 'plan_changes', alice), { code: 'REVISION_LIFECYCLE_ACTION_UNAVAILABLE' });
   } finally { store.close(); }
@@ -183,13 +183,13 @@ test('Git and DOCX draft creation and subsequent package/source hooks share exac
   const store = new Store({ path: ':memory:' }); try {
     const repo = store.createRepository({ name: 'Fixture', remoteUrl: 'https://example.test/repository.git' });
     const git: GitImportSnapshot = { repositoryId: repo.id, objectFormat: 'sha1', files, provenance: { kind: 'git', repositoryId: repo.id, objectFormat: 'sha1', scope: 'complete-text-tree', commitId: 'a'.repeat(40), treeId: 'b'.repeat(40), manifest: [{ path: files[0]!.path, mode: '100644', objectId: createHash('sha1').update(`blob ${Buffer.byteLength(files[0]!.content)}\0${files[0]!.content}`).digest('hex') }] } };
-    const imported = store.createRevisionFromGit(repo.id, { commitId: git.provenance.commitId, kind: 'paper', title: 'Git draft', draft: true }, git, alice);
+    const imported = store.createRevisionFromGit(repo.id, { testPlan: 'Fixture verification plan.', commitId: git.provenance.commitId, kind: 'paper', title: 'Git draft', draft: true }, git, alice);
     assert.equal(state(store, imported.revision.id).status, 'draft');
     const bytes = Buffer.from('trusted package fixture'), hash = createHash('sha256').update(bytes).digest('hex');
     const file = store.files.upload({ name: 'source.docx', bytes: bytes.length, sha256: hash, dataBase64: bytes.toString('base64') }, alice);
     const projection: DocxProjection = { format: 'phabricator.docx.projection.v1', mainPart: 'word/document.xml', blocks: [], notes: [], comments: [], changes: [], editableRanges: [], warnings: [] };
     const epoch = lifecycleInput(store, imported.revision.id, 'request_review').expectedAccessEpoch;
-    const docx = store.createDocxRevision({ title: 'DOCX draft', sourceFile: { fileId: file.id, sha256: hash, bytes: bytes.length }, expectedAccessEpoch: epoch, shareSource: false, draft: true }, bytes, projection, alice);
+    const docx = store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'DOCX draft', sourceFile: { fileId: file.id, sha256: hash, bytes: bytes.length }, expectedAccessEpoch: epoch, shareSource: false, draft: true }, bytes, projection, alice);
     const id = docx.revision.id, head = docx.versions[0]!; assert.equal(state(store, id).reviewStarted, false);
     store.createDocxVersion(id, { sourceFile: head.docx!.sourceFile, expectedVersion: 1, expectedVersionId: head.id, expectedContentHash: head.contentHash, expectedAccessEpoch: epoch, shareSource: false, message: 'Imported again' }, bytes, projection, alice);
     assert.equal(state(store, id).status, 'draft'); assert.equal(state(store, id).version, 1); assert.equal(store.revisionLifecycle.history(id).transactions[0]!.head.number, 2);

@@ -31,7 +31,7 @@ async function start(basePath = '/') {
     return { status: response.status, headers: response.headers, body: await response.json() as T };
   }
   const actor = { principalId: alice.id, displayName: 'Alice Writer', credentialId: tokens.alice.record.id, requestId: 'setup' };
-  function revision(kind: 'code' | 'paper' | 'document' = 'code', additional = {}) { return store.createRevision({ kind, title: `${kind} revision`, files: [{ path: kind === 'paper' ? 'main.tex' : 'source.txt', content: 'Original exact source\n' }], ...additional }, actor); }
+  function revision(kind: 'code' | 'paper' | 'document' = 'code', additional = {}) { return store.createRevision({ testPlan: 'Fixture verification plan.', kind, title: `${kind} revision`, files: [{ path: kind === 'paper' ? 'main.tex' : 'source.txt', content: 'Original exact source\n' }], ...additional }, actor); }
   const policy = (id: string, changes: Record<string, unknown>) => { const current = app.policies.policy(id, alice.id); return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...changes }, alice.id); };
   const path = (id: string) => `/api/revisions/${id}/dependencies`;
   const input = (id: string, add: string[], remove: string[] = [], direction: 'parents' | 'children' = 'parents'): RevisionDependencyInput => ({ direction, add, remove, expectedRelationshipVersion: store.revisionDependencies.version(id), expectedAccessEpoch: app.policies.epoch() });

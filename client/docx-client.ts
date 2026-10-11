@@ -43,3 +43,9 @@ export async function docxBytes(client: WorkspaceClient, revisionId: string, ver
     verify(); if (offset !== bytes.length || await digestBytes(bytes) !== version.docx.sha256) throw new Error('Document integrity verification failed.'); verify(); return bytes;
   } finally { controller.abort(); signal.removeEventListener('abort', abort); session.controllers.delete(controller); session.objectControllers.delete(controller); }
 }
+
+/** Use the same newest authorized snapshot as the visible Word capabilities. */
+export function docxEditingEpoch(stateEpoch: number, detailEpoch: number | undefined, sessionEpoch: number | undefined): number | null {
+  const epoch = Math.max(stateEpoch, detailEpoch ?? -1);
+  return Number.isSafeInteger(epoch) && epoch > 0 && epoch === sessionEpoch ? epoch : null;
+}

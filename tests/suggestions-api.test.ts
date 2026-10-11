@@ -20,7 +20,7 @@ const selected = (...principalIds: string[]): Audience => ({ kind: 'principals',
 const quote = 'seven days';
 const source = 'Fictional motion for testing.\r\nThe requested extension is seven days.\r\nThank you. 🧪\r\n';
 const sourceFiles = [{ path: 'motion.md', content: source }, { path: 'citations.bib', content: 'An unchanged companion file.\r\n' }];
-const createInput = { title: 'Suggested edit fixture', kind: 'document', files: sourceFiles };
+const createInput = { testPlan: 'Fixture verification plan.', title: 'Suggested edit fixture', kind: 'document', files: sourceFiles };
 
 async function start(databasePath = ':memory:') {
   const store = createStore({ path: databasePath });

@@ -20,7 +20,7 @@ async function signedIn(browser: Browser, info: TestInfo, index = 0) {
 async function api<T>(page: Page, path: string, body?: unknown, method = 'POST'): Promise<T> {
   return page.evaluate(async ({ path, body, method, basePath }) => { const session = await (await fetch(`${basePath}api/session`)).json(); const response = await fetch(`${basePath}api${path}`, { method: body === undefined ? 'GET' : method, headers: { 'Content-Type': 'application/json', 'X-Session-Context': session.sessionContext, 'X-CSRF-Token': session.csrfToken, 'Idempotency-Key': crypto.randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); if (!response.ok) throw new Error(await response.text()); return response.json(); }, { path, body, method, basePath });
 }
-const create = (page: Page, title: string) => api<RevisionDetail>(page, '/revisions', { title, kind: 'document', files: [{ path: 'draft.md', content: 'The exact manuscript source remains unchanged.\n' }] });
+const create = (page: Page, title: string) => api<RevisionDetail>(page, '/revisions', { testPlan: 'Fixture verification plan.', title, kind: 'document', files: [{ path: 'draft.md', content: 'The exact manuscript source remains unchanged.\n' }] });
 async function beginTransfer(page: Page, authorId: string) { await panel(page).getByRole('button', { name: 'Transfer Authorship', exact: true }).click(); await draft(page).getByLabel('New author', { exact: true }).selectOption(authorId); }
 async function confirmTransfer(page: Page) { await draft(page).getByRole('button', { name: 'Confirm Transfer', exact: true }).click(); }
 async function exported(page: Page, name: string) { const pending = page.waitForEvent('download'); await panel(page).getByRole('button', { name, exact: true }).click(); const chunks: Buffer[] = []; for await (const chunk of (await (await pending).createReadStream())!) chunks.push(Buffer.from(chunk)); return JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>; }
@@ -45,7 +45,7 @@ test('Word author transfer leaves the package, original attribution and discussi
   const { context, page } = await signedIn(browser, info);
   try {
     const bytes = await readFile('tests/fixtures/docx/roundtrip.docx'), source = await api<FileRecord>(page, '/files', { name: 'authorship.docx', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), dataBase64: bytes.toString('base64') }), state = await api<AppState>(page, '/state'), bob = state.principals.find(person => person.username === 'bob')!;
-    const detail = await api<RevisionDetail>(page, '/revisions/docx', { title: 'Word author handoff', sourceFile: { fileId: source.id, sha256: source.sha256, bytes: source.bytes }, shareSource: false, expectedAccessEpoch: state.accessEpoch });
+    const detail = await api<RevisionDetail>(page, '/revisions/docx', { testPlan: 'Fixture verification plan.', title: 'Word author handoff', sourceFile: { fileId: source.id, sha256: source.sha256, bytes: source.bytes }, shareSource: false, expectedAccessEpoch: state.accessEpoch });
     await page.goto(`./#${detail.revision.id}`); await beginTransfer(page, bob.id); await confirmTransfer(page); await expect(panel(page).getByTestId('current-author')).toHaveText('Bob Editor'); await expect(page.getByLabel('Word document text')).toContainText('The original result is clear.');
     const after = await api<RevisionDetail>(page, `/revisions/${detail.revision.id}`); expect(after.versions).toEqual(detail.versions); expect(after.comments).toEqual(detail.comments); await expect(panel(page).locator('dl dd').nth(1)).toHaveText('Alice Researcher');
   } finally { await context.close(); }
@@ -99,7 +99,7 @@ test('an uncertain handoff can be confirmed after edit access is lost while sour
 });
 
 test('visited local authorship reopens offline and a changed head never silently rebases a draft', async ({ page, context, request, baseURL, browser }, info) => {
-  const response = await request.post(new URL('api/revisions', baseURL!).href, { data: { title: 'Local saved author', kind: 'document', files: [{ path: 'draft.md', content: 'Exact source.\n' }] }, headers: { 'Idempotency-Key': randomUUID() } }); expect(response.ok()).toBe(true); const detail = await response.json() as RevisionDetail;
+  const response = await request.post(new URL('api/revisions', baseURL!).href, { data: { testPlan: 'Fixture verification plan.', title: 'Local saved author', kind: 'document', files: [{ path: 'draft.md', content: 'Exact source.\n' }] }, headers: { 'Idempotency-Key': randomUUID() } }); expect(response.ok()).toBe(true); const detail = await response.json() as RevisionDetail;
   await page.goto(`./#${detail.revision.id}`); await expect(panel(page).getByTestId('current-author')).not.toHaveText('Unassigned'); await page.evaluate(async () => { await navigator.serviceWorker.ready; }); await context.setOffline(true);
   try { await page.reload(); await expect(panel(page)).toContainText('Saved authorship snapshot'); await expect(panel(page).getByTestId('current-author')).toBeVisible(); } finally { await context.setOffline(false); }
   const auth = await signedIn(browser, info);

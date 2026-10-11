@@ -13,7 +13,7 @@ async function prepare(page: Page, commitId: string, title: string) {
   await expect(page.getByRole('button', { name: 'Import as Review', exact: true })).toBeEnabled(); await page.getByRole('button', { name: 'Import as Review', exact: true }).click();
   await expect(editor(page).getByRole('heading', { name: 'Import as Review', exact: true })).toBeFocused();
   expect(await editor(page).getByRole('heading').evaluate(element => { const box = element.getBoundingClientRect(); return box.top >= document.querySelector('.topbar')!.getBoundingClientRect().bottom && box.bottom < innerHeight; })).toBe(true);
-  await editor(page).getByLabel('Review title', { exact: true }).fill(title);
+  await editor(page).getByLabel('Review title', { exact: true }).fill(title); await editor(page).getByLabel('Test Plan', { exact: true }).fill('Compare every imported file with the pinned Git commit.');
 }
 
 test('explicit complete Git import records immutable executable provenance and later edits retain only the source gate', async ({ page, request, baseURL }, info) => {
@@ -41,7 +41,7 @@ test('imports reject the whole unsupported tree, remain offline drafts, and retr
   await editor(page).getByRole('button', { name: 'Import Complete Commit', exact: true }).click(); await expect(editor(page).getByRole('alert')).toBeVisible();
   const state = await (await request.get(new URL('api/state', baseURL!).href)).json() as AppState; expect(state.revisions.some(item => item.title === badTitle)).toBe(false);
   await page.getByLabel('Exact commit ID', { exact: true }).fill(data.importCommit); await page.getByRole('button', { name: 'Open Commit', exact: true }).click();
-  page.once('dialog', dialog => dialog.accept()); await editor(page).getByRole('button', { name: 'Start New Import', exact: true }).click(); const title = `Exact retry ${info.project.name} ${Date.now()}`; await editor(page).getByLabel('Review title').fill(title);
+  page.once('dialog', dialog => dialog.accept()); await editor(page).getByRole('button', { name: 'Start New Import', exact: true }).click(); const title = `Exact retry ${info.project.name} ${Date.now()}`; await editor(page).getByLabel('Review title').fill(title); await editor(page).getByLabel('Test Plan', { exact: true }).fill('Verify the exact imported tree after recovering this request.');
   await context.setOffline(true); await expect(editor(page).getByRole('button', { name: 'Import Complete Commit', exact: true })).toBeDisabled(); await expect(editor(page)).toContainText('never added to the offline outbox');
   await context.setOffline(false); await expect(editor(page).getByRole('button', { name: 'Import Complete Commit', exact: true })).toBeEnabled();
   const attempts: { key: string | undefined; body: string | null }[] = []; let loseFirst = true; let sourceMoved = false;
@@ -87,7 +87,7 @@ test('observed repository denial removes linked review source and comparison bef
 });
 
 test('failed-write revision drafts preserve both tab copies on remount, source revocation and explicit recovery discard', async ({ page, request, baseURL }, info) => {
-  const data = await fixture(); const response = await request.post(new URL('api/repositories/R1/import-revision', baseURL!).href, { data: { commitId: data.importCommit, kind: 'code', title: `Quota retained import ${info.project.name}` } }); expect(response.ok(), await response.text()).toBe(true); const detail = await response.json() as RevisionDetail; const id = detail.revision.id;
+  const data = await fixture(); const response = await request.post(new URL('api/repositories/R1/import-revision', baseURL!).href, { data: { testPlan: 'Fixture verification plan.', commitId: data.importCommit, kind: 'code', title: `Quota retained import ${info.project.name}` } }); expect(response.ok(), await response.text()).toBe(true); const detail = await response.json() as RevisionDetail; const id = detail.revision.id;
   await page.goto(`./#${id}`); await page.getByRole('button', { name: 'Edit & add version', exact: true }).click(); const field = page.getByRole('textbox', { name: 'File content', exact: true });
   const key = await page.evaluate(id => { const key = Object.keys(localStorage).find(key => key.includes(`version-draft:${id}:1`)); if (!key) throw new Error('Expected initialized version draft'); const original = Storage.prototype.setItem; (window as unknown as { restoreDraftStorage: () => void }).restoreDraftStorage = () => { Storage.prototype.setItem = original; }; Storage.prototype.setItem = function(name, value) { if (name === key) throw new DOMException('Quota exceeded', 'QuotaExceededError'); original.call(this, name, value); }; return key; }, id);
   await field.fill('Newest text retained only in this tab'); await expect(page.locator('.version-editor')).toContainText('storage is full or unavailable');

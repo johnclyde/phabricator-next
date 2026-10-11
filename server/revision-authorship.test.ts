@@ -22,7 +22,7 @@ function request(store: Store, id: string, action: 'assign' | 'commandeer' = 'as
   return action === 'assign' ? { action, authorId, ...pins } : { action, ...pins };
 }
 function create(store: Store, actor: ActorAttribution | undefined = alice, kind: 'code' | 'paper' | 'document' = 'paper') {
-  return store.createRevision({ title: 'Exact original manuscript', kind, summary: 'Preserved summary', files: [{ path: 'paper.txt', content: '\ufeffOriginal source\r\n' }] }, actor);
+  return store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Exact original manuscript', kind, summary: 'Preserved summary', files: [{ path: 'paper.txt', content: '\ufeffOriginal source\r\n' }] }, actor);
 }
 function snapshot(db: DatabaseSync, omitAuthorship = false) {
   const schema = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all() as { type: string; name: string; tbl_name: string; sql: string }[];
@@ -42,7 +42,7 @@ test('new code, paper and document authorship starts at version zero without fab
       assert.deepEqual(store.revisionAuthorship.history(id).transactions, []);
       assert.deepEqual(JSON.parse(store.database.prepare('SELECT data FROM entities WHERE id=?').get(id)!.data as string).authorId, undefined, 'projection never rewrites raw revision metadata');
     }
-    const unknown = store.createRevision({ title: 'Unknown creator', kind: 'paper', files: [{ path: 'paper.txt', content: 'Legacy' }] });
+    const unknown = store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Unknown creator', kind: 'paper', files: [{ path: 'paper.txt', content: 'Legacy' }] });
     assert.equal(store.revisionAuthorship.state(unknown.revision.id).author, null);
     store.createVersion(unknown.revision.id, { expectedVersion: 1, message: 'Later contributor', files: [{ path: 'paper.txt', content: 'Changed' }] }, bob);
     assert.equal(store.revisionAuthorship.state(unknown.revision.id).originalAuthor, null); assert.equal(store.revisionAuthorship.state(unknown.revision.id).author, null);
@@ -191,7 +191,7 @@ test('modern authorship receipts bind reviewer and lifecycle pins even when forg
 test('schema25 preserves every schema24 row and schema definition, establishes trustworthy baselines, and reopens without changes', () => {
   const directory = mkdtempSync(join(tmpdir(), 'revision-author-migration-')), path = join(directory, 'workspace.sqlite'); let store = new Store({ path });
   try {
-    const id = create(store).revision.id, unknown = store.createRevision({ title: 'Legacy without actor', kind: 'document', files: [{ path: 'old.txt', content: 'Keep exact' }] }).revision.id;
+    const id = create(store).revision.id, unknown = store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Legacy without actor', kind: 'document', files: [{ path: 'old.txt', content: 'Keep exact' }] }).revision.id;
     store.createVersion(id, { expectedVersion: 1, message: 'Later Bob', files: [{ path: 'paper.txt', content: 'Later source' }] }, bob);
     const malformed = create(store).revision.id;
     store.database.prepare("UPDATE versions SET data=json_set(data,'$.attribution.principalId','') WHERE revision_id=? AND number=1").run(malformed);
@@ -200,7 +200,7 @@ test('schema25 preserves every schema24 row and schema definition, establishes t
     assert.equal(store.database.prepare("SELECT json_type(data,'$.attribution') AS type FROM versions WHERE revision_id=? AND number=1").get(encoded)!.type, 'text');
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('historic', 'exact', 201, '{"saved":"bytes"}', '2026-01-01T00:00:00Z');
     oldSchema(store); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.deepEqual(store.revisionAuthorship.state(id).author, ref(alice)); assert.equal(store.revisionAuthorship.state(id).version, 0);
@@ -219,7 +219,7 @@ test('schema25 collision rolls back partial schema and version updates, allowing
     create(store); oldSchema(store); store.database.exec("CREATE TABLE revision_author_operations(operator_note TEXT); INSERT INTO revision_author_operations VALUES('Retain operator data')");
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|no such column/);
     db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 24); assert.deepEqual(snapshot(db), before);
-    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 27);
+    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 28);
   } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -227,12 +227,12 @@ test('Git and DOCX initial source paths initialize the same authorship baseline 
   const store = new Store({ path: ':memory:' }); try {
     const repo = store.createRepository({ name: 'Fixture', remoteUrl: 'https://example.test/repository.git' });
     const files = [{ path: 'source.txt', content: 'Git source\n' }], snapshot: GitImportSnapshot = { repositoryId: repo.id, objectFormat: 'sha1', files, provenance: { kind: 'git', repositoryId: repo.id, objectFormat: 'sha1', scope: 'complete-text-tree', commitId: 'a'.repeat(40), treeId: 'b'.repeat(40), manifest: [{ path: 'source.txt', mode: '100644', objectId: createHash('sha1').update(`blob ${Buffer.byteLength(files[0]!.content)}\0${files[0]!.content}`).digest('hex') }] } };
-    const git = store.createRevisionFromGit(repo.id, { commitId: snapshot.provenance.commitId, kind: 'code', title: 'Git authorship' }, snapshot, alice);
+    const git = store.createRevisionFromGit(repo.id, { testPlan: 'Fixture verification plan.', commitId: snapshot.provenance.commitId, kind: 'code', title: 'Git authorship' }, snapshot, alice);
     assert.deepEqual(store.revisionAuthorship.state(git.revision.id).author, ref(alice)); assert.ok(git.versions[0]!.gitSource);
     const bytes = Buffer.from('trusted internal package'), hash = createHash('sha256').update(bytes).digest('hex');
     const file = store.files.upload({ name: 'source.docx', bytes: bytes.length, sha256: hash, dataBase64: bytes.toString('base64') }, bob);
     const projection: DocxProjection = { format: 'phabricator.docx.projection.v1', mainPart: 'word/document.xml', blocks: [], notes: [], comments: [], changes: [], editableRanges: [], warnings: [] };
-    const docx = store.createDocxRevision({ title: 'DOCX authorship', sourceFile: { fileId: file.id, sha256: hash, bytes: bytes.length }, expectedAccessEpoch: epoch(store), shareSource: false }, bytes, projection, bob);
+    const docx = store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'DOCX authorship', sourceFile: { fileId: file.id, sha256: hash, bytes: bytes.length }, expectedAccessEpoch: epoch(store), shareSource: false }, bytes, projection, bob);
     assert.deepEqual(store.revisionAuthorship.state(docx.revision.id).author, ref(bob)); assert.deepEqual(store.revisionAuthorship.state(docx.revision.id).originalAuthor, ref(bob));
     assert.deepEqual(docx.versions[0]!.attribution, bob); assert.ok(docx.versions[0]!.docx);
   } finally { store.close(); }

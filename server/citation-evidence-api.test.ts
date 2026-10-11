@@ -50,7 +50,7 @@ async function start(databasePath = ':memory:') {
     return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...changes }, principal);
   }
   async function paper() {
-    const made = await request<RevisionDetail>('/api/revisions', 'POST', { kind: 'paper', title: 'A manuscript with citations', files }, 'alice', `paper-${++sequence}`);
+    const made = await request<RevisionDetail>('/api/revisions', 'POST', { testPlan: 'Fixture verification plan.', kind: 'paper', title: 'A manuscript with citations', files }, 'alice', `paper-${++sequence}`);
     assert.equal(made.status, 201, JSON.stringify(made.body)); return made.body;
   }
   async function input(detail: RevisionDetail, file: FileRecord): Promise<CitationEvidenceInput> {

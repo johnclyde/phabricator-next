@@ -33,7 +33,7 @@ async function start(basePath = '/', configuration: Partial<RevisionLifecycleCon
     return { status: response.status, body: await response.json() as T, headers: response.headers };
   }
   const path = (id: string) => `/api/revisions/${id}/lifecycle`;
-  const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}) => store.createRevision({ title: 'Original title', summary: 'Original summary', kind, files: [{ path: 'source.txt', content: 'Exact immutable source\n' }], ...extra }, actor);
+  const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}) => store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Original title', summary: 'Original summary', kind, files: [{ path: 'source.txt', content: 'Exact immutable source\n' }], ...extra }, actor);
   const input = (id: string, action: RevisionLifecycleAction): RevisionLifecycleInput => {
     const snapshot = store.revisionLifecycle.snapshot(id, alice.id);
     return { action, expectedLifecycleVersion: snapshot.lifecycle.version, expectedReviewerVersion: snapshot.reviewers.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: app.policies.epoch(), expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256, message: '  Exact action message\n' };
@@ -116,7 +116,7 @@ test('saved lifecycle responses are bound to immutable operation owner, exact in
   try {
     const id = app.revision().revision.id, saved = await app.act(id, 'plan_changes', 'alice', 'protected-action');
     const row = app.store.database.prepare('SELECT key,body FROM idempotency WHERE key LIKE ?').get('%:protected-action') as { key: string; body: string };
-    const other = app.store.createRevision({ title: 'Hidden foreign source', kind: 'code', files: [{ path: 'private.txt', content: 'Never disclose this source' }] }, { ...app.actor, principalId: app.bob.id, displayName: app.bob.displayName }).revision.id;
+    const other = app.store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Hidden foreign source', kind: 'code', files: [{ path: 'private.txt', content: 'Never disclose this source' }] }, { ...app.actor, principalId: app.bob.id, displayName: app.bob.displayName }).revision.id;
     const foreign = await app.act(other, 'plan_changes', 'bob'); app.policy(other, { view: members(app.bob.id), edit: members(app.bob.id) }, app.bob.id);
     assert.equal((await app.request(app.path(other))).status, 404);
     const operation = app.store.revisionLifecycle.operation.bind(app.store.revisionLifecycle);
@@ -174,7 +174,7 @@ test('lifecycle actions and saved receipts recheck access after waiting for the 
   const app = await start('/', {}, databasePath), transaction = app.store.transaction.bind(app.store);
   try {
     for (const phase of ['write', 'replay'] as const) {
-      const id = app.store.createRevision({ title: 'Another author draft', kind: 'code', draft: true, files: [{ path: 'source.txt', content: 'Immutable body' }] }, { ...app.actor, principalId: app.bob.id, displayName: app.bob.displayName }).revision.id;
+      const id = app.store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Another author draft', kind: 'code', draft: true, files: [{ path: 'source.txt', content: 'Immutable body' }] }, { ...app.actor, principalId: app.bob.id, displayName: app.bob.displayName }).revision.id;
       const data = app.input(id, 'request_review'), key = `lifecycle-lock-${phase}`;
       let replay: { key: string; fingerprint: string; status: number; body: string; created_at: string } | undefined;
       if (phase === 'replay') {

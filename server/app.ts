@@ -32,6 +32,7 @@ import { parseRevisionDependencyInput } from './store.ts';
 import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 import { revisionLifecycleInput, type RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { revisionReviewerInput, type RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
+import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -44,6 +45,7 @@ export interface AppOptions {
   authMode?: AuthMode;
   revisionLifecycle?: RevisionLifecycleConfig;
   revisionReviewers?: RevisionReviewerConfig;
+  revisionMetadata?: RevisionMetadataConfig;
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
@@ -146,9 +148,10 @@ export function createApp(options: AppOptions = {}): App {
   if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
   if (options.store && options.revisionLifecycle) throw new Error('Configure revisionLifecycle on the supplied Store, or let createApp create the Store.');
   if (options.store && options.revisionReviewers) throw new Error('Configure revisionReviewers on the supplied Store, or let createApp create the Store.');
+  if (options.store && options.revisionMetadata) throw new Error('Configure revisionMetadata on the supplied Store, or let createApp create the Store.');
   const git = options.gitObserver ?? createGitObserver(options.gitRepositories ?? {});
   const basePath = normalizeBasePath(options.basePath ?? '/');
-  const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle, revisionReviewers: options.revisionReviewers });
+  const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle, revisionReviewers: options.revisionReviewers, revisionMetadata: options.revisionMetadata });
   let auth: Auth;
   try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
   catch (error) { if (!options.store) store.close(); throw error; }
@@ -284,6 +287,20 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const metadata = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/metadata$/.exec(path) : null;
+    if (metadata) {
+      const id = metadata[1]!;
+      store.read(() => { auth.revalidate(context, 'write'); access.require(id); });
+      if (!rawKey) throw new HttpError(400, 'Metadata edits require an Idempotency-Key.');
+      let data;
+      try { data = revisionMetadataInput(input); } catch { throw new HttpError(400, 'Provide revision details, an edit message and exact metadata, source, access and configuration pins.'); }
+      const authorize = () => { auth.revalidate(context, 'write'); access.require(id, 'edit'); };
+      store.read(authorize);
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionMetadata.mutate(id, data, actor) }), authorize, response => access.presentRevisionMetadata(id, data, response));
+    }
     const reviewers = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/reviewers$/.exec(path) : null;
     if (reviewers) {
       const id = reviewers[1]!;
@@ -699,6 +716,18 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const metadata = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/metadata(\/history)?$/.exec(path);
+          if (metadata) {
+            const id = metadata[1]!; access.require(id);
+            const allowed = metadata[2] ? ['before', 'limit', 'expectedMetadataVersion'] : [];
+            for (const key of url.searchParams.keys()) if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw new HttpError(400, 'Use unique supported revision metadata parameters.');
+            const parameter = (key: string): number | undefined => {
+              const value = url.searchParams.get(key); if (value === null) return undefined;
+              if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < (key === 'expectedMetadataVersion' ? 0 : 1)) throw new HttpError(400, 'Choose valid revision metadata history versions and page limits.');
+              return Number(value);
+            };
+            send(res, 200, metadata[2] ? access.revisionMetadataHistory(id, { before: parameter('before'), limit: parameter('limit'), expectedMetadataVersion: parameter('expectedMetadataVersion') }) : access.revisionMetadata(id)); return;
+          }
           const reviewers = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/reviewers(\/history)?$/.exec(path);
           if (reviewers) {
             const id = reviewers[1]!; access.require(id);

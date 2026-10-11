@@ -61,7 +61,7 @@ async function start(options: AppOptions = {}) {
     return request<FileAttachment>(`/api/files/${file.id}/attachments`, 'POST', input, actor, `attachment-${++sequence}`);
   }
   async function paper(assets: RevisionAsset[], extra: Record<string, unknown> = {}) {
-    const result = await request<RevisionDetail>('/api/revisions', 'POST', { title: 'Paper with immutable figures', kind: 'paper', files: source, assets, shareAssets: true, expectedAccessEpoch: app.policies.epoch(), ...extra }, 'alice', `paper-${++sequence}`);
+    const result = await request<RevisionDetail>('/api/revisions', 'POST', { testPlan: 'Fixture verification plan.', title: 'Paper with immutable figures', kind: 'paper', files: source, assets, shareAssets: true, expectedAccessEpoch: app.policies.epoch(), ...extra }, 'alice', `paper-${++sequence}`);
     assert.equal(result.status, 201, JSON.stringify(result.body)); return result.body;
   }
   const rows = (table: string) => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
@@ -197,7 +197,7 @@ test('version manifests bind exact immutable bytes, preserve legacy hashes and i
   const app = await start();
   try {
     const figure = await app.upload(); const duplicate = await app.upload('same-bytes.png');
-    const plain = app.store.createRevision({ title: 'Text history', kind: 'paper', files: source }); const original = version(plain); const rawOriginal = app.rows('versions')[0];
+    const plain = app.store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Text history', kind: 'paper', files: source }); const original = version(plain); const rawOriginal = app.rows('versions')[0];
     assert.equal(original.contentHash, digest(JSON.stringify(source))); assert.equal(original.assets, undefined);
     const firstInput = { ...pins(original), files: source, assets: [asset(figure)], shareAssets: true, expectedAccessEpoch: app.policies.epoch(), message: 'Add figure' };
     const added = await app.request<RevisionDetail>(`/api/revisions/${plain.revision.id}/versions`, 'POST', firstInput, 'alice', 'add-figure'); assert.equal(added.status, 201, JSON.stringify(added.body)); let current = version(added.body);
@@ -225,7 +225,7 @@ test('asset writes reject changed pins, identity forgery, path collisions, unsee
   const app = await start();
   try {
     const figure = await app.upload(); const hidden = await app.upload('hidden.png', png, 'bob');
-    const plain = app.store.createRevision({ title: 'Text history', kind: 'paper', files: source }); const original = version(plain);
+    const plain = app.store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Text history', kind: 'paper', files: source }); const original = version(plain);
     const input = { ...pins(original), files: source, assets: [asset(figure)], shareAssets: true, expectedAccessEpoch: app.policies.epoch(), message: 'Add figure' };
     const before = app.evidence();
     for (const patch of [
@@ -244,7 +244,7 @@ test('asset writes reject changed pins, identity forgery, path collisions, unsee
     const denied = await app.request(`/api/revisions/${id}/versions`, 'POST', { ...pins(version(initial)), files: source, assets: [asset(other)], shareAssets: true, expectedAccessEpoch: app.policies.epoch(), message: 'Already shared but not in this version' }, 'bob');
     assert.equal(denied.status, 403, 'a paper editor cannot introduce a File merely because an existing attachment makes it readable');
     assert.equal((await app.request(`/api/files/${figure.id}`, 'PATCH', { expectedVersion: 1, status: 'archived' }, 'alice', 'archive')).status, 200);
-    const rejected = await app.request('/api/revisions', 'POST', { title: 'No archived new attachment', kind: 'paper', files: source, assets: [asset(figure)], shareAssets: true, expectedAccessEpoch: app.policies.epoch() }); assert.equal(rejected.status, 409);
+    const rejected = await app.request('/api/revisions', 'POST', { testPlan: 'Fixture verification plan.', title: 'No archived new attachment', kind: 'paper', files: source, assets: [asset(figure)], shareAssets: true, expectedAccessEpoch: app.policies.epoch() }); assert.equal(rejected.status, 409);
     const retained = await app.request<RevisionDetail>(`/api/revisions/${id}/versions`, 'POST', { ...pins(version(initial)), files: source, assets: [asset(figure)], expectedAccessEpoch: app.policies.epoch(), message: 'Retain archived existing identity' }, 'bob'); assert.equal(retained.status, 201, JSON.stringify(retained.body));
     const bytes = await app.raw(`/api/files/${figure.id}/data`, 'GET', undefined, 'bob'); assert.equal(bytes.status, 200); await bytes.arrayBuffer();
   } finally { await app.close(); }

@@ -47,7 +47,7 @@ async function start(options: AppOptions = {}) {
     const actor = { principalId: alice.id, displayName: 'Alice Reviewer', credentialId: token.alice.record.id, requestId: `setup-${++sequence}` };
     const file = store.files.upload({ name: 'Discussion.docx', bytes: source.length, sha256: digest(source), dataBase64: source.toString('base64') }, actor);
     registerFilePolicy(store.database, file.id, alice.id);
-    const detail = store.createDocxRevision({ title: 'Word discussion', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: true, expectedAccessEpoch: app.policies.epoch() }, source, projection, actor);
+    const detail = store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'Word discussion', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: true, expectedAccessEpoch: app.policies.epoch() }, source, projection, actor);
     const version = detail.versions[0]!;
     const range = version.docx!.projection.editableRanges.find(item => item.text === 'The original result is clear.')!;
     assert.ok(range); return { detail, version, range, id: detail.revision.id, file };

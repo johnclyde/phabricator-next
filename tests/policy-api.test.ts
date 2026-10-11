@@ -16,7 +16,7 @@ type ErrorBody = { error: string; code?: string };
 type Reply<T> = { status: number; body: T };
 const workspace: Audience = { kind: 'workspace' };
 const members = (...principalIds: string[]): Audience => ({ kind: 'principals', principalIds });
-const paper = { title: 'Policy test paper', kind: 'paper', files: [{ path: 'main.tex', content: '\\section{Private source}\nSource protected by the object policy.\n' }] };
+const paper = { testPlan: 'Fixture verification plan.', title: 'Policy test paper', kind: 'paper', files: [{ path: 'main.tex', content: '\\section{Private source}\nSource protected by the object policy.\n' }] };
 
 async function start(options: AppOptions = {}) {
   const store = createStore({ path: options.databasePath ?? ':memory:' });

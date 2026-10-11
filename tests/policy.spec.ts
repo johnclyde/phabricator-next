@@ -179,7 +179,8 @@ test('access controls share readable documents while gating wiki edits, source e
     await dialog.getByLabel('Space', { exact: true }).selectOption('S1');
     await dialog.getByLabel('Title', { exact: true }).fill(draftTitle);
     await dialog.getByRole('textbox', { name: /^Draft text/ }).fill(draftText);
-    await dialog.getByRole('button', { name: 'Create Draft', exact: true }).click();
+    await dialog.getByLabel('Test Plan', { exact: true }).fill('Inspect the immutable source and verify the discussion and access behavior exercised here.');
+  await dialog.getByRole('button', { name: 'Create Draft', exact: true }).click();
     await expect(dialog).not.toBeVisible();
     await expect(page.getByRole('heading', { level: 1 })).toContainText(draftTitle);
     const draftId = new URL(page.url()).hash.slice(1);

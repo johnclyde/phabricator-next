@@ -23,6 +23,7 @@ import { revisionDependenciesCommand } from './revision-dependencies';
 import { revisionAuthorshipCommand } from './revision-authorship';
 import { revisionLifecycleCommand } from './revision-lifecycle';
 import { revisionReviewersCommand } from './revision-reviewers';
+import { revisionMetadataCommand } from './revision-metadata';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
@@ -32,7 +33,7 @@ import { gitPatchCommand } from './git-patch';
 const help = `Phabricator Next — arc (initial CLI)
 
   npm run arc -- check [--kind paper|document|code] FILE... [--json]
-  npm run arc -- diff --title "Title" --kind paper [--draft] FILE...
+  npm run arc -- diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
@@ -45,7 +46,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- blame R1 --commit FULL_ID --path PATH [--json]
   npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
   npm run arc -- download-patch R1 --base FULL_ID|empty --commit FULL_ID --output NEW_FILE [--json]
-  npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--draft] [--project ID|NAME] [--request-id KEY] [--json]
+  npm run arc -- import-git R1 --commit FULL_ID --title "Title" --test-plan "Verification plan" [--kind code|paper|document] [--draft] [--project ID|NAME] [--request-id KEY] [--json]
   npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
   npm run arc -- review P2 [--provider local|openai|ollama]
@@ -60,6 +61,9 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- revision-reviewers P2
   npm run arc -- revision-reviewer-history P2 [--before N] [--limit N] [--reviewer-version N]
   npm run arc -- edit-revision-reviewers P2 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- revision-metadata P2
+  npm run arc -- revision-metadata-history P2 [--before N] [--limit N] [--metadata-version N]
+  npm run arc -- edit-revision-metadata P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- revision-author P2
   npm run arc -- revision-author-history P2 [--before N] [--limit N] [--author-version N]
   npm run arc -- edit-revision-author P2 --intent REQUEST.json [--request-id KEY]
@@ -79,7 +83,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- download-file F1 --output NEW_FILE
   npm run arc -- set-figures P2 --assets-manifest FILE.json --version N --version-id ID --content-hash SHA256 --access-epoch N --message TEXT [--share-assets] [--request-id KEY]
   npm run arc -- inspect-docx F1
-  npm run arc -- import-docx REQUEST.json [--request-id KEY]
+  npm run arc -- import-docx REQUEST.json [--test-plan "Verification plan"] [--request-id KEY]
   npm run arc -- reimport-docx L1 --intent REQUEST.json [--request-id KEY]
   npm run arc -- edit-docx L1 --intent REQUEST.json [--request-id KEY]
   npm run arc -- download-docx L1 --version N --version-id ID --content-hash SHA256 --output NEW_FILE
@@ -249,7 +253,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
-      draft: { type: 'boolean' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
+      draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },
@@ -308,6 +312,7 @@ async function main() {
   if (await revisionAuthorshipCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionLifecycleCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionReviewersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
@@ -333,6 +338,7 @@ async function main() {
     return;
   }
   if (values.draft !== undefined && !(command === 'import-git' || command === 'diff' && !values.revision)) throw new Error('--draft applies only to creation of a new text or Git revision.');
+  if (values['test-plan'] !== undefined && !(command === 'import-git' || command === 'diff' && !values.revision)) throw new Error('--test-plan applies only to new revisions. Use edit-revision-metadata for existing details.');
   if (command === 'diff') {
     const files = await readSources(args);
     let detail: RevisionDetail;
@@ -343,7 +349,7 @@ async function main() {
       });
     } else {
       if (!values.title?.trim()) throw new Error('--title is required for a new revision.');
-      detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', kind, files, ...(values.draft ? { draft: true } : {}) });
+      detail = await request<RevisionDetail>('/api/revisions', 'POST', { title: values.title, summary: values.summary || '', ...(values['test-plan'] === undefined ? {} : { testPlan: values['test-plan'] }), kind, files, ...(values.draft ? { draft: true } : {}) });
     }
     console.log(`${detail.revision.id} · v${detail.revision.currentVersion} · ${detail.revision.title}`);
     console.log(new URL(`${basePath}#${detail.revision.id}`, server).href);
@@ -411,7 +417,7 @@ async function main() {
     const requestId = values['request-id'] ?? randomUUID();
     if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('--request-id must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
     const projectId = values.project?.[0] ? visibleProjectId(values.project[0], await request<AppState>('/api/state')) : undefined;
-    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(projectId ? { projectId } : {}), ...(values.draft ? { draft: true } : {}) };
+    const input: GitImportInput = { commitId, kind: kind as RevisionKind, title: values.title, ...(values.summary === undefined ? {} : { summary: values.summary }), ...(values['test-plan'] === undefined ? {} : { testPlan: values['test-plan'] }), ...(projectId ? { projectId } : {}), ...(values.draft ? { draft: true } : {}) };
     console.error(`Import request ID: ${requestId}. Keep this ID and the same inputs when retrying an uncertain result.`);
     const detail = await request<RevisionDetail>(`/api/repositories/${id}/import-revision`, 'POST', input, requestId);
     const version = detail.versions.find(item => item.number === 1); const gitSource = version?.gitSource;

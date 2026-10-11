@@ -6,7 +6,7 @@ async function api<T>(request: APIRequestContext, baseURL: string, path: string,
   expect(response.ok(), await response.text()).toBe(true); return response.json() as Promise<T>;
 }
 async function create(request: APIRequestContext, baseURL: string, files: SourceFile[]) {
-  return api<RevisionDetail>(request, baseURL, '/revisions', { kind: 'document', title: `Exact comparison ${Date.now()}`, files });
+  return api<RevisionDetail>(request, baseURL, '/revisions', { testPlan: 'Fixture verification plan.', kind: 'document', title: `Exact comparison ${Date.now()}`, files });
 }
 async function add(request: APIRequestContext, baseURL: string, id: string, expectedVersion: number, files: SourceFile[]) { await api(request, baseURL, `/revisions/${id}/versions`, { files, expectedVersion, message: `Version ${expectedVersion + 1}` }); }
 async function open(page: Page, id: string) { await page.goto(`./#${id}`); await expect(page.getByLabel('Version to inspect', { exact: true })).toBeVisible(); }

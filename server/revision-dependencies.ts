@@ -5,6 +5,7 @@ import type { ActorAttribution } from '../shared/types.ts';
 import { isRevisionId, revisionDependencyInput, revisionDependencyChanges, REVISION_DEPENDENCY_LIMITS } from '../shared/revision-dependencies.ts';
 import type { RevisionDependencyInput, RevisionDependencyQuery, RevisionDependencyPage, RevisionDependencyHistoryQuery, RevisionDependencyHistory, RevisionDependencyReceipt, RevisionDependencyTransaction, RevisionDependencyReference, RevisionDependencyChange } from '../shared/revision-dependencies.ts';
 import { HttpError, object, string } from './validation.ts';
+import type { RevisionMetadataState } from '../shared/revision-metadata.ts';
 
 type Receipt = Omit<RevisionDependencyReceipt, 'accessEpoch'>;
 export interface RevisionDependencyOperation { id: string; revisionId: string; input: RevisionDependencyInput; inputSha256: string; attribution: ActorAttribution; receipt: Receipt }
@@ -51,7 +52,7 @@ export function initializeRevisionDependencies(database: DatabaseSync): void {
 /** Storage only. API callers enforce current source authority and endpoint view
  * permissions; cycle detection deliberately does not accept a visibility filter. */
 export class RevisionDependencyStore {
-  constructor(private readonly database: DatabaseSync) {}
+  constructor(private readonly database: DatabaseSync, private readonly readMetadata: (id: string) => Pick<RevisionMetadataState, 'title' | 'updatedAt'>) {}
   private requireRevision(id: string): void {
     if (!isRevisionId(id) || !this.database.prepare("SELECT 1 FROM entities WHERE id=? AND kind='revision'").get(id)) throw unavailable();
   }
@@ -92,7 +93,10 @@ export class RevisionDependencyStore {
         if (revisions.length === count) return { revisionId: id, direction, relationshipVersion: version, revisions, nextAfter: revisions.at(-1)!.id };
         const item = this.database.prepare("SELECT json_extract(data,'$.id') AS id,json_extract(data,'$.title') AS title,json_extract(data,'$.kind') AS kind,json_extract(data,'$.status') AS status,json_extract(data,'$.currentVersion') AS currentVersion,json_extract(data,'$.updatedAt') AS updatedAt FROM entities WHERE id=? AND kind='revision'").get(row.id) as RevisionDependencyReference | undefined;
         if (!item || item.id !== row.id || typeof item.title !== 'string' || !['code', 'paper', 'document'].includes(item.kind) || !isRevisionStatus(item.status) || !Number.isSafeInteger(item.currentVersion) || item.currentVersion < 1 || typeof item.updatedAt !== 'string') throw invalidReceipt();
-        revisions.push({ ...item });
+        let metadata;
+        try { metadata = this.readMetadata(item.id); } catch { throw invalidReceipt(); }
+        if (typeof metadata.title !== 'string' || !metadata.title.length || metadata.title.length > 1000 || metadata.title.includes('\0') || metadata.updatedAt !== null && (typeof metadata.updatedAt !== 'string' || !Number.isFinite(Date.parse(metadata.updatedAt)))) throw invalidReceipt();
+        revisions.push({ ...item, title: metadata.title, updatedAt: metadata.updatedAt !== null && Date.parse(metadata.updatedAt) > Date.parse(item.updatedAt) ? metadata.updatedAt : item.updatedAt });
       }
       if (rows.length < 100) return { revisionId: id, direction, relationshipVersion: version, revisions, nextAfter: null };
     }

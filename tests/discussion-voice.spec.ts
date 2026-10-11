@@ -6,7 +6,7 @@ async function post<T>(request: APIRequestContext, baseURL: string, path: string
   expect(response.ok(), await response.text()).toBe(true); return response.json() as Promise<T>;
 }
 async function fixture(page: Page, request: APIRequestContext, baseURL: string) {
-  const detail = await post<RevisionDetail>(request, baseURL, '/revisions', { kind: 'document', title: `Spoken discussion ${Date.now()}`, files: [{ path: 'argument.md', content: 'Original argument.\n' }] });
+  const detail = await post<RevisionDetail>(request, baseURL, '/revisions', { testPlan: 'Fixture verification plan.', kind: 'document', title: `Spoken discussion ${Date.now()}`, files: [{ path: 'argument.md', content: 'Original argument.\n' }] });
   const id = detail.revision.id; const versionId = detail.versions[0]!.id;
   const comments: ReviewComment[] = [];
   for (const body of ['Alpha evidence needs a citation.', 'Beta argument needs a date.', 'Gamma conclusion needs a qualification.']) {

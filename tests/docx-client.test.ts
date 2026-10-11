@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { docxReplacement, docxReceiptVersion, type DocxIntent } from '../client/docx-client.ts';
+import { docxReplacement, docxReceiptVersion, docxEditingEpoch, type DocxIntent } from '../client/docx-client.ts';
 import type { RevisionDetail, RevisionVersion } from '../shared/types.ts';
 import type { DocxProjection } from '../shared/docx.ts';
 const projection: DocxProjection = { format: 'phabricator.docx.projection.v1', mainPart: 'word/document.xml', blocks: [], notes: [], comments: [], changes: [], editableRanges: [], warnings: [] };
@@ -15,7 +15,7 @@ test('Word replacement binds one exact UTF-16 passage and preserves literal text
   for (const replacement of ['\0', '\n', '\t', '\u001f', '\uFFFE', '\uD800', 'x'.repeat(20001), 'original']) assert.throws(() => docxReplacement(range, 7, 15, replacement));
 });
 test('Word receipt recovery accepts historical result and rejects changed package, base or target', () => {
-  const imported: DocxIntent = { id: 'request', path: '/api/revisions/docx', body: { title: 'Document', sourceFile, expectedAccessEpoch: 1, shareSource: false }, sourceFile, draftKey: 'docx-draft:S1:create', draft: {} };
+  const imported: DocxIntent = { id: 'request', path: '/api/revisions/docx', body: { testPlan: 'Fixture verification plan.', title: 'Document', sourceFile, expectedAccessEpoch: 1, shareSource: false }, sourceFile, draftKey: 'docx-draft:S1:create', draft: {} };
   assert.equal(docxReceiptVersion(detail([version]), imported), version);
   assert.equal(docxReceiptVersion(detail([{ ...version, docx: { ...version.docx!, sha256: 'b'.repeat(64) } }]), imported), null);
   const next = { ...version, id: 'L1-v2', number: 2, contentHash: 'content-two', message: 'Edit', docx: { ...version.docx!, sha256: 'b'.repeat(64) } }, latest = { ...next, id: 'L1-v3', number: 3 };
@@ -58,4 +58,12 @@ test('Word structural reading escapes imported text and discloses bounded annota
   assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;')); assert.ok(!html.includes('<script>')); assert.ok(!html.includes('<img'));
   assert.ok(html.includes('Show More Document Text')); assert.ok(html.includes('remaining text in this note')); assert.ok(html.includes('remaining text in this comment')); assert.ok(!html.includes('paragraph 200'));
   assert.ok(html.includes('separate from verified workspace discussion'));
+});
+
+test('Word authoring uses a positive authorized detail epoch before workspace startup completes', () => {
+  assert.equal(docxEditingEpoch(0, 45, 45), 45);
+  assert.equal(docxEditingEpoch(46, 45, 46), 46);
+  assert.equal(docxEditingEpoch(45, 46, 46), 46);
+  assert.equal(docxEditingEpoch(1, undefined, 1), 1);
+  for (const [state, detail, session] of [[0, undefined, 0], [-1, undefined, -1], [45, 45, 46], [45, 45, -1], [1.5, 1, 1.5]] as const) assert.equal(docxEditingEpoch(state, detail, session), null);
 });

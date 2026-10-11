@@ -121,7 +121,7 @@ test('paper CLI integrates with authenticated durable jobs, historical snapshots
   const writer = app.auth.createToken(author.id, { name: 'Paper builds', scopes: ['read', 'write'] });
   const reader = app.auth.createToken(author.id, { name: 'Read builds', scopes: ['read'] });
   const repository = store.createRepository({ name: 'Paper sources', remoteUrl: 'https://example.invalid/paper.git' });
-  const paper = store.createRevision({ kind: 'paper', title: 'CLI job history', repositoryId: repository.id, files: [{ path: 'main.tex', content: 'Original immutable source' }] });
+  const paper = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'CLI job history', repositoryId: repository.id, files: [{ path: 'main.tex', content: 'Original immutable source' }] });
   const original = paper.versions[0]!;
   store.createVersion(paper.revision.id, { expectedVersion: 1, message: 'Later source', files: [{ path: 'main.tex', content: 'A later version must not be compiled implicitly' }] });
   await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));

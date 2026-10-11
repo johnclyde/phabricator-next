@@ -5,7 +5,7 @@ async function api<T>(request: APIRequestContext, baseURL: string, path: string,
   expect(response.ok(), await response.text()).toBe(true); return response.json() as Promise<T>;
 }
 async function fixture(page: Page, request: APIRequestContext, baseURL: string) {
-  const detail = await api<RevisionDetail>(request, baseURL, '/revisions', { kind: 'document', title: `Navigation ${Date.now()}`, files: [{ path: 'first.md', content: 'a b\nkeep\nold\nkeep\nc\td\n' }, { path: 'second.md', content: 'Before second.' }, { path: 'spaces.md', content: 'a b' }, { path: 'removed.md', content: ' \t' }] });
+  const detail = await api<RevisionDetail>(request, baseURL, '/revisions', { testPlan: 'Fixture verification plan.', kind: 'document', title: `Navigation ${Date.now()}`, files: [{ path: 'first.md', content: 'a b\nkeep\nold\nkeep\nc\td\n' }, { path: 'second.md', content: 'Before second.' }, { path: 'spaces.md', content: 'a b' }, { path: 'removed.md', content: ' \t' }] });
   await api(request, baseURL, `/revisions/${detail.revision.id}/versions`, { expectedVersion: 1, message: 'Literal edits', files: [{ path: 'first.md', content: 'a  b\nkeep\nnew\nkeep\nc d\n' }, { path: 'second.md', content: 'After second.' }, { path: 'spaces.md', content: 'a\tb' }, { path: 'empty.md', content: '' }] });
   await page.goto(`./#${detail.revision.id}`); await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2'); return detail.revision.id;
 }

@@ -25,7 +25,7 @@ const route = (id: string, threadId?: string) => `/api/revisions/${id}/${threadI
 const raw = (db: DatabaseSync, table: string) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
 const evidence = (db: DatabaseSync) => new Map((db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'thread_preferences' AND name <> 'idempotency' AND name NOT IN ('paper_builds','paper_build_artifacts') ORDER BY name").all() as { name: string }[]).map(({ name }) => [name, raw(db, name)]));
 function fixture(store: Store, repositoryId: string | null = null) {
-  const detail = store.createRevision({ kind: 'document', title: 'Collapse a discussion', repositoryId, files: [{ path: 'motion.md', content: 'Original claim.\n' }] });
+  const detail = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'document', title: 'Collapse a discussion', repositoryId, files: [{ path: 'motion.md', content: 'Original claim.\n' }] });
   const id = detail.revision.id; const version = detail.versions[0]!;
   const comment = store.createComment(id, { versionId: version.id, filePath: 'motion.md', passage: { start: 0, end: 8, quote: 'Original' }, body: 'Shared explanation', suggestion: { replacement: 'Revised' } });
   store.createReply(id, comment.id, { viewedVersionId: version.id, body: 'Shared reply' });
@@ -125,7 +125,7 @@ test('schema14 adds only empty private storage, preserves actual schema13 eviden
   const directory = mkdtempSync(join(tmpdir(), 'discussion-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaThirteen(path); let store = new Store({ path });
   try {
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27); assert.equal(store.fresh, false);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28); assert.equal(store.fresh, false);
     const historicalEvidence = () => new Map([...evidence(store.database)].filter(([name]) => old.before.has(name)));
     assert.deepEqual(historicalEvidence(), old.before); assert.deepEqual(raw(store.database, 'idempotency'), old.replay); assert.deepEqual(raw(store.database, 'thread_preferences'), []);
     // Schema16 widens the entity kind constraint; all child tables and prior
@@ -150,7 +150,7 @@ test('failed schema14 migration rolls its new table back and leaves schema13 ava
   try {
     const db = new DatabaseSync(path);
     try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 13); assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='thread_preferences'").get(), undefined); assert.deepEqual(evidence(db), old.before); assert.deepEqual(raw(db, 'idempotency'), old.replay); } finally { db.close(); }
-    const store = new Store({ path }); try { assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27); } finally { store.close(); }
+    const store = new Store({ path }); try { assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28); } finally { store.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

@@ -154,6 +154,7 @@ An import request contains:
 ```json
 {
   "title": "Motion draft",
+  "testPlan": "Compared the proposed changes with the original draft.",
   "sourceFile": { "fileId": "F1", "sha256": "SHA256_FROM_INSPECTION", "bytes": 42000 },
   "expectedAccessEpoch": 12,
   "shareSource": false

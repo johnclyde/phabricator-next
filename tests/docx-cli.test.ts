@@ -24,7 +24,7 @@ async function quiet(work: () => Promise<void>) {
 
 test('Word CLI submits exactly retained import/edit intents and request IDs, without logging quoted source', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'docx-cli-')); const path = join(directory, 'intent.json');
-  const input = { sourceFile: docx.sourceFile, title: 'Motion draft', expectedAccessEpoch: 4, shareSource: false };
+  const input = { testPlan: 'Fixture verification plan.', sourceFile: docx.sourceFile, title: 'Motion draft', expectedAccessEpoch: 4, shareSource: false };
   const calls: unknown[][] = []; const request: PaperCLI['request'] = async <T>(...args: Parameters<PaperCLI['request']>) => { calls.push(args); return { saved: true } as T; };
   try {
     await writeFile(path, JSON.stringify(input));
@@ -42,7 +42,7 @@ test('Word CLI refuses unsupported intents, missing pins, symlinks and implicit 
   const directory = await mkdtemp(join(tmpdir(), 'docx-cli-invalid-')); const path = join(directory, 'intent.json'); let calls = 0;
   const request: PaperCLI['request'] = async <T>() => { calls++; return {} as T; };
   try {
-    const base = { sourceFile: docx.sourceFile, title: 'Motion', expectedAccessEpoch: 4, shareSource: false };
+    const base = { testPlan: 'Fixture verification plan.', sourceFile: docx.sourceFile, title: 'Motion', expectedAccessEpoch: 4, shareSource: false };
     for (const input of [{ ...base, shareSource: undefined }, { ...base, expectedAccessEpoch: 0 }, { ...base, generatedXml: '<unsafe/>' }, { ...base, sourceFile: { ...docx.sourceFile, bytes: -1 } }]) {
       await writeFile(path, JSON.stringify(input)); await assert.rejects(run('import-docx', [path], {}, request));
     }

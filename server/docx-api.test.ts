@@ -45,7 +45,7 @@ async function start(options: AppOptions = {}) {
     assert.equal(response.status, 201, JSON.stringify(response.body)); return response.body;
   }
   async function importDocument(file: FileRecord, shareSource = false, key = `import-${++sequence}`) {
-    const input: DocxImportInput = { title: 'Motion draft', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource, expectedAccessEpoch: app.policies.epoch() };
+    const input: DocxImportInput = { testPlan: 'Fixture verification plan.', title: 'Motion draft', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource, expectedAccessEpoch: app.policies.epoch() };
     const response = await request<RevisionDetail>('/api/revisions/docx', 'POST', input, 'alice', key);
     assert.equal(response.status, 201, JSON.stringify(response.body)); return { detail: response.body, input, key };
   }
@@ -132,7 +132,7 @@ test('Word API revalidates source authority after asynchronous inspection before
   try {
     const file = await app.upload(); app.policy(file.id, { view: workspace });
     held = true;
-    const input: DocxImportInput = { title: 'Bob reading draft', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: false, expectedAccessEpoch: app.policies.epoch() };
+    const input: DocxImportInput = { testPlan: 'Fixture verification plan.', title: 'Bob reading draft', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: false, expectedAccessEpoch: app.policies.epoch() };
     const pending = app.request('/api/revisions/docx', 'POST', input, 'bob', 'revoked-import'); await entered;
     app.policy(file.id, { view: members(app.alice.id) }); release();
     const response = await pending; assert.equal(response.status, 404); assert.equal(response.body.code, 'DOCX_SOURCE_UNAVAILABLE');

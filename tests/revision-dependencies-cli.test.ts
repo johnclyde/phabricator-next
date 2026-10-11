@@ -32,7 +32,7 @@ for (const basePath of ['/', '/review/']) test(`dependency CLI preserves explici
     await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}${basePath}`;
     const create = async (kind: 'code' | 'paper' | 'document') => {
-      const response = await fetch(new URL('api/revisions', url), { method: 'POST', headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ title: `Exact ${kind} \u001b[31m title \u202e`, kind, files: [{ path: 'draft.txt', content: 'Retain the original source.\n' }] }) });
+      const response = await fetch(new URL('api/revisions', url), { method: 'POST', headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ testPlan: 'Fixture verification plan.', title: `Exact ${kind} \u001b[31m title \u202e`, kind, files: [{ path: 'draft.txt', content: 'Retain the original source.\n' }] }) });
       const result = await response.json() as RevisionDetail; assert.equal(response.status, 201, JSON.stringify(result)); return result;
     };
     const [code, paper, document] = await Promise.all([create('code'), create('paper'), create('document')]);

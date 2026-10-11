@@ -13,7 +13,7 @@ import type { SessionState } from '../shared/auth.ts';
 import type { AppState, ReviewAnalysis, ReviewComment, RevisionDetail, Task, WikiDocument, WikiVersion } from '../shared/types.ts';
 
 const password = 'A long test-only password for workspace access';
-const revisionInput = { title: 'Authenticated paper', kind: 'paper', files: [{ path: 'main.tex', content: '\\section{Introduction}\nAn explicit source snapshot.\n' }] };
+const revisionInput = { testPlan: 'Fixture verification plan.', title: 'Authenticated paper', kind: 'paper', files: [{ path: 'main.tex', content: '\\section{Introduction}\nAn explicit source snapshot.\n' }] };
 
 type Reply<T> = { status: number; body: T; headers: Headers };
 

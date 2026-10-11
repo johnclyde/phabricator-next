@@ -11,7 +11,7 @@ const bob: ActorAttribution = { principalId: 'bob', displayName: 'Bob', credenti
 const carol: ActorAttribution = { principalId: 'carol', displayName: 'Carol', credentialId: null, requestId: 'carol-review' };
 const ref = (actor: ActorAttribution) => ({ principalId: actor.principalId, displayName: actor.displayName });
 const epoch = (store: Store) => store.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get()!.value as number;
-function create(store: Store, draft = false) { return store.createRevision({ title: 'Exact paper', kind: 'paper', draft, files: [{ path: 'paper.tex', content: '\ufeffExact source\r\n' }] }, alice).revision.id; }
+function create(store: Store, draft = false) { return store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Exact paper', kind: 'paper', draft, files: [{ path: 'paper.tex', content: '\ufeffExact source\r\n' }] }, alice).revision.id; }
 function input(store: Store, id: string, action: RevisionReviewerAction, target?: ActorAttribution): RevisionReviewerInput {
   const snapshot = store.revisionReviewers.snapshot(id);
   const pins = { message: ' Exact reviewer attestation\r\n', expectedReviewerVersion: snapshot.reviewers.version, expectedLifecycleVersion: snapshot.lifecycle.version, expectedAuthorVersion: snapshot.authorship.version, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: epoch(store), expectedConfigId: snapshot.configId, expectedEvidenceSha256: snapshot.evidence.sha256 };

@@ -36,7 +36,7 @@ async function start(basePath = '/', allowSelfAccept = false, databasePath = ':m
   const path = (id: string) => `/api/revisions/${id}/reviewers`;
   const policy = (id: string, rules: Record<string, unknown>, who = alice.id) => { const current = app.policies.policy(id, who); return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...rules }, who); };
   const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}) => {
-    const detail = store.createRevision({ title: 'Immutable review source', kind, files: [{ path: 'source.txt', content: 'Exact manuscript\n' }], ...extra }, actor);
+    const detail = store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Immutable review source', kind, files: [{ path: 'source.txt', content: 'Exact manuscript\n' }], ...extra }, actor);
     policy(detail.revision.id, { view: workspace, edit: members(alice.id, bob.id), interact: workspace }); return detail;
   };
   const input = (id: string, action: RevisionReviewerInput['action'], reviewerId?: string): RevisionReviewerInput => {
@@ -163,7 +163,7 @@ test('Word reviewers can accept exact packages without fabricated machine eviden
   try {
     const bytes = await readFile(new URL('../tests/fixtures/docx/roundtrip.docx', import.meta.url));
     const upload = await app.request<FileRecord>('/api/files', 'POST', { name: 'Review.docx', dataBase64: bytes.toString('base64'), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }, 'alice', 'word-upload'); assert.equal(upload.status, 201);
-    const file = upload.body, imported = await app.request<RevisionDetail>('/api/revisions/docx', 'POST', { title: 'Reviewed Word package', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: true, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'word-import'); assert.equal(imported.status, 201, JSON.stringify(imported.body));
+    const file = upload.body, imported = await app.request<RevisionDetail>('/api/revisions/docx', 'POST', { testPlan: 'Fixture verification plan.', title: 'Reviewed Word package', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: true, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'word-import'); assert.equal(imported.status, 201, JSON.stringify(imported.body));
     const id = imported.body.revision.id; app.policy(id, { edit: members(app.alice.id), interact: workspace });
     const saved = await app.act(id, 'accept'); assert.equal(app.store.detail(id).revision.status, 'accepted'); assert.deepEqual(app.store.detail(id).reviews, []); assert.deepEqual(app.store.detail(id).versions, imported.body.versions);
     const space = app.policies.createSpace({ name: 'Private Word package', view: members(app.alice.id), edit: members(app.alice.id) }, app.alice.id); app.policy(file.id, { spaceId: space.id });

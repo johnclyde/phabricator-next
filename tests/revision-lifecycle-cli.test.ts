@@ -29,7 +29,7 @@ for (const basePath of ['/', '/review/']) test(`lifecycle CLI acts on exact snap
     const writer = app.auth.createToken(account.id, { name: 'Writer', scopes: ['read', 'write'] }), reader = app.auth.createToken(account.id, { name: 'Reader', scopes: ['read'] });
     await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}${basePath}`;
-    const response = await fetch(new URL('api/revisions', url), { method: 'POST', headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ kind: 'paper', title: 'Exact lifecycle source', draft: true, files: [{ path: 'draft.txt', content: 'Immutable prose.\n' }] }) });
+    const response = await fetch(new URL('api/revisions', url), { method: 'POST', headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Exact lifecycle source', draft: true, files: [{ path: 'draft.txt', content: 'Immutable prose.\n' }] }) });
     assert.equal(response.status, 201); const detail = await response.json() as RevisionDetail, id = detail.revision.id;
     assert.equal(detail.revision.status, 'draft');
     const read = await cli(['revision-lifecycle', id, '--server', url], reader.token); assert.equal(read.code, 0, read.stderr);

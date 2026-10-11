@@ -20,7 +20,7 @@ const quote = 'result needs a qualification';
 const passage = { start: source.indexOf(quote), end: source.indexOf(quote) + quote.length, quote };
 const replacement = 'result holds under the stated assumptions';
 const sourceFiles = [{ path: 'main.tex', content: source }, { path: 'appendix.tex', content: '  Unchanged appendix.\r\n' }];
-const create = (store: Store, files: SourceFile[] = sourceFiles) => store.createRevision({ title: 'A proposed correction', kind: 'paper', files }, author);
+const create = (store: Store, files: SourceFile[] = sourceFiles) => store.createRevision({ testPlan: 'Fixture verification plan.', title: 'A proposed correction', kind: 'paper', files }, author);
 const proposal = (store: Store, detail: RevisionDetail) => store.createComment(detail.revision.id, {
   body: 'State the assumptions explicitly.', versionId: detail.versions[0]!.id, filePath: 'main.tex', passage, suggestion: { replacement },
 }, reviewer);
@@ -247,8 +247,8 @@ test('schema 5 migration preserves original bytes and provenance; old replay get
   const directory = mkdtempSync(join(tmpdir(), 'phab-suggestion-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaFive(path); const store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 27);
-    assert.deepEqual(store.detail('P1'), { ...old.detail, revision: { ...old.detail.revision, authorId: null, authorDisplayName: null, authorVersion: 0, lifecycleVersion: 0, reviewerVersion: 0 }, suggestionApplications: [] });
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 28);
+    assert.deepEqual(store.detail('P1'), { ...old.detail, revision: { ...old.detail.revision, authorId: null, authorDisplayName: null, authorVersion: 0, lifecycleVersion: 0, reviewerVersion: 0, metadataVersion: 0, testPlan: null }, suggestionApplications: [] });
     for (const [table, bytes] of old.bytes) assert.deepEqual((raw(store, table) as { data: string }[]).map(row => row.data), bytes);
     assert.equal(store.detail('P1').comments[0]!.attribution, undefined);
     const auth = createAuth({ database: store.database, mode: 'local', basePath: '/' });

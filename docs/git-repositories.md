@@ -294,7 +294,7 @@ source after access loss, session retirement or cache invalidation.
 From a pinned repository snapshot, explicitly import the entire commit as a new code, paper or document review. The browser asks for the kind and title; the CLI equivalent is:
 
 ```sh
-npm run arc -- import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper"
+npm run arc -- import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper" --test-plan "Inspect the committed source and references."
 ```
 
 The server verifies the exact commit, every directory and every file before creating anything. It imports every supported tracked file; it does not apply ignore rules, select only the visible directory or silently omit unsupported entries. Both ordinary and executable text files are supported. It never checks out or executes source, runs TeX, follows links, fetches submodules or starts AI review.

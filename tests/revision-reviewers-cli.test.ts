@@ -31,7 +31,7 @@ for (const basePath of ['/', '/review/']) test(`reviewer CLI preserves exact hum
   const app = createApp({ store, seed: false, authMode: 'password', basePath }), directory = await mkdtemp(join(tmpdir(), 'revision-reviewers-cli-'));
   try {
     const writer = app.auth.createToken(reviewer.id, { name: 'Reviewer', scopes: ['read', 'write'] }), reader = app.auth.createToken(reviewer.id, { name: 'Read only', scopes: ['read'] });
-    const detail = store.createRevision({ kind: 'paper', title: 'CLI reviewer source', files: [{ path: 'draft.txt', content: 'Private exact prose\n' }] }, { principalId: author.id, displayName: author.displayName, credentialId: null, requestId: 'cli-fixture' }), id = detail.revision.id;
+    const detail = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'CLI reviewer source', files: [{ path: 'draft.txt', content: 'Private exact prose\n' }] }, { principalId: author.id, displayName: author.displayName, credentialId: null, requestId: 'cli-fixture' }), id = detail.revision.id;
     const policy = app.policies.policy(id, author.id); app.policies.setPolicy(id, { expectedVersion: policy.version, spaceId: policy.spaceId, view: { kind: 'workspace' }, edit: { kind: 'principals', principalIds: [author.id] }, interact: { kind: 'workspace' } }, author.id);
     await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}${basePath}`;

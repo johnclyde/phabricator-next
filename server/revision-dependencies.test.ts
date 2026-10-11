@@ -17,7 +17,8 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1']) {
     const data: Revision = { id, title: `Title ${id}`, summary: 'Original summary', kind: id.startsWith('P') ? 'paper' : id.startsWith('L') ? 'document' : 'code', status: 'accepted', repositoryId: null, projectId: null, currentVersion: 3, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
     insert.run(id, kind, JSON.stringify(data));
   };
-  for (const id of ids) entity(id); initializeRevisionDependencies(db); const store = new RevisionDependencyStore(db);
+  for (const id of ids) entity(id); initializeRevisionDependencies(db);
+  const store = new RevisionDependencyStore(db, id => db.prepare("SELECT json_extract(data,'$.title') AS title,json_extract(data,'$.updatedAt') AS updatedAt FROM entities WHERE id=?").get(id) as { title: string; updatedAt: string });
   const input = (id: string, add: string[], remove: string[] = [], direction: 'parents' | 'children' = 'parents'): RevisionDependencyInput => ({ direction, add, remove, expectedRelationshipVersion: store.version(id), expectedAccessEpoch: 1 });
   const mutate = (id: string, add: string[], remove: string[] = [], direction: 'parents' | 'children' = 'parents') => store.mutate(id, input(id, add, remove, direction), actor);
   const snapshot = () => Object.fromEntries(['entities', 'acceptance', 'revision_dependency_versions', 'revision_dependency_operations', 'revision_dependency_edges', 'revision_dependency_transactions'].map(table => [table, db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));

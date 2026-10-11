@@ -27,7 +27,7 @@ async function start(options: AppOptions = {}) {
   const lifecycle = async (id: string, action: RevisionLifecycleAction) => request<RevisionLifecycleReceipt>(`/api/revisions/${id}/lifecycle`, 'POST', await lifecycleInput(id, action), { 'Idempotency-Key': crypto.randomUUID() });
   return { ...app, base, request, lifecycleInput, lifecycle };
 }
-const revisionInput = { title: 'A precise revision', kind: 'code', files: [{ path: 'main.ts', content: 'export const answer = 42;\n' }] };
+const revisionInput = { testPlan: 'Fixture verification plan.', title: 'A precise revision', kind: 'code', files: [{ path: 'main.ts', content: 'export const answer = 42;\n' }] };
 const goodAnalysis: ReviewAnalysis = { provider: 'openai', model: 'test-model', summary: 'No supported errors in this snapshot.', findings: [] };
 
 test('immutable revisions retain anchored comments and invalidate acceptance on the next version', async () => {
@@ -235,7 +235,7 @@ test('document revisions and explicitly configured offline AI use the same versi
   let providerUsed: string | undefined;
   const app = await start({ aiConfiguration: () => ({ configured: false, model: null, localConfigured: true, localModel: 'sample-model' }), analyzeAI: async (_kind, _files, provider) => { providerUsed = provider; return { ...goodAnalysis, provider: 'ollama', model: 'sample-model' }; } });
   try {
-    const created = (await app.request<RevisionDetail>('/api/revisions', 'POST', { title: 'Fictional motion', kind: 'document', files: [{ path: 'motion.md', content: '# Requested relief\nFourteen additional days.' }] })).body;
+    const created = (await app.request<RevisionDetail>('/api/revisions', 'POST', { testPlan: 'Fixture verification plan.', title: 'Fictional motion', kind: 'document', files: [{ path: 'motion.md', content: '# Requested relief\nFourteen additional days.' }] })).body;
     assert.equal(created.revision.id, 'L1');
     assert.equal((await app.request(`/api/revisions/${created.revision.id}/reviews`, 'POST', { provider: 'openai', expectedVersion: 1 })).status, 400);
     const review = await app.request<ReviewRun>(`/api/revisions/${created.revision.id}/reviews`, 'POST', { provider: 'ollama', expectedVersion: 1 });

@@ -7,6 +7,7 @@ async function createDraft(page: Page, info: TestInfo, source: string) {
   const title = `Threaded argument ${info.project.name} ${Date.now()}`;
   await dialog.getByLabel('Title', { exact: true }).fill(title);
   await dialog.getByRole('textbox', { name: /^Draft text/ }).fill(source);
+  await dialog.getByLabel('Test Plan', { exact: true }).fill('Inspect the immutable source and verify the discussion and access behavior exercised here.');
   await dialog.getByRole('button', { name: 'Create Draft', exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.getByRole('heading', { level: 1 })).toContainText(title);

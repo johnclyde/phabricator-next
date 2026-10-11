@@ -40,6 +40,7 @@ The server intentionally binds to loopback. Password sign-in is available with `
 - New versions reset acceptance. Review evidence records its exact version, provider and model. Acceptance is a deliberate action based on current-version evidence or exact-version named reviewer decisions, subject to blocking reviews and error findings; it never merges or files anything.
 - [Revision dependencies](docs/revision-dependencies.md) connect code, paper and document reviews through parent/child links, with inverse history and cycle prevention. Mobile controls, authorized offline snapshots and exact CLI requests preserve source versions and acceptance. A verified Stack view shows branches, shared parents and closed revisions, with mobile/offline reading and voice navigation. Upstream Conduit interoperability and landing remain planned.
 - [Revision authorship](docs/revision-authorship.md) separates current ownership from original source attribution, with explicit transfer and Commandeer actions, immutable handoff history, mobile/offline drafts and exact CLI recovery. Ownership respects Space and source restrictions. [Named reviewers](docs/revision-reviewers.md) can accept an exact version, request changes or resign, including on Word documents. Editor-managed required reviews and author handoffs reassess acceptance atomically. [Revision lifecycle](docs/revision-lifecycle.md) adds explicit author actions, shared text/Word history, optional drafts and exact retries. Collective reviewers, notifications and upstream interoperability remain gaps.
+- [Revision details](docs/revision-metadata.md) supports titles, summaries and Test Plans across code, papers and Word, with immutable edit history, exact retries and mobile/offline drafts. Test Plans are required by default for new revisions; operators may make them optional. Metadata edits preserve source versions and review evidence.
 - [Suggested edits](docs/suggested-edits.md) attach an exact replacement or deletion to a passage. Explicit application creates a new immutable version after checking current source, discussion and access; stale proposals cannot silently edit newer text.
 - [Maniphest task pages](docs/tasks.md) provide versioned field edits, multiple project tags with explicit add/remove/replace operations, assignment with Space-bounded owner access, following preferences, immutable comments and change history, and dependencies with inverse links and cycle detection. Single and batch duplicate merges preserve task histories and record follower additions atomically. History and related-task references respect current access; stale offline edits preserve their original version for conflict resolution.
 - [Project profiles](docs/projects.md) provide versioned metadata, aliases, icons/colors, reversible archiving, member management, join/leave, independent watching and private silence preferences. Project-specific join rules and automatic member visibility remain bounded by Spaces. Subprojects and milestones preserve inherited membership, parent access, watching and task-tag relationships. [Workboards](docs/workboards.md) add independent column ordering, milestone columns, touch/keyboard card moves, previewed bulk moves within and across projects, reusable column setups, advisory limits, immutable history and filtered CLI reads. Notifications, triggers and remaining board capabilities are still unfinished.
@@ -77,7 +78,7 @@ npm run arc -- check --kind paper paper/main.tex paper/references.bib
 npm run arc -- check --kind document drafts/motion.md
 
 # Send explicit files as the entire source snapshot. Omitted files are removed.
-npm run arc -- diff --kind paper --title "A clearer argument" paper/main.tex
+npm run arc -- diff --kind paper --title "A clearer argument" --test-plan "Read the argument and checked its references." paper/main.tex
 npm run arc -- diff --revision P2 --message "Clarify assumptions" paper/main.tex
 npm run arc -- review P2 --provider local
 npm run arc -- list
@@ -102,7 +103,7 @@ npm run arc -- browse R1 --commit FULL_COMMIT_ID --path README.md --file
 npm run arc -- history R1 --commit FULL_COMMIT_ID --limit 25
 
 # Create a review from the entire committed text tree, with source access retained.
-npm run arc -- import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper"
+npm run arc -- import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper" --test-plan "Inspect the committed source and references."
 
 # Import another complete tree into an existing review using its current version pins.
 npm run arc -- import-git-version P2 --commit FULL_COMMIT_ID --version 1 \

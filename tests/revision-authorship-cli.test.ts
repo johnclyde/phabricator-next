@@ -31,7 +31,7 @@ for (const basePath of ['/', '/review/']) test(`author CLI reads, transfers and 
     const writer = app.auth.createToken(alice.id, { name: 'Writer', scopes: ['read', 'write'] }), reader = app.auth.createToken(alice.id, { name: 'Reader', scopes: ['read'] }), recipient = app.auth.createToken(bob.id, { name: 'Recipient', scopes: ['read', 'write'] });
     await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}${basePath}`;
-    const response = await fetch(new URL('api/revisions', url), { method: 'POST', headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ kind: 'paper', title: 'Private draft', files: [{ path: 'draft.txt', content: 'Private immutable prose.\n' }] }) });
+    const response = await fetch(new URL('api/revisions', url), { method: 'POST', headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Private draft', files: [{ path: 'draft.txt', content: 'Private immutable prose.\n' }] }) });
     assert.equal(response.status, 201); const detail = await response.json() as RevisionDetail, id = detail.revision.id;
     const policy = app.policies.policy(id, alice.id), onlyBob = { kind: 'principals' as const, principalIds: [bob.id] };
     app.policies.setPolicy(id, { expectedVersion: policy.version, spaceId: policy.spaceId, view: onlyBob, edit: onlyBob, interact: onlyBob }, alice.id);

@@ -54,7 +54,7 @@ async function start(options: AppOptions = {}) {
     const current = app.policies.policy(id, bob.id);
     return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...changes }, bob.id);
   }
-  const create = (kind: RevisionKind = 'code', repositoryId: string | null = 'R1') => store.createRevision({ kind, repositoryId, title: 'Existing review', summary: 'Keep my metadata', files: [{ path: 'old.txt', content: 'Original source\n' }] });
+  const create = (kind: RevisionKind = 'code', repositoryId: string | null = 'R1') => store.createRevision({ testPlan: 'Fixture verification plan.', kind, repositoryId, title: 'Existing review', summary: 'Keep my metadata', files: [{ path: 'old.txt', content: 'Original source\n' }] });
   const rows = (table: string) => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
   const evidence = () => Object.fromEntries(['entities', 'versions', 'comments', 'review_threads', 'thread_events', 'suggestion_applications', 'reviews', 'activity', 'object_policies', 'policy_meta', 'idempotency', 'sequences'].map(table => [table, rows(table)]));
   let closed = false;

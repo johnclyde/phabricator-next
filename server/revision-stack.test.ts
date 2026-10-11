@@ -33,7 +33,10 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
   const reviewers = new RevisionReviewerStore(db, lifecycle);
   lifecycle.connectReviewers(reviewers);
   const authorship = new RevisionAuthorshipStore(db, false, (id, previous, author, actor, operationId) => reviewers.authorChanged(id, previous, author, actor, operationId));
-  const reader = new RevisionStackStore(db), dependencies = new RevisionDependencyStore(db);
+  // Synthetic graph/protocol boundary fixtures deliberately exercise titles
+  // wider than native creation permits; production injects verified metadata.
+  const metadata = (id: string) => db.prepare("SELECT json_extract(data,'$.title') AS title,json_extract(data,'$.updatedAt') AS updatedAt FROM entities WHERE id=?").get(id) as { title: string; updatedAt: string };
+  const reader = new RevisionStackStore(db, metadata), dependencies = new RevisionDependencyStore(db, metadata);
   const version = (id: string, number = 1, attribution: ActorAttribution | undefined = alice, content = 'Original source\n') => {
     const files = [{ path: 'source.txt', content }];
     const value: RevisionVersion = { id: randomUUID(), revisionId: id, number, files, message: 'Original message', contentHash: sha(sourceSnapshotCanonical(files)), createdAt: '2026-01-01T00:00:00.000Z', ...(attribution ? { attribution } : {}) };

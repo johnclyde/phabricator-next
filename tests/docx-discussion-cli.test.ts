@@ -38,7 +38,7 @@ for (const basePath of ['/', '/review/']) test(`Word CLI creates exact passage t
     };
     const source = await readFile(new URL('./fixtures/docx/roundtrip.docx', import.meta.url));
     const file = await request<FileRecord>('/files', { name: 'Motion.docx', sha256: createHash('sha256').update(source).digest('hex'), bytes: source.length, dataBase64: source.toString('base64') });
-    const original = await request<RevisionDetail>('/revisions/docx', { title: 'CLI Word review', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: false, expectedAccessEpoch: app.policies.epoch() });
+    const original = await request<RevisionDetail>('/revisions/docx', { testPlan: 'Fixture verification plan.', title: 'CLI Word review', sourceFile: { fileId: file.id, sha256: file.sha256, bytes: file.bytes }, shareSource: false, expectedAccessEpoch: app.policies.epoch() });
     const id = original.revision.id, version = original.versions[0]!, range = version.docx!.projection.editableRanges.find(item => item.text === 'The original result is clear.')!;
     const commentInput = { versionId: version.id, body: '  The private citation needs evidence.\n', docxPassage: { rangeId: range.id, start: 4, end: 12, quote: 'original' } };
     const intent = join(directory, 'comment.json'); await writeFile(intent, JSON.stringify(commentInput));

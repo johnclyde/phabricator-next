@@ -17,7 +17,7 @@ type ErrorBody = { error: string; code?: string };
 const workspace: Audience = { kind: 'workspace' };
 const selected = (...principalIds: string[]): Audience => ({ kind: 'principals', principalIds });
 const source = 'Introduction.\nThis claim needs a citation.\nConcluding paragraph.\n';
-const revisionInput = { title: 'Passage review fixture', kind: 'document', files: [{ path: 'motion.md', content: source }] };
+const revisionInput = { testPlan: 'Fixture verification plan.', title: 'Passage review fixture', kind: 'document', files: [{ path: 'motion.md', content: source }] };
 
 async function start(databasePath = ':memory:') {
   const store = createStore({ path: databasePath });

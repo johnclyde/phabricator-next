@@ -30,7 +30,7 @@ async function start(basePath = '/', closeOnAccept = false) {
     return { status: response.status, body: await response.json() as T, headers: response.headers };
   }
   const path = (id: string) => `/api/revisions/${id}/authorship`;
-  const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}) => store.createRevision({ title: 'Original title', summary: 'Original summary', kind, files: [{ path: 'source.txt', content: 'Exact immutable source\n' }], ...extra }, actor);
+  const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}) => store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Original title', summary: 'Original summary', kind, files: [{ path: 'source.txt', content: 'Exact immutable source\n' }], ...extra }, actor);
   const input = (id: string, authorId = bob.id, action: 'assign' | 'commandeer' = 'assign'): RevisionAuthorInput => {
     const snapshot = store.revisionAuthorship.snapshot(id);
     return { action, ...(action === 'assign' ? { authorId } : {}), expectedAuthorVersion: snapshot.authorship.version, expectedReviewerVersion: snapshot.reviewerVersion, expectedLifecycleVersion: snapshot.lifecycleVersion, expectedVersion: snapshot.head.number, expectedVersionId: snapshot.head.versionId, expectedContentHash: snapshot.head.contentHash, expectedAccessEpoch: app.policies.epoch(), message: '  Exact handoff message\n' } as RevisionAuthorInput;

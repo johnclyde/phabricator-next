@@ -31,7 +31,7 @@ function branchingGraph(context: ReturnType<typeof fixture>, depth: number, widt
   const files = Array.from({ length: depth + 1 }, upload);
   for (let layer = 0; layer < depth; layer++) for (let branch = 0; branch < width; branch++) {
     const dependency = files[layer + 1]!;
-    const paper = store.createRevision({ kind: 'paper', title: `Layer ${layer}, branch ${branch}`, files: [{ path: 'main.tex', content: 'Exact source' }], assets: [{ path: 'figure.pdf', fileId: dependency.id, sha256: dependency.sha256, bytes: dependency.bytes, mediaType: 'application/pdf' }], shareAssets: true }, actor);
+    const paper = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: `Layer ${layer}, branch ${branch}`, files: [{ path: 'main.tex', content: 'Exact source' }], assets: [{ path: 'figure.pdf', fileId: dependency.id, sha256: dependency.sha256, bytes: dependency.bytes, mediaType: 'application/pdf' }], shareAssets: true }, actor);
     store.files.setAttachment(dependency.id, { objectId: paper.revision.id, mode: 'detach', expectedVersion: 1 }, actor);
     attach(files[layer]!.id, paper.revision.id);
   }
@@ -119,7 +119,7 @@ test('active grant enumeration is bounded but detached and reference histories d
 test('long legacy and empty-asset revision histories remain visible without spending dependency work', () => {
   const { store, policies, check } = fixture();
   try {
-    const detail = store.createRevision({ kind: 'paper', title: 'Long text history', files: [{ path: 'main.tex', content: 'Text only' }] }, actor);
+    const detail = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Long text history', files: [{ path: 'main.tex', content: 'Text only' }] }, actor);
     const first = detail.versions[0]!;
     store.transaction(() => {
       for (let number = 2; number < POLICY_TRAVERSAL_MAX_WORK + 200; number++) {
@@ -137,7 +137,7 @@ test('1,222 binary versions repeating one File remain visible and revocation sti
   const { store, policies, upload } = fixture();
   try {
     const file = upload();
-    const detail = store.createRevision({ kind: 'paper', title: 'Bounded binary history', files: [{ path: 'main.tex', content: 'Figures' }], assets: [{ path: 'figure.pdf', fileId: file.id, sha256: file.sha256, bytes: file.bytes, mediaType: 'application/pdf' }], shareAssets: true }, actor);
+    const detail = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Bounded binary history', files: [{ path: 'main.tex', content: 'Figures' }], assets: [{ path: 'figure.pdf', fileId: file.id, sha256: file.sha256, bytes: file.bytes, mediaType: 'application/pdf' }], shareAssets: true }, actor);
     assert.equal(policies.access(detail.revision.id, 'bob').view, true);
     const first = detail.versions[0]!;
     store.transaction(() => {
@@ -160,7 +160,7 @@ test('ordinary edits to a manuscript with 100 distinct figures do not multiply d
     const assets = Array.from({ length: 100 }, (_, index) => {
       const file = upload(); return { path: `figure-${index}.pdf`, fileId: file.id, sha256: file.sha256, bytes: file.bytes, mediaType: 'application/pdf' as const };
     });
-    const detail = store.createRevision({ kind: 'paper', title: 'Full figure allowance', files: [{ path: 'main.tex', content: 'Figures' }], assets, shareAssets: true }, actor);
+    const detail = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Full figure allowance', files: [{ path: 'main.tex', content: 'Figures' }], assets, shareAssets: true }, actor);
     for (let version = 1; version < 20; version++) store.createVersion(detail.revision.id, { expectedVersion: version, message: 'Text edit', files: [{ path: 'main.tex', content: `Text edit ${version}` }] }, actor);
     assert.equal(policies.access(detail.revision.id, 'bob').view, true);
     assert.equal(policies.access(detail.revision.id, 'alice').view, true);
@@ -170,7 +170,7 @@ test('ordinary edits to a manuscript with 100 distinct figures do not multiply d
 test('many distinct historical File dependencies still exhaust the shared graph budget', () => {
   const { store, policies, upload } = fixture();
   try {
-    const detail = store.createRevision({ kind: 'paper', title: 'Many distinct historical files', files: [{ path: 'main.tex', content: 'Figures' }] }, actor);
+    const detail = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Many distinct historical files', files: [{ path: 'main.tex', content: 'Figures' }] }, actor);
     let current = detail.versions[0]!;
     let firstFileId = '';
     for (let version = 1; version <= 11; version++) {

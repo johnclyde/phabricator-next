@@ -70,7 +70,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
     const wiki = store.createDocument({ title: 'Preserve source', slug: '/', content: `A literal principal in source: ${identity}` });
     store.updateDocument(wiki.id, { title: wiki.title, slug: wiki.slug, content: 'Second immutable snapshot.', expectedVersion: 1 });
     policies.configureNew(wiki.id, { spaceId: space.id, view: selected(identity, alice.id, bob.id), edit: selected(identity), interact: selected(identity, bob.id) }, identity);
-    const revision = store.createRevision({ title: 'Preserve paper', kind: 'paper', files: [{ path: 'paper.tex', content: 'Original paper.' }] });
+    const revision = store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Preserve paper', kind: 'paper', files: [{ path: 'paper.tex', content: 'Original paper.' }] });
     store.createVersion(revision.revision.id, { files: [{ path: 'paper.tex', content: 'Revised paper.' }], message: 'Second immutable version.', expectedVersion: 1 });
     const beforePolicy = policies.policy(wiki.id, identity);
     const beforeSpace = policies.getSpace(space.id, identity);
@@ -136,7 +136,7 @@ test('transfer-local command reports the chosen account and counts without activ
     const policies = new PolicyStore(store.database, { principalExists: id => [identity, account.id].includes(id) });
     const space = policies.createSpace({ name: 'CLI handoff' }, identity);
     const ownedTask = store.createTask({ title: 'CLI ownership handoff', ownerId: identity });
-    const ownedRevision = store.createRevision({ kind: 'paper', title: 'CLI revision handoff', files: [{ path: 'paper.tex', content: 'Exact original source' }] }, { principalId: identity, displayName: 'You', credentialId: null, requestId: 'local-create' });
+    const ownedRevision = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'CLI revision handoff', files: [{ path: 'paper.tex', content: 'Exact original source' }] }, { principalId: identity, displayName: 'You', credentialId: null, requestId: 'local-create' });
     const run = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolveRun, reject) => {
       const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('../scripts/accounts.ts', import.meta.url)), ...args], { env: { ...process.env, DATABASE_PATH: path }, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = ''; let stderr = '';
@@ -211,7 +211,7 @@ test('local revision ownership requires explicit terminal handoff and preserves 
     const alice = await ordinary.createAccount({ username: 'alice', displayName: 'Alice', password });
     const policies = new PolicyStore(store.database, { principalExists: id => [identity, alice.id].includes(id) });
     const attribution = { principalId: identity, displayName: 'You', credentialId: null, requestId: 'local-author' };
-    const revisions = (['paper', 'document'] as const).map(kind => store.createRevision({ kind, title: 'An owner-only manuscript', files: [{ path: 'draft.txt', content: `Exact ${kind} source` }] }, attribution));
+    const revisions = (['paper', 'document'] as const).map(kind => store.createRevision({ testPlan: 'Fixture verification plan.', kind, title: 'An owner-only manuscript', files: [{ path: 'draft.txt', content: `Exact ${kind} source` }] }, attribution));
     for (const detail of revisions) policies.configureNew(detail.revision.id, { spaceId: 'S1', view: workspace, edit: selected(), interact: selected() }, identity);
     store.saveReview(revisions[0]!.revision.id, 1, { provider: 'local', model: 'fixture', summary: 'Historical evidence', findings: [] }, attribution);
     lifecycleAction(store, revisions[0]!.revision.id, 'accept_reviewed', attribution);

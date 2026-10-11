@@ -21,7 +21,7 @@ export async function readDocxIntent(path: string): Promise<Record<string, unkno
 export async function docxCommand({ command, args, options, optionNames, request, download }: PaperCLI): Promise<boolean> {
   if (!commands.has(command)) return false;
   const downloadCommand = command === 'download-docx'; const inspection = command === 'inspect-docx'; const creation = command === 'import-docx';
-  const allowed = new Set(['server', 'help', 'json', ...(downloadCommand ? ['version', 'version-id', 'content-hash', 'output'] : inspection ? [] : ['intent', 'request-id'])]);
+  const allowed = new Set(['server', 'help', 'json', ...(creation ? ['test-plan'] : []), ...(downloadCommand ? ['version', 'version-id', 'content-hash', 'output'] : inspection ? [] : ['intent', 'request-id'])]);
   if (optionNames.some(name => !allowed.has(name))) throw new Error(`${command} received an unsupported option.`);
   if (args.length !== 1) throw new Error(`Provide ${creation ? 'one Word request JSON file' : 'one exact object ID'}.`);
   const id = args[0]!; const option = (name: string) => typeof options[name] === 'string' ? options[name] as string : undefined;
@@ -51,7 +51,11 @@ export async function docxCommand({ command, args, options, optionNames, request
   if (creation && option('intent')) throw new Error('import-docx accepts its request file as the sole positional argument.');
   const intentPath = creation ? id : option('intent'); if (!intentPath) throw new Error('--intent must name the original Word request JSON file.');
   const input = await readDocxIntent(intentPath);
-  const fields = creation ? ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']
+  if (creation && option('test-plan') !== undefined) {
+    if (input.testPlan !== undefined) throw new Error('Choose testPlan in the Word request file or --test-plan, not both. Retain the same choice when retrying.');
+    input.testPlan = option('test-plan');
+  }
+  const fields = creation ? ['title', 'summary', 'testPlan', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']
     : command === 'reimport-docx' ? ['sourceFile', 'shareSource', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch']
       : ['rangeId', 'start', 'end', 'quote', 'replacement', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch'];
   if (Object.keys(input).some(key => !fields.includes(key))) throw new Error('The Word request contains unsupported fields.');
@@ -69,7 +73,7 @@ export async function docxCommand({ command, args, options, optionNames, request
   } else if (typeof input.rangeId !== 'string' || !input.rangeId || typeof input.start !== 'number' || !Number.isSafeInteger(input.start) || input.start < 0 || typeof input.end !== 'number' || !Number.isSafeInteger(input.end) || input.end <= input.start || typeof input.quote !== 'string' || input.quote.length !== input.end - input.start || typeof input.replacement !== 'string' || input.replacement.length > DOCX_LIMITS.replacementLength) throw new Error('The replacement must identify one inspected text range and its exact quote.');
   const requestId = option('request-id') ?? randomUUID(); if (!/^[A-Za-z0-9._:-]{1,200}$/.test(requestId)) throw new Error('Invalid --request-id.');
   const path = creation ? '/api/revisions/docx' : `/api/revisions/${id}/docx/${command === 'reimport-docx' ? 'import' : 'replace'}`;
-  console.error(`Word request: ${JSON.stringify({ path, requestId, intentPath, intentSha256: digest(JSON.stringify(input)) })}. Retain this exact request file and ID to recover an uncertain result.`);
+  console.error(`Word request: ${JSON.stringify({ path, requestId, intentPath, intentSha256: digest(JSON.stringify(input)) })}. Retain this exact request file, any test-plan option, and ID to recover an uncertain result.`);
   const result = await request<unknown>(path, 'POST', input, requestId);
   console.log(JSON.stringify(result, null, 2)); return true;
 }

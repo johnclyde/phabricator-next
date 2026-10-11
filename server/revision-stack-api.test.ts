@@ -24,7 +24,7 @@ async function start(basePath = '/') {
   const origin = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}${basePath.replace(/\/$/, '')}`;
   async function request<T = ErrorBody>(path: string, actorName: keyof typeof tokens | null = 'alice') { const response = await fetch(origin + path, { signal: AbortSignal.timeout(15_000), headers: actorName ? { Authorization: `Bearer ${tokens[actorName].token}` } : {} }); return { status: response.status, headers: response.headers, body: await response.json() as T }; }
   const path = (id: string) => `/api/revisions/${id}/dependencies/graph`;
-  const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}, attribution: typeof actor | undefined = actor) => store.createRevision({ kind, title: `${kind} work`, files: [{ path: 'source.txt', content: 'Original source bytes\n' }], ...extra }, attribution);
+  const revision = (kind: 'code' | 'paper' | 'document' = 'code', extra = {}, attribution: typeof actor | undefined = actor) => store.createRevision({ testPlan: 'Fixture verification plan.', kind, title: `${kind} work`, files: [{ path: 'source.txt', content: 'Original source bytes\n' }], ...extra }, attribution);
   const link = (id: string, parents: string[], remove: string[] = []) => store.revisionDependencies.mutate(id, { direction: 'parents', add: parents, remove, expectedRelationshipVersion: store.revisionDependencies.version(id), expectedAccessEpoch: app.policies.epoch() }, actor);
   const policy = (id: string, changes: Record<string, unknown>) => { const current = app.policies.policy(id, alice.id); return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...changes }, alice.id); };
   return { ...app, store, alice, bob, actor, later, tokens, request, path, revision, link, policy, close: async () => { await app.close(); store.close(); } };
@@ -115,7 +115,7 @@ test('stack visibility follows repository, historical source File and Space ceil
 test('stack transport rejects ambiguous pins and preserves unknown legacy authors', async () => {
   const app = await start();
   try {
-    const old = app.store.createRevision({ kind: 'document', title: 'Legacy unattributed source', files: [{ path: 'old.txt', content: 'Original legacy source' }] });
+    const old = app.store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'document', title: 'Legacy unattributed source', files: [{ path: 'old.txt', content: 'Original legacy source' }] });
     const path = app.path(old.revision.id), response = await app.request<RevisionStack>(path); assert.equal(response.status, 200); assert.equal(response.body.nodes[0]!.author, null);
     for (const suffix of ['?expectedSnapshotId=', '?expectedSnapshotId=BAD', `?expectedSnapshotId=${'A'.repeat(64)}`, `?expectedSnapshotId=${'a'.repeat(64)}&expectedSnapshotId=${'a'.repeat(64)}`, '?limit=25', '?direction=parents']) assert.equal((await app.request(path + suffix)).status, 400, suffix);
     const stale = await app.request(path + `?expectedSnapshotId=${'a'.repeat(64)}`); assert.equal(stale.status, 409); assert.equal(stale.body.code, 'REVISION_STACK_CHANGED');

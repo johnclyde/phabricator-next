@@ -37,6 +37,7 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   const title = `Reviewable ${info.project.name} argument ${Date.now()}`;
   await dialog.getByLabel('Title', { exact: true }).fill(title);
   await dialog.getByRole('textbox', { name: /^Draft text/ }).fill('The applicant requests a short extension.\n');
+  await dialog.getByLabel('Test Plan', { exact: true }).fill('Inspect the immutable source and verify the discussion and access behavior exercised here.');
   await dialog.getByRole('button', { name: 'Create Draft', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1 })).toContainText(title);
   await page.getByRole('button', { name: 'Run Local Checks', exact: true }).click();

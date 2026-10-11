@@ -32,7 +32,7 @@ for (const basePath of ['/', '/review/']) test(`stack CLI verifies complete snap
       const response = await fetch(new URL(`api${path}`, url), { method: body === undefined ? 'GET' : method, headers: { Authorization: `Bearer ${writer.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       const data = await response.json(); assert.ok(response.ok, JSON.stringify(data)); return data as T;
     };
-    const create = (kind: 'paper' | 'document' | 'code') => call<RevisionDetail>('/revisions', { kind, title: `${kind} \u001b[31m \u202e stack`, files: [{ path: 'draft.txt', content: 'Exact source\n' }] });
+    const create = (kind: 'paper' | 'document' | 'code') => call<RevisionDetail>('/revisions', { testPlan: 'Fixture verification plan.', kind, title: `${kind} \u001b[31m \u202e stack`, files: [{ path: 'draft.txt', content: 'Exact source\n' }] });
     const [paper, parent, sibling] = await Promise.all([create('paper'), create('document'), create('code')]);
     for (const id of [paper.revision.id, sibling.revision.id]) await call(`/revisions/${id}/dependencies`, { direction: 'parents', add: [parent.revision.id], remove: [], expectedRelationshipVersion: 0, expectedAccessEpoch: app.policies.epoch() });
     const args = ['revision-stack', paper.revision.id, '--server', url], first = await cli(args, reader.token);

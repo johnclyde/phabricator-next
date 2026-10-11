@@ -43,7 +43,7 @@ test('CLI imports a complete pinned text tree, recovers receipts, preserves prov
   const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/workspace/`;
   const command = (args: string[], credential = token.token) => runCommand(fixture.root, [...args, '--server', server], credential);
   const title = 'Imported paper \u001b[31mred\u001b[0m';
-  const input = ['import-git', repository.id, '--commit', fixture.importCommit, '--title', title, '--kind', 'paper', '--request-id', 'cli-complete-import'];
+  const input = ['import-git', repository.id, '--commit', fixture.importCommit, '--title', title, '--test-plan', 'Inspect the complete imported tree.', '--kind', 'paper', '--request-id', 'cli-complete-import'];
   try {
     for (const invalid of [input.concat('--path', 'docs/paper.tex'), input.concat('--revision', 'P1'), input.map(value => value === fixture.importCommit ? 'main' : value)]) assert.equal((await command(invalid)).code, 1);
     assert.equal((await command(input, reader.token)).code, 1);
@@ -71,7 +71,7 @@ test('CLI imports a complete pinned text tree, recovers receipts, preserves prov
     } finally { await rename(parked, fixture.barePath); }
     assert.equal(store.state({ configured: false, model: null }).revisions.length, 1);
     assert.equal((await command(input.map(value => value === title ? 'Different request' : value))).code, 1);
-    assert.equal((await command(['import-git', repository.id, '--commit', fixture.head, '--title', 'Unsupported complete tree', '--request-id', 'cli-unsupported'])).code, 1);
+    assert.equal((await command(['import-git', repository.id, '--commit', fixture.head, '--title', 'Unsupported complete tree', '--test-plan', 'Inspect the complete tree.', '--request-id', 'cli-unsupported'])).code, 1);
     assert.equal(store.state({ configured: false, model: null }).revisions.length, 1);
     const exported = await command(['export', detail.revision.id, '--version', '1']); assert.equal(exported.code, 0, exported.stderr);
     const exportedVersion = JSON.parse(exported.stdout) as { version: RevisionVersion }; assert.deepEqual(exportedVersion.version.gitSource, provenance);
@@ -108,7 +108,7 @@ test('CLI imports later complete Git versions with explicit pins, source view ac
   const change = (args: string[], flag: string, value: string) => { const next = [...args]; next[next.indexOf(flag) + 1] = value; return next; };
   const omit = (args: string[], flag: string) => { const next = [...args]; next.splice(next.indexOf(flag), 2); return next; };
   try {
-    const initial = await command(['import-git', repository.id, '--commit', fixture.importCommit, '--title', title, '--kind', 'paper', '--request-id', 'version-cli-create', '--json']);
+    const initial = await command(['import-git', repository.id, '--commit', fixture.importCommit, '--title', title, '--test-plan', 'Inspect the complete imported tree.', '--kind', 'paper', '--request-id', 'version-cli-create', '--json']);
     assert.equal(initial.code, 0, initial.stderr); const created = JSON.parse(initial.stdout) as RevisionDetail; const id = created.revision.id; const first = created.versions[0]!;
     store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Explicit fixture evidence', findings: [] });
     store.createComment(id, { versionId: first.id, body: 'Keep the discussion attached to the original source.', filePath: 'README.md', line: 1 });
@@ -274,7 +274,7 @@ test('CLI preserves a server mount for every API command and its printed revisio
   const server = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}/tools/workspace`;
   try {
     await writeFile(join(root, 'draft.md'), '# Draft\nA complete initial argument.');
-    const created = await runCommand(root, ['diff', '--server', server, '--title', 'Mounted revision', '--kind', 'document', 'draft.md']);
+    const created = await runCommand(root, ['diff', '--server', server, '--title', 'Mounted revision', '--test-plan', 'Inspect source and recorded checks.', '--kind', 'document', 'draft.md']);
     assert.equal(created.code, 0, created.stderr); assert.match(created.stdout, /L1 · v1/);
     assert.ok(created.stdout.includes(`${server}/#L1`), created.stdout);
     await writeFile(join(root, 'draft.md'), '# Draft\nA revised complete argument.');
@@ -622,9 +622,9 @@ test('CLI authenticates with scoped environment tokens without following redirec
   await new Promise<void>(resolve => redirect.listen(0, '127.0.0.1', resolve));
   try {
     await writeFile(join(root, 'draft.md'), '# Private draft\nAn explicit source snapshot.');
-    const denied = await runCommand(root, ['diff', '--title', 'Denied', '--server', server, 'draft.md'], read.token);
+    const denied = await runCommand(root, ['diff', '--title', 'Denied', '--test-plan', 'Inspect the draft.', '--server', server, 'draft.md'], read.token);
     assert.equal(denied.code, 1);
-    const created = await runCommand(root, ['diff', '--title', 'Authenticated CLI draft', '--server', server, 'draft.md'], write.token);
+    const created = await runCommand(root, ['diff', '--title', 'Authenticated CLI draft', '--test-plan', 'Inspect the draft.', '--server', server, 'draft.md'], write.token);
     assert.equal(created.code, 0, created.stderr);
     const shown = await runCommand(root, ['show', 'D1', '--server', server], read.token);
     assert.equal(shown.code, 0, shown.stderr);

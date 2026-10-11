@@ -114,7 +114,7 @@ test('cached source dependencies survive local reopen and import requests never 
     assert.equal(client.quarantinedDrafts()[0]?.key, 'version-draft:D1:v1');
     const reopened = createWorkspaceClient(activateSession(session('local')));
     assert.equal(reopened.quarantinedDrafts()[0]?.key, 'version-draft:D1:v1');
-    await assert.rejects(reopened.request('/api/repositories/R1/import-revision', { method: 'POST', body: { commitId, kind: 'code', title: 'Never autoqueue' }, queued: true, id: 'queued' }), /explicit online save/);
+    await assert.rejects(reopened.request('/api/repositories/R1/import-revision', { method: 'POST', body: { testPlan: 'Fixture verification plan.', commitId, kind: 'code', title: 'Never autoqueue' }, queued: true, id: 'queued' }), /explicit online save/);
   } finally { globalThis.fetch = previousFetch; Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: previousStorage }); lockSession(); }
 });
 

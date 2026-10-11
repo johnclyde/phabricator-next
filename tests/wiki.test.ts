@@ -55,7 +55,7 @@ test('schema 1 migrates only the known wiki snapshot and preserves it and replay
   let store = createStore({ path });
   try {
     assert.equal(store.fresh, false);
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 27);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 28);
     const detail = store.documentDetail('W1');
     const { publication, ...snapshot } = detail.document;
     assert.deepEqual(snapshot, { ...legacy, location: { path: 'research/existing/', status: 'active', movedToId: null } });

@@ -3,11 +3,11 @@ import { isRevisionLifecycleSnapshot, isRevisionLifecycleTransaction, revisionLi
 export const LIFECYCLE_HISTORY_LIMIT = 500;
 export interface LifecycleReading { snapshot: RevisionLifecycleSnapshot; history: RevisionLifecycleHistory }
 export interface LifecycleIntent { id: string; revisionId: string; body: RevisionLifecycleInput; draft: RevisionLifecycleInput }
-export interface RevisionCounters { currentVersion: number; authorVersion?: number; lifecycleVersion?: number; reviewerVersion?: number; status: string }
+export interface RevisionCounters { currentVersion: number; authorVersion?: number; lifecycleVersion?: number; reviewerVersion?: number; metadataVersion?: number; status: string }
 /** Counters are monotonic. A fresh read must never be overwritten by older workspace metadata. */
 export function revisionRefreshDirection(known: RevisionCounters | undefined, read: RevisionCounters): 'workspace' | 'revision' | null {
   if (!known) return 'workspace';
-  const counters = ['currentVersion', 'authorVersion', 'lifecycleVersion', 'reviewerVersion'] as const;
+  const counters = [...(['currentVersion', 'authorVersion', 'lifecycleVersion', 'reviewerVersion'] as const), ...(read.metadataVersion === undefined ? [] : ['metadataVersion' as const])];
   if (counters.some(key => read[key] !== undefined && (known[key] === undefined || read[key]! > known[key]!))) return 'workspace';
   if (counters.some(key => known[key] !== undefined && (read[key] === undefined || known[key]! > read[key]!))) return 'revision';
   return (known.lifecycleVersion === undefined || read.lifecycleVersion === undefined) && known.status !== read.status ? 'revision' : null;

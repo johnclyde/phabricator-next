@@ -27,7 +27,7 @@ function fixture(path = ':memory:') {
     registerFilePolicy(store.database, file.id, actor.principalId); return { fileId: file.id, sha256: file.sha256, bytes: file.bytes };
   };
   const create = (shareSource = false) => {
-    const sourceFile = upload(); return store.createDocxRevision({ title: 'Exact Word manuscript', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource }, packageBytes, projection(), actor);
+    const sourceFile = upload(); return store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'Exact Word manuscript', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource }, packageBytes, projection(), actor);
   };
   const pins = (detail: RevisionDetail): DocxVersionPins => { const version = detail.versions.at(-1)!; return { expectedVersion: version.number, expectedVersionId: version.id, expectedContentHash: version.contentHash, expectedAccessEpoch: policies.epoch() }; };
   return { store, policies, upload, create, pins };
@@ -59,7 +59,7 @@ test('imports retain verified package bytes without manufacturing a File or impl
     assert.deepEqual(Buffer.from(bytes), packageBytes); bytes.fill(0); assert.deepEqual(Buffer.from(store.docxBytes(detail.revision.id, current.id)), packageBytes);
     assert.equal(store.files.list({ status: 'all' }).files.length, 1); assert.deepEqual(store.files.attachments(current.docx!.sourceFile.fileId).attachments, []);
     assert.equal(policies.access(detail.revision.id, 'alice').view, true); assert.equal(policies.access(detail.revision.id, 'bob').view, false);
-    const other = store.createRevision({ kind: 'document', title: 'Other source', files: [{ path: 'prose.md', content: 'Other' }] });
+    const other = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'document', title: 'Other source', files: [{ path: 'prose.md', content: 'Other' }] });
     assert.throws(() => store.docxBytes(other.revision.id, current.id), { code: 'DOCX_VERSION_UNAVAILABLE' });
   } finally { store.close(); }
 });
@@ -67,7 +67,7 @@ test('imports retain verified package bytes without manufacturing a File or impl
 test('import validates exact source and attribution before any partial writes', () => {
   const { store, policies, upload } = fixture();
   try {
-    const sourceFile = upload(), input = { title: 'Import', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource: false };
+    const sourceFile = upload(), input = { testPlan: 'Fixture verification plan.', title: 'Import', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource: false };
     for (const bad of [{ ...input, sourceFile: { ...sourceFile, bytes: sourceFile.bytes + 1 } }, { ...input, sourceFile: { ...sourceFile, sha256: '0'.repeat(64) } }, { ...input, expectedAccessEpoch: input.expectedAccessEpoch + 1 }]) assert.throws(() => store.createDocxRevision(bad, packageBytes, projection(), actor));
     assert.throws(() => store.createDocxRevision(input, Buffer.from('changed source bytes'), projection(), actor), { code: 'DOCX_SOURCE_MISMATCH' });
     assert.throws(() => store.createDocxRevision(input, packageBytes, projection(), undefined as unknown as ActorAttribution), /authenticated/);
@@ -147,11 +147,11 @@ test('a failed package write rolls back revision, sequence, attachment, epoch an
   try {
     const sourceFile = upload(), epoch = policies.epoch();
     store.database.exec("CREATE TRIGGER reject_docx BEFORE INSERT ON revision_docx_packages BEGIN SELECT RAISE(ABORT,'injected package failure'); END;");
-    assert.throws(() => store.createDocxRevision({ title: 'Atomic import', sourceFile, expectedAccessEpoch: epoch, shareSource: true }, packageBytes, projection(), actor), /injected package failure/);
+    assert.throws(() => store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'Atomic import', sourceFile, expectedAccessEpoch: epoch, shareSource: true }, packageBytes, projection(), actor), /injected package failure/);
     assert.equal(policies.epoch(), epoch); assert.deepEqual(store.files.attachments(sourceFile.fileId).attachments, []); assert.deepEqual(store.activities(), []);
     assert.equal(store.database.prepare('SELECT COUNT(*) AS n FROM versions').get()!.n, 0); assert.equal(store.database.prepare("SELECT value FROM sequences WHERE name='revision'").get(), undefined);
     store.database.exec('DROP TRIGGER reject_docx');
-    assert.equal(store.createDocxRevision({ title: 'Atomic import', sourceFile, expectedAccessEpoch: epoch, shareSource: true }, packageBytes, projection(), actor).revision.id, 'L1');
+    assert.equal(store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'Atomic import', sourceFile, expectedAccessEpoch: epoch, shareSource: true }, packageBytes, projection(), actor).revision.id, 'L1');
   } finally { store.close(); }
 });
 
@@ -161,7 +161,7 @@ test('generic text edits and review cannot silently operate on DOCX snapshots; i
     const detail = create(), current = version(detail);
     assert.throws(() => store.createVersion(detail.revision.id, { expectedVersion: 1, files: [{ path: 'lost.md', content: 'Flattened' }], message: 'Discard package' }), { code: 'DOCX_OPERATION_UNSUPPORTED' });
     assert.throws(() => store.saveReview(detail.revision.id, 1, { summary: 'Empty files', findings: [], provider: 'local', model: 'local' }), { code: 'DOCX_OPERATION_UNSUPPORTED' });
-    assert.throws(() => parseDocxImportInput({ title: 'Spoof', sourceFile: current.docx!.sourceFile, shareSource: false, expectedAccessEpoch: 1, projection: projection() }), /Unknown field/);
+    assert.throws(() => parseDocxImportInput({ testPlan: 'Fixture verification plan.', title: 'Spoof', sourceFile: current.docx!.sourceFile, shareSource: false, expectedAccessEpoch: 1, projection: projection() }), /Unknown field/);
     assert.throws(() => parseDocxReimportInput({ ...pins(detail), sourceFile: current.docx!.sourceFile, shareSource: false, message: 'Spoof', bytes: [1] }), /Unknown field/);
     assert.throws(() => parseDocxReplaceInput({ ...pins(detail), rangeId: 'range', start: 0, end: 1, quote: 'A', replacement: 'B', message: 'Spoof', xml: '<bad/>' }), /Unknown field/);
     assert.equal(store.detail(detail.revision.id).versions.length, 1);
@@ -171,19 +171,19 @@ test('generic text edits and review cannot silently operate on DOCX snapshots; i
 test('schema18 to19 is additive and preserves all existing raw rows, schema and foreign keys', () => {
   const directory = mkdtempSync(join(tmpdir(), 'docx-migration-')), path = join(directory, 'workspace.sqlite'); let store = new Store({ path });
   try {
-    store.createRevision({ title: 'Legacy bytes', kind: 'document', files: [{ path: 'old.md', content: '\ufeffExact\r\nsource 😀' }] }, actor);
+    store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Legacy bytes', kind: 'document', files: [{ path: 'old.md', content: '\ufeffExact\r\nsource 😀' }] }, actor);
     store.database.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run('old', 'old-request', 201, '{ "keep" : "formatting" }', '2025-01-01');
     store.database.exec("DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete; CREATE VIEW legacy_versions AS SELECT id,data FROM versions; CREATE INDEX legacy_versions_number ON versions(number); PRAGMA user_version=18;");
     const schemas = store.database.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string; sql: string }[];
     const tables = (store.database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map(row => row.name);
     const rows = new Map(tables.map(name => [name, store.database.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all()]));
     store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28);
     for (const schema of schemas) assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql, schema.sql, schema.name);
     for (const [name, before] of rows) assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all(), before, name);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     assert.deepEqual(store.database.prepare('SELECT * FROM revision_docx_packages').all(), []);
-    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27);
+    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -197,7 +197,7 @@ test('schema19 failure is atomic and leaves schema18 reopenable', () => {
   } finally { DatabaseSync.prototype.exec = exec; }
   try {
     const db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 18); assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name='revision_docx_packages'").get(), undefined); db.close();
-    const reopened = new Store({ path }); assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version, 27); reopened.close();
+    const reopened = new Store({ path }); assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version, 28); reopened.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -205,7 +205,7 @@ test('real parsed Word import and tracked replacement persist exact original and
   const { store, policies, upload, pins } = fixture();
   try {
     const original = readFileSync(new URL('../tests/fixtures/docx/roundtrip.docx', import.meta.url)), parsed = await inspectDocx(original), sourceFile = upload(original);
-    const detail = store.createDocxRevision({ title: 'Real DOCX fixture', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource: false }, original, parsed, actor);
+    const detail = store.createDocxRevision({ testPlan: 'Fixture verification plan.', title: 'Real DOCX fixture', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource: false }, original, parsed, actor);
     assert.deepEqual(Buffer.from(store.docxBytes(detail.revision.id, version(detail).id)), original);
     const range = parsed.editableRanges.find(item => item.text === 'The original result is clear.'); assert.ok(range);
     const input = { ...pins(detail), rangeId: range.id, start: 4, end: 12, quote: 'original', replacement: 'revised', message: 'Revise claim' };
@@ -221,7 +221,7 @@ test('real parsed Word import and tracked replacement persist exact original and
 test('immutable DOCX operation provenance binds complete import, reimport and replacement requests', () => {
   const { store, policies, upload, pins } = fixture();
   try {
-    const sourceFile = upload(), input = { title: 'Exact request', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource: false };
+    const sourceFile = upload(), input = { testPlan: 'Fixture verification plan.', title: 'Exact request', sourceFile, expectedAccessEpoch: policies.epoch(), shareSource: false };
     const imported = store.createDocxRevision(input, packageBytes, projection(), actor);
     assert.deepEqual(version(imported).docxOperation, { kind: 'import', inputSha256: docxOperationHash(input) });
     assert.equal(docxOperationHash(input), docxOperationHash({ ...input, summary: '' }), 'normalized optional summary uses one request identity');

@@ -19,7 +19,7 @@
     "dev:client": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env --import tsx server/index.ts",
-    "test": "node --import tsx --test tests/*.test.ts server/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=2 tests/*.test.ts server/*.test.ts",
     "check": "tsc --noEmit",
     "arc": "tsx cli/index.ts",
     "accounts": "node --env-file-if-exists=.env --import tsx scripts/accounts.ts",

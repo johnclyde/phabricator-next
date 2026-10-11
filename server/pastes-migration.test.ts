@@ -16,7 +16,7 @@ function schema17(path: string) {
   const actor = { principalId: 'local:workspace', displayName: 'Workspace', credentialId: null, requestId: 'before-pastes' };
   const bytes = Buffer.from('%PDF-1.4\nHistorical supporting source.\n');
   const file = store.files.upload({ name: 'support.pdf', dataBase64: bytes.toString('base64'), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }, actor); registerFilePolicy(db, file.id, actor.principalId);
-  const paper = store.createRevision({ kind: 'paper', title: 'Historical paper', files: [{ path: 'main.tex', content: '\\cite{old}' }, { path: 'ref.bib', content: '@article{old,title={Historical source}}' }] }, actor);
+  const paper = store.createRevision({ testPlan: 'Fixture verification plan.', kind: 'paper', title: 'Historical paper', files: [{ path: 'main.tex', content: '\\cite{old}' }, { path: 'ref.bib', content: '@article{old,title={Historical source}}' }] }, actor);
   const version = paper.versions[0]; const target = analyzeCitations(version.files).entries[0];
   const evidence = store.citationEvidence.create(paper.revision.id, { versionId: version.id, contentHash: version.contentHash, targetId: target.id, source: { fileId: file.id, sha256: file.sha256, bytes: file.bytes, mediaType: file.mediaType }, verdict: 'supports', quote: 'Historical supporting source.', locator: 'p. 1', note: 'Read manually', attested: true, expectedAccessEpoch: 1 }, actor);
   store.citationEvidence.retract(paper.revision.id, evidence.id, { expectedRecordVersion: 1, reason: 'Superseded source' }, actor);
@@ -53,7 +53,7 @@ test('schema17 migration preserves all evidence and dependent schema, rowids, cu
       CREATE TRIGGER entities_note_update AFTER UPDATE OF operator_note ON entities BEGIN SELECT id FROM dependent_names WHERE id=NEW.id; END;`);
     const max = (db.prepare('SELECT MAX(rowid) AS n FROM entities').get() as { n: number }).n; db.prepare('UPDATE entities SET rowid=? WHERE rowid=?').run(max + 99, max);
     const before = snapshot(db); store.close(); store = new Store({ path }); const after = snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 27); assert.equal(store.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 28); assert.equal(store.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, `${table} exact historical bytes and rowids`); assert.deepEqual(after.references[table], before.references[table], `${table} foreign keys`); }
     for (const definition of before.schemas.filter(item => item.name !== 'entities')) assert.deepEqual(after.schemas.find(item => item.name === definition.name), definition, definition.name);
     assert.match(after.schemas.find(item => item.name === 'entities')!.sql, /'paste'/); assert.match(after.schemas.find(item => item.name === 'entities')!.sql, /operator_note/);

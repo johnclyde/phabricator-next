@@ -6,6 +6,8 @@ import { initializeRevisionLifecycle, RevisionLifecycleStore } from './revision-
 import type { RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { initializeRevisionReviewers, RevisionReviewerStore } from './revision-reviewers.ts';
 import type { RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
+import { initializeRevisionMetadata, RevisionMetadataStore } from './revision-metadata.ts';
+import type { RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
 import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
 import type { WikiConduitMethod, WikiConduitReceipt } from '../shared/wiki-conduit.ts';
@@ -45,7 +47,7 @@ type Entity = Project | Repository | Revision | Task | WikiDocument | FileRecord
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file' | 'paste';
 export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
-export interface StoreOptions { path?: string; revisionLifecycle?: Partial<RevisionLifecycleConfig>; revisionReviewers?: Partial<RevisionReviewerConfig> }
+export interface StoreOptions { path?: string; revisionLifecycle?: Partial<RevisionLifecycleConfig>; revisionReviewers?: Partial<RevisionReviewerConfig>; revisionMetadata?: Partial<RevisionMetadataConfig> }
 type JsonRow = { data: string };
 
 export function parseRevisionDependencyInput(input: unknown): RevisionDependencyInput {
@@ -62,11 +64,11 @@ export function threadPreferenceInput(input: unknown): SetThreadPreferenceInput 
 
 /** Public import metadata contains no source, policy, or provenance supplied by a client. */
 export function gitImportInput(input: unknown): GitImportInput {
-  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'projectId', 'draft']);
+  const data = object(input, ['commitId', 'kind', 'title', 'summary', 'testPlan', 'projectId', 'draft']);
   if (typeof data.commitId !== 'string' || !isGitObjectId(data.commitId)) throw new HttpError(400, 'Select a full lowercase commit object ID.', 'GIT_INVALID_QUERY');
   if (data.projectId !== undefined && data.projectId !== null && (typeof data.projectId !== 'string' || !/^PROJ[1-9]\d{0,14}$/.test(data.projectId))) throw new HttpError(400, 'Reference unavailable.');
   if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
-  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), ...(data.projectId === undefined ? {} : { projectId: data.projectId as string | null }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
+  return { commitId: data.commitId, kind: choice(data.kind, 'kind', ['code', 'paper', 'document']), title: string(data.title, 'Title', 255, true), summary: optionalString(data.summary, 'Summary'), ...(data.testPlan === undefined ? {} : { testPlan: string(data.testPlan, 'Test plan', 100_000, true) }), ...(data.projectId === undefined ? {} : { projectId: data.projectId as string | null }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
 }
 
 export function gitVersionImportInput(input: unknown): GitVersionImportInput {
@@ -94,10 +96,10 @@ function docxPins(data: Record<string, unknown>): DocxVersionPins {
 }
 export function parseDocxVersionPins(input: unknown): DocxVersionPins { return docxPins(object(input, docxPinKeys)); }
 export function parseDocxImportInput(input: unknown): DocxImportInput {
-  const data = object(input, ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']);
+  const data = object(input, ['title', 'summary', 'testPlan', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access', 'draft']);
   if (typeof data.shareSource !== 'boolean') throw new HttpError(400, 'shareSource must be an explicit boolean.');
   if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
-  return { title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
+  return { title: string(data.title, 'Title', 255, true), summary: optionalString(data.summary, 'Summary'), ...(data.testPlan === undefined ? {} : { testPlan: string(data.testPlan, 'Test plan', 100_000, true) }), sourceFile: docxIdentity(data.sourceFile), expectedAccessEpoch: integer(data.expectedAccessEpoch, 'expectedAccessEpoch'), shareSource: data.shareSource, ...(data.access === undefined ? {} : { access: data.access as DocxImportInput['access'] }), ...(data.draft === undefined ? {} : { draft: data.draft }) };
 }
 export function parseDocxReimportInput(input: unknown): DocxReimportInput {
   const data = object(input, [...docxPinKeys, 'sourceFile', 'shareSource', 'message']);
@@ -169,6 +171,7 @@ export class Store {
   readonly revisionAuthorship: RevisionAuthorshipStore;
   readonly revisionLifecycle: RevisionLifecycleStore;
   readonly revisionReviewers: RevisionReviewerStore;
+  readonly revisionMetadata: RevisionMetadataStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -181,7 +184,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 27) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 28) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -438,12 +441,17 @@ export class Store {
       try { this.transaction(() => { initializeRevisionReviewers(this.database); this.database.exec('PRAGMA user_version = 27'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 28) {
+      try { this.transaction(() => { initializeRevisionMetadata(this.database); this.database.exec('PRAGMA user_version = 28'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.revisionMetadata = new RevisionMetadataStore(this.database, options.revisionMetadata);
     this.revisionLifecycle = new RevisionLifecycleStore(this.database, options.revisionLifecycle);
     this.revisionReviewers = new RevisionReviewerStore(this.database, this.revisionLifecycle, options.revisionReviewers);
     this.revisionLifecycle.connectReviewers(this.revisionReviewers);
     this.revisionAuthorship = new RevisionAuthorshipStore(this.database, this.revisionLifecycle.config.closeOnAccept, (id, previous, author, actor, operationId) => this.revisionReviewers.authorChanged(id, previous, author, actor, operationId));
-    this.revisionDependencies = new RevisionDependencyStore(this.database);
-    this.revisionStack = new RevisionStackStore(this.database, this.revisionLifecycle.config.closeOnAccept);
+    this.revisionDependencies = new RevisionDependencyStore(this.database, id => this.revisionMetadata.state(id));
+    this.revisionStack = new RevisionStackStore(this.database, id => this.revisionMetadata.state(id), this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;
@@ -521,7 +529,15 @@ export class Store {
       metadata = rest;
     }
     if (kind === 'document') { const { location: _location, publication: _publication, ...rest } = value as WikiDocument; metadata = rest; }
-    if (kind === 'revision') { const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, reviewerVersion: _reviewerVersion, ...rest } = value as Revision; metadata = rest; }
+    if (kind === 'revision') {
+      const { authorId: _authorId, authorVersion: _authorVersion, authorDisplayName: _authorDisplayName, lifecycleVersion: _lifecycleVersion, reviewerVersion: _reviewerVersion, metadataVersion: _metadataVersion, testPlan: _testPlan, ...rest } = value as Revision;
+      // Existing writers update source/status through this helper. Metadata is
+      // authoritative in its sidecar; never copy a hydrated edit back over the
+      // original entity fields retained for historical receipt compatibility.
+      const old = this.database.prepare("SELECT data FROM entities WHERE id=? AND kind='revision'").get(value.id) as JsonRow | undefined;
+      const original = old ? JSON.parse(old.data) as Revision : null;
+      metadata = original ? { ...rest, title: original.title, summary: original.summary, ...(Object.hasOwn(original, 'testPlan') ? { testPlan: original.testPlan } : {}) } : rest;
+    }
     const json = JSON.stringify(metadata);
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
     if (created.changes) { registerDefaultPolicy(this.database, value.id); if(kind==='document')this.wikiSearch?.ensureDocument(value.id); }
@@ -530,7 +546,8 @@ export class Store {
   }
   private hydrateRevision(value: Revision): Revision {
     const state = this.revisionAuthorship.state(value.id);
-    return { ...value, authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version, reviewerVersion: this.revisionReviewers.state(value.id).version };
+    const metadata = this.revisionMetadata.state(value.id);
+    return { ...value, title: metadata.title, summary: metadata.summary, testPlan: metadata.testPlan, metadataVersion: metadata.version, ...(metadata.updatedAt && metadata.updatedAt > value.updatedAt ? { updatedAt: metadata.updatedAt } : {}), authorId: state.author?.principalId ?? null, authorDisplayName: state.author?.displayName ?? null, authorVersion: state.version, lifecycleVersion: this.revisionLifecycle.state(value.id).version, reviewerVersion: this.revisionReviewers.state(value.id).version };
   }
   private reference(value: unknown, kind: 'project' | 'repository'): string | null {
     if (value === null || value === undefined) return null;
@@ -549,7 +566,7 @@ export class Store {
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { pastes: this.all('paste'), files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
+    return { revisionMetadataConfig: { ...this.revisionMetadata.config, configId: this.revisionMetadata.configId }, pastes: this.all('paste'), files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
     return this.projects.create(input, attribution);
@@ -1312,12 +1329,14 @@ export class Store {
   createDocxRevision(input: DocxImportInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
     return this.discussionMutation(() => {
       const data = parseDocxImportInput(input), actor = this.docxActor(attribution); this.docxEpoch(data.expectedAccessEpoch);
+      const metadata = this.revisionMetadata.creationFields(data);
       const file = this.docxFile(data.sourceFile, true), source = this.docxSource(bytes, projection, file.originalName, data.sourceFile);
       if (source.sha256 !== file.sha256 || source.bytes !== file.bytes || !Buffer.from(bytes).equals(this.files.readBytes(file.id))) throw docxMismatch();
       const now = new Date().toISOString();
-      const revision: Revision = { id: this.nextId('revision', 'L'), title: data.title, summary: data.summary ?? '', kind: 'document', status: data.draft ? 'draft' : 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: now, updatedAt: now };
+      const revision: Revision = { id: this.nextId('revision', 'L'), title: metadata.title, summary: metadata.summary, kind: 'document', status: data.draft ? 'draft' : 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: now, updatedAt: now };
       this.save('revision', revision); this.attachDocxSource(revision.id, data.sourceFile, data.shareSource, actor);
       this.saveDocxVersion(revision, source, bytes, 'Imported Word document', actor, { kind: 'import', inputSha256: docxOperationHash(data) });
+      this.revisionMetadata.ensure(revision.id, metadata);
       this.event(revision.id, 'created', 'Imported Word document as version 1.', actor);
       return this.detail(revision.id);
     });
@@ -1385,7 +1404,7 @@ export class Store {
     return this.discussionMutation(() => {
       const data = gitImportInput(input);
       const { source, gitSource } = this.verifiedGitSnapshot(repositoryId, data.commitId, snapshot);
-      return this.createRevisionRecord({ title: data.title, summary: data.summary, kind: data.kind, projectId: data.projectId, repositoryId, files: source, ...(data.draft === undefined ? {} : { draft: data.draft }) }, attribution, gitSource);
+      return this.createRevisionRecord({ title: data.title, summary: data.summary, ...(data.testPlan === undefined ? {} : { testPlan: data.testPlan }), kind: data.kind, projectId: data.projectId, repositoryId, files: source, ...(data.draft === undefined ? {} : { draft: data.draft }) }, attribution, gitSource);
     });
   }
   private verifiedGitSnapshot(repositoryId: string, commitId: string, snapshot: GitImportSnapshot): { source: SourceFile[]; gitSource: GitSourceProvenance } {
@@ -1428,15 +1447,16 @@ export class Store {
     });
   }
   private createRevisionRecord(input: unknown, attribution?: ActorAttribution, gitSource?: GitSourceProvenance): RevisionDetail {
-    const data = object(input, ['title', 'summary', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId', 'draft']);
+    const data = object(input, ['title', 'summary', 'testPlan', 'kind', 'files', 'assets', 'shareAssets', 'expectedAccessEpoch', 'repositoryId', 'projectId', 'draft']);
     if (data.draft !== undefined && typeof data.draft !== 'boolean') throw new HttpError(400, 'draft must be a boolean.');
     const kind = choice(data.kind, 'kind', ['code', 'paper', 'document']);
+    const metadata = this.revisionMetadata.creationFields({ title: data.title, summary: data.summary, testPlan: data.testPlan });
     const source = files(data.files);
     const assets = this.sourceAssets(source, data.assets ?? [], []);
     const now = new Date().toISOString();
-    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: string(data.title, 'Title'), summary: optionalString(data.summary, 'Summary'), kind, status: data.draft ? 'draft' : 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
+    const revision: Revision = { id: this.nextId('revision', kind === 'code' ? 'D' : kind === 'paper' ? 'P' : 'L'), title: metadata.title, summary: metadata.summary, kind, status: data.draft ? 'draft' : 'needs_review', repositoryId: this.reference(data.repositoryId, 'repository'), projectId: this.reference(data.projectId, 'project'), currentVersion: 1, createdAt: now, updatedAt: now };
     this.save('revision', revision); this.shareSourceAssets(revision.id, assets, [], data.shareAssets, attribution);
-    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
+    this.saveVersion(revision, source, 'Initial version', attribution, gitSource, assets); this.revisionMetadata.ensure(revision.id, metadata); this.event(revision.id, 'created', `Created ${kind === 'paper' ? 'paper' : 'revision'} ${revision.title}.`, attribution); return this.detail(revision.id);
   }
   private sourceAssets(source: SourceFile[], input: unknown, previous: RevisionAsset[]): RevisionAsset[] {
     const resolved = this.files.resolveAssets(input);
