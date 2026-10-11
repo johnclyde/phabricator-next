@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { initializePaperBuilds } from './paper-builds.ts';
 import { FileStore } from './files.ts';
 import { migrateFiles } from './files-migration.ts';
+import { CitationEvidenceStore, initializeCitationEvidence } from './citation-evidence.ts';
 import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
 import type { FileRecord, RevisionAsset } from '../shared/files.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -59,6 +60,7 @@ export class Store {
   readonly database: DatabaseSync;
   readonly fresh: boolean;
   readonly files: FileStore;
+  readonly citationEvidence: CitationEvidenceStore;
   private taskProjectsReady = false;
   private projects: ProjectStore;
   private workboards?: WorkboardStore;
@@ -68,7 +70,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 16) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 17) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -257,7 +259,12 @@ export class Store {
       try { migrateFiles(this.database); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 17) {
+      try { this.transaction(() => { initializeCitationEvidence(this.database); this.database.exec('PRAGMA user_version = 17'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.files = new FileStore(this.database);
+    this.citationEvidence = new CitationEvidenceStore(this.database, this.files);
     this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
     this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id), changed: (project, created, attribution) => this.workboards!.projectChanged(project, created, attribution) });
   }

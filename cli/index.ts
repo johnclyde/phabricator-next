@@ -15,6 +15,7 @@ import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories';
 import type { GitBlob, GitHistory, GitImportInput, GitRefs, GitTree, GitVersionImportInput, RepositoryDetail } from '../shared/repositories';
 import { paperCommand } from './paper-builds';
 import { fileCommand } from './files';
+import { citationCommand } from './citations';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -49,6 +50,11 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- attach-file F1 --object P2 --mode attach|reference|detach --version N [--access-epoch N] [--request-id KEY]
   npm run arc -- download-file F1 --output NEW_FILE
   npm run arc -- set-figures P2 --assets-manifest FILE.json --version N --version-id ID --content-hash SHA256 --access-epoch N --message TEXT [--share-assets] [--request-id KEY]
+  npm run arc -- citations P2 --version N [--json]
+  npm run arc -- citation-evidence P2 --version-id ID [--target-id ID] [--before N] [--limit N]
+  npm run arc -- citation-record P2 RECORD_ID
+  npm run arc -- record-citation P2 --evidence FILE.json --attest-inspected [--request-id KEY]
+  npm run arc -- retract-citation P2 RECORD_ID --version N --reason-file FILE.txt [--request-id KEY]
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -98,6 +104,14 @@ set-figures replaces the complete figure manifest on the exact selected source;
 each JSON entry pins path, fileId, sha256, bytes, mediaType. --share-assets explicitly
 shares new figures. Ordinary text diff preserves the selected version's figures.
 Removing figures does not detach earlier versions' grants or delete their bytes.
+citations inventories literal source in one saved version; check --kind paper
+also checks bibliography keys offline. Neither verifies cited claims.
+record-citation submits your explicit source-inspection attestation. Its JSON
+pins versionId, contentHash, targetId, source {fileId,sha256,bytes,mediaType},
+verdict, quote, locator, note, attested:true and expectedAccessEpoch. Records are
+visible only to readers of both manuscript and supporting File; no File is
+shared implicitly. Retain the input file and request ID for exact retry.
+retract-citation appends a reason without erasing the original record.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
@@ -152,6 +166,7 @@ async function main() {
       name: { type: 'string' }, author: { type: 'string' }, 'alt-text': { type: 'string' },
       object: { type: 'string' }, mode: { type: 'string' }, 'access-epoch': { type: 'string' },
       'assets-manifest': { type: 'string' }, 'share-assets': { type: 'boolean' },
+      'target-id': { type: 'string' }, evidence: { type: 'string' }, 'attest-inspected': { type: 'boolean' }, 'reason-file': { type: 'string' },
     },
   });
   const [command, ...args] = positionals;
@@ -196,6 +211,7 @@ async function main() {
   };
   if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

@@ -1,4 +1,5 @@
 import type { AuthContext } from '../shared/auth.ts';
+import { isDeepStrictEqual } from 'node:util';
 import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
 import type { AppState, RevisionDetail, ReviewThread, SpaceSummary, TaskDetail, TaskHistory, TaskSubscriptionPage, TaskSubscriptionStatus, TaskTransaction, WikiDetail } from '../shared/types.ts';
@@ -10,6 +11,8 @@ import type { PolicyStore } from './policy.ts';
 import { gitImportInput, gitVersionImportInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
+import type { CitationEvidenceRecord } from '../shared/citation-evidence.ts';
+import { parseCitationEvidenceInput } from './citation-evidence.ts';
 
 const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/files']);
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -52,6 +55,15 @@ export class AccessLayer {
   file(id: string): FileDetail {
     this.require(id);
     return { file: this.store.files.get(id), history: { ...this.store.files.history(id, undefined, undefined, objectId => this.canView(objectId)), accessEpoch: this.policies.epoch() }, attachments: { ...this.store.files.attachments(id, {}, objectId => this.canView(objectId)), accessEpoch: this.policies.epoch() }, access: this.describe(id), accessEpoch: this.policies.epoch() };
+  }
+  citationSource(fileId: unknown): void {
+    if (typeof fileId !== 'string' || !/^F[1-9]\d{0,14}$/.test(fileId) || !this.canView(fileId)) throw new HttpError(404, 'Citation source is unavailable.', 'CITATION_SOURCE_UNAVAILABLE');
+  }
+  citationEvidence(revisionId: string, evidenceId: string): CitationEvidenceRecord {
+    this.require(revisionId);
+    const evidence = this.store.citationEvidence.get(revisionId, evidenceId);
+    this.citationSource(evidence.source.fileId);
+    return { ...evidence, accessEpoch: this.policies.epoch() };
   }
   document(id: string): WikiDetail {
     this.require(id);
@@ -249,14 +261,22 @@ export class AccessLayer {
     const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions|files)\/((?:PROJ|R|T|W|F|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
+    const citationEvidence = method === 'POST' && /^citation-evidence(?:\/[^/]+\/retract)?$/.test(object[2] ?? '');
     const personalDiscussion = method === 'PATCH' && /^threads\/[^/]+\/preference$/.test(object[2] ?? '');
     const selfProject = object[1]!.startsWith('PROJ') && ['membership', 'watchers', 'silence'].includes(object[2] ?? '');
     const boardMove = method === 'POST' && object[1]!.startsWith('PROJ') && ['workboard/moves', 'workboard/bulk-moves'].includes(object[2] ?? '');
-    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject || boardMove || personalDiscussion ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
+    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject || boardMove || personalDiscussion ? 'view' : discussionReply || citationEvidence || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    const citation = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+)\/retract)?$/.exec(path) : null;
+    if (citation) {
+      if (citation[2]) {
+        const evidence = this.citationEvidence(citation[1]!, citation[2]);
+        if (evidence.attribution.principalId !== this.principal && !this.policies.access(citation[1]!, this.principal).edit) throw new HttpError(403, 'Only the original reviewer or a manuscript editor can retract this record.', 'CITATION_RETRACTION_FORBIDDEN');
+      } else this.citationSource(parseCitationEvidenceInput(input).source.fileId);
+    }
     if (method === 'POST' && /^\/api\/files\/F\d+\/attachments$/.test(path)) {
       const data = object(input, ['objectId', 'mode', 'expectedVersion', 'expectedAccessEpoch']);
       if (typeof data.objectId !== 'string' || !/^(?:PROJ|R|T|W|[DPL])[1-9]\d{0,14}$/.test(data.objectId)) throw new HttpError(400, 'Choose an available object to attach.');
@@ -506,7 +526,7 @@ export class AccessLayer {
     return false;
   }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
-  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false): MutationResponse {
+  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false, mutationInput?: unknown): MutationResponse {
     let target = this.target(method, path);
     const body = record(response.body);
     const gitImport = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
@@ -530,6 +550,31 @@ export class AccessLayer {
       if (!this.canView(target.id)) return { status: response.status, body: { id: target.id, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
       this.require(target.id);
     } else if (target) this.require(target.id, target.capability);
+    if (/^\/api\/revisions\/[DPL]\d+\/citation-evidence(?:\/[^/]+\/retract)?$/.test(path)) {
+      const source = record(body?.source);
+      if (!target || !body || body.revisionId !== target.id || typeof body.id !== 'string' || typeof source?.fileId !== 'string') throw new HttpError(409, 'This saved citation record cannot be safely replayed.');
+      const stored = this.citationEvidence(target.id, body.id);
+      const { accessEpoch: _storedEpoch, ...current } = stored;
+      const { accessEpoch: _savedEpoch, ...saved } = body;
+      const expected = body.state === 'active' ? { ...current, state: 'active', recordVersion: 1 } : current;
+      if (body.state === 'active') delete expected.retraction;
+      if (!isDeepStrictEqual(saved, expected)) throw new HttpError(409, 'This saved citation record has inconsistent evidence.');
+      const child = /^\/api\/revisions\/[DPL]\d+\/citation-evidence\/([^/]+)\/retract$/.exec(path);
+      const mismatch = () => new HttpError(409, 'This saved citation record does not match the original request.');
+      if (child) {
+        const input = record(mutationInput), retraction = record(body.retraction);
+        if (body.id !== child[1] || body.state !== 'retracted' || body.recordVersion !== Number(input?.expectedRecordVersion) + 1
+          || typeof input?.reason !== 'string' || retraction?.reason !== input.reason.trim() || record(retraction.attribution)?.principalId !== this.principal) throw mismatch();
+      } else {
+        const input = parseCitationEvidenceInput(mutationInput);
+        if (body.state !== 'active' || body.recordVersion !== 1 || body.versionId !== input.versionId || body.contentHash !== input.contentHash || record(body.target)?.id !== input.targetId
+          || !isDeepStrictEqual(body.source, input.source) || body.verdict !== input.verdict || body.quote !== input.quote || body.locator !== input.locator || body.note !== input.note
+          || record(body.attribution)?.principalId !== this.principal) throw mismatch();
+      }
+      // Keep the original receipt, including its historical state; only current
+      // authority and the permission epoch are refreshed on an exact retry.
+      return { status: response.status, body: { ...body, accessEpoch: this.policies.epoch() } };
+    }
     if (path.startsWith('/api/policies/') && target) return { status: response.status, body: this.describe(target.id) };
     if ((path === '/api/spaces' || path.startsWith('/api/spaces/')) && target) return { status: response.status, body: this.space(this.policies.getSpace(target.id, this.principal)) };
     if (/^\/api\/projects\/PROJ\d+\/workboard(?:\/|$)/.test(path)) {

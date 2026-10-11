@@ -36,6 +36,15 @@ test('escaped percentages do not hide genuine LaTeX references', () => {
   assert.equal(report.findings.filter(f => f.title === 'Unresolved reference').length, 1);
 });
 
+test('bibliography review uses the bounded snapshot inventory and never calls incomplete citations missing', () => {
+  const ignored = analyzeLocally('paper', [{ path: 'main.tex', content: '\\begin{abstract}Text\\end{abstract}\n\\verb|\\cite{ignore}|\n\\begin{verbatim}\\cite{ignore-too}\\end{verbatim}\n\\cite{known}' }, { path: 'refs.bib', content: '@book(known,title={Nested {title}})' }]);
+  assert.equal(ignored.findings.length, 0);
+  const incomplete = analyzeLocally('paper', [{ path: 'main.tex', content: '\\begin{abstract}Text\\end{abstract}\n\\cite{unresolved}' }, { path: 'refs.bib', content: '@book{broken,title={unterminated}' }]);
+  assert.equal(incomplete.findings.some(finding => finding.title === 'Unresolved citation'), false);
+  assert.ok(incomplete.findings.some(finding => finding.title === 'Bibliography inventory limitation'));
+  assert.match(incomplete.summary, /active TeX reachability/); assert.equal(incomplete.model, 'text-checks-v2');
+});
+
 test('drafting checks identify missing evidence without claiming legal analysis', () => {
   const report = analyzeLocally('document', [{ path: 'motion.md', content: 'The record establishes the claim. [citation needed]\nSubmitted on [date].' }]);
   assert.equal(report.findings.length, 2);

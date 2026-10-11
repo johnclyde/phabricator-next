@@ -3,8 +3,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { analyzeLocally } from '../shared/review.ts';
+import { analyzeCitations } from '../shared/citations.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
-import type { ActorAttribution, AppState, ReviewAnalysis, RevisionKind, SourceFile } from '../shared/types.ts';
+import type { ActorAttribution, AppState, ReviewAnalysis, RevisionKind, RevisionVersion, SourceFile } from '../shared/types.ts';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
 import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
@@ -214,6 +215,8 @@ export function createApp(options: AppOptions = {}): App {
     const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
     if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
     if (path.startsWith('/api/files') && !rawKey) throw new HttpError(400, 'File mutations require an Idempotency-Key.');
+    const citationEvidence = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+)\/retract)?$/.exec(path) : null;
+    if (citationEvidence && !rawKey) throw new HttpError(400, 'Citation evidence mutations require an Idempotency-Key.');
     let versionImportRepository: string | undefined;
     let scope: AuthScope = 'write';
     if (method === 'POST' && reviewMatch) {
@@ -228,7 +231,7 @@ export function createApp(options: AppOptions = {}): App {
     };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
     const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
-    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed);
+    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed, input);
     store.read(authorize);
     const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
     // Preserve legacy local retries, while every authenticated principal has a
@@ -300,6 +303,12 @@ export function createApp(options: AppOptions = {}): App {
         return store.mutate(key, fingerprint, () => ({ status: 201, body: store.saveReview(reviewMatch[1]!, expectedVersion, analysis, attribution) }), authorize, present);
       }
       return store.mutate(key, fingerprint, () => {
+        if (citationEvidence) {
+          const id = citationEvidence[1]!;
+          if (citationEvidence[2]) return { status: 200, body: store.citationEvidence.retract(id, citationEvidence[2], input, attribution) };
+          if (!input || typeof input !== 'object' || !('expectedAccessEpoch' in input) || input.expectedAccessEpoch !== policies.epoch()) throw new HttpError(409, 'Access changed since this source inspection. Reload access before recording it.', 'ACCESS_EPOCH_CHANGED');
+          return { status: 201, body: store.citationEvidence.create(id, input, attribution) };
+        }
         const assetWrite = method === 'POST' && (path === '/api/revisions' || /^\/api\/revisions\/[DPL]\d+\/versions$/.test(path)) && input !== null && typeof input === 'object' && 'assets' in input;
         const attachment = method === 'POST' ? /^\/api\/files\/(F\d+)\/attachments$/.exec(path) : null;
         if (assetWrite || (attachment && input !== null && typeof input === 'object' && 'mode' in input && input.mode === 'attach')) {
@@ -459,6 +468,29 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const citationInventory = /^\/api\/revisions\/([DPL]\d+)\/citations$/.exec(path);
+          if (citationInventory) {
+            const id = citationInventory[1]!; access.require(id);
+            if (url.searchParams.getAll('version').length !== 1 || [...url.searchParams.keys()].some(name => name !== 'version')) throw new HttpError(400, 'Citation inventory requires one exact version number.');
+            const rawVersion = url.searchParams.get('version')!;
+            if (!/^[1-9]\d*$/.test(rawVersion) || !Number.isSafeInteger(Number(rawVersion))) throw new HttpError(400, 'Select a positive version number.');
+            const row = store.database.prepare('SELECT data FROM versions WHERE revision_id = ? AND number = ?').get(id, Number(rawVersion)) as { data: string } | undefined;
+            if (!row) throw new HttpError(404, 'Citation source version was not found.', 'CITATION_VERSION_UNAVAILABLE');
+            const version = JSON.parse(row.data) as RevisionVersion;
+            send(res, 200, { revisionId: id, version: { id: version.id, number: version.number, contentHash: version.contentHash }, index: analyzeCitations(version.files), accessEpoch: policies.epoch() }); return;
+          }
+          const citationRecords = /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+))?$/.exec(path);
+          if (citationRecords) {
+            const id = citationRecords[1]!; access.require(id);
+            if (citationRecords[2]) {
+              if (url.search) throw new HttpError(400, 'Citation record reads do not accept query parameters.');
+              send(res, 200, { record: access.citationEvidence(id, citationRecords[2]), accessEpoch: policies.epoch() }); return;
+            }
+            const allowed = ['versionId', 'targetId', 'before', 'limit'];
+            if (url.searchParams.getAll('versionId').length !== 1 || [...url.searchParams.keys()].some(name => !allowed.includes(name) || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Citation evidence requires an exact versionId and supported paging parameters.');
+            const positive = (name: string) => { const value = url.searchParams.get(name); if (value !== null && (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) throw new HttpError(400, 'Invalid citation evidence page.'); return value === null ? undefined : Number(value); };
+            send(res, 200, { ...store.citationEvidence.list(id, { versionId: url.searchParams.get('versionId')!, ...(url.searchParams.has('targetId') ? { targetId: url.searchParams.get('targetId')! } : {}), before: positive('before'), limit: positive('limit') }, fileId => access.canView(fileId)), accessEpoch: policies.epoch() }); return;
+          }
           const uploadReceipt = /^\/api\/files\/uploads\/([A-Za-z0-9._:-]{1,200})$/.exec(path);
           if (uploadReceipt) {
             if (url.search) throw new HttpError(400, 'Upload receipts do not accept query parameters.');
