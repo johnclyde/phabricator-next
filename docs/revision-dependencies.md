@@ -42,8 +42,9 @@ count includes distinct transitive parents, traverses closed intermediates and
 excludes the current revision. Accepted revisions remain open under this
 application's manual closure model; the count never gates acceptance or closure.
 
-Each row shows current status, title and the original author recorded on version
-one, or "Not recorded" for unattributed historical data. Selecting a row highlights
+Each row shows current status, title and current author, or "Not recorded" when
+ownership is unknown. The selection also shows immutable original attribution
+from version one. Selecting a row highlights
 its traces and lists exact parent and child links. Trace lanes scroll separately
 on narrow screens. Following a revision link preserves its selected source version;
 the graph always describes current relationships and metadata.
@@ -51,7 +52,9 @@ the graph always describes current relationships and metadata.
 One database read snapshot supplies the graph, current source-head identities,
 relationship versions, authors and access epoch. The browser and CLI verify a
 canonical SHA256 before using it. A changed visible node, edge, source-head identity
-or access epoch changes the snapshot. Stored source hashes identify immutable
+or access epoch changes the snapshot. Format `phabricator.revision-stack.v2`
+includes current author, original author and ownership version; old v1 caches
+are retired. Stored source hashes identify immutable
 heads; reading Stack does not inspect or rehash manuscript contents. A snapshot
 hash grants no authority, and every server read checks current access.
 
@@ -172,10 +175,11 @@ loads the whole connected graph and counts open transitive parents. Its
 retains closed nodes and traverses topology before filtering handles. This native
 Stack intentionally tightens privacy by stopping at hidden nodes, rather than
 showing hidden placeholders or bridges. Equal-order rows use lexical IDs for
-determinism. Original attribution does not implement upstream mutable author
-ownership, author profile handles or commandeering.
+determinism. [Revision authorship](revision-authorship.md) separately implements
+mutable ownership, transfer history and commandeering; author profile handles
+remain unfinished.
 
 Configurable accepted-as-closed behavior, summary-derived "Depends on" parsing,
 revision PHIDs and Conduit edge/edit/query interoperability, notifications,
-formal authors/reviewers, and working-copy/landing orchestration remain gaps.
+reviewer assignments and their transfer effects, and working-copy/landing orchestration remain gaps.
 This dependency workflow does not establish full Differential parity.

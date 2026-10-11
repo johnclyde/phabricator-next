@@ -273,7 +273,8 @@ test('revoking object access during hosted review discards evidence and idempote
   const analysis: ReviewAnalysis = { provider: 'openai', model: 'test-model', summary: 'No longer authorized at commit.', findings: [] };
   const app = await start({ aiConfiguration: () => ({ configured: true, model: 'test-model' }), analyzeAI: async () => { started(); return result; } });
   try {
-    const revision = await app.create<RevisionDetail>('alice', '/api/revisions', paper);
+    // The reviewer is independent of the current author, whose automatic access survives object-rule changes.
+    const revision = await app.create<RevisionDetail>('bob', '/api/revisions', paper);
     const pending = app.request('alice', `/api/revisions/${revision.revision.id}/reviews`, 'POST', { provider: 'openai', expectedVersion: 1 }, { 'Idempotency-Key': 'policy-changed-during-ai' });
     await Promise.race([began, pending.then(response => { throw new Error(`Review ended with ${response.status} before invoking the provider.`); })]);
     await app.setPolicy('bob', revision.revision.id, { view: members(app.bob.id), edit: members(app.bob.id), interact: members(app.bob.id) });

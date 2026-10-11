@@ -129,7 +129,13 @@ test('retraction requires original author or current editor in addition to inter
     const saved = await app.request<RecordResponse>(route, 'POST', input, 'alice', 'author'); assert.equal(saved.status, 201);
     const retractRoute = `${route}/${saved.body.id}/retract`; const retraction = { expectedRecordVersion: 1, reason: 'Correct the interpretation' };
     assert.equal((await app.request(retractRoute, 'POST', retraction, 'bob', 'not-editor')).status, 403);
-    app.policy(id, { edit: workspace }); app.policy(id, { edit: members(app.bob.id) }, app.bob.id);
+    app.policy(id, { edit: workspace });
+    // The original evidence author must actually relinquish revision ownership:
+    // narrowing the edit audience alone does not remove an author's automatic edit.
+    const ownership = app.store.revisionAuthorship.snapshot(id);
+    const handoff = await app.request(`/api/revisions/${id}/authorship`, 'POST', { action: 'assign', authorId: app.bob.id, message: 'Transfer manuscript responsibility', expectedAuthorVersion: ownership.authorship.version, expectedVersion: ownership.head.number, expectedVersionId: ownership.head.versionId, expectedContentHash: ownership.head.contentHash, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'handoff-before-evidence-retraction');
+    assert.equal(handoff.status, 200);
+    app.policy(id, { edit: members(app.bob.id) }, app.bob.id);
     assert.equal(app.policies.access(id, app.alice.id).edit, false);
     assert.equal((await app.request(retractRoute, 'POST', retraction, 'alice', 'author-retract')).status, 200, 'original author need not be an editor');
     const second = await app.request<RecordResponse>(route, 'POST', { ...input, expectedAccessEpoch: app.policies.epoch() }, 'alice', 'second-author'); assert.equal(second.status, 201);

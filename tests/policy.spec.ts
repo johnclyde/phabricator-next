@@ -49,13 +49,27 @@ async function search(page: Page, value: string) {
 }
 
 async function createWiki(page: Page, title: string, content: string, spaceId = 'S1') {
+  // Password workspaces begin empty. Child creation needs a readable, editable root.
+  await page.evaluate(async ({ base }) => {
+    const session = await (await fetch(`${base}api/session`)).json();
+    const response = await fetch(`${base}api/wiki?path=%2F`, { headers: { 'X-Session-Context': session.sessionContext } }), root = await response.json();
+    if (!response.ok) throw new Error(JSON.stringify(root));
+    if (!root.document) {
+      const created = await fetch(`${base}api/documents`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-Context': session.sessionContext, 'X-CSRF-Token': session.csrfToken, 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ title: 'Policy test wiki root', slug: '/', content: 'Shared root for policy test documents.', access: { spaceId: 'S1' }, expectedAccessEpoch: root.accessEpoch }) });
+      if (!created.ok) throw new Error(await created.text());
+    }
+  }, { base });
+  const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === `${base}api/state`);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await (await refreshed).finished();
   await navigate(page, 'Phriction');
   await page.getByRole('button', { name: 'Create Document', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Space', { exact: true }).selectOption(spaceId);
   await dialog.getByLabel('Title', { exact: true }).fill(title);
-  await dialog.getByLabel('Document slug', { exact: true }).fill(`policy-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  await dialog.getByLabel('Document path', { exact: true }).fill(`policy-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await dialog.getByRole('textbox', { name: /^Content/ }).fill(content);
+  await dialog.getByRole('button', { name: 'Check Document Path', exact: true }).click();
+  await expect(dialog.getByText('This document can be created here.', { exact: true })).toBeVisible();
   await dialog.getByRole('button', { name: 'Create Document', exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.getByRole('heading', { level: 1 })).toContainText(title);
@@ -153,7 +167,7 @@ test('access controls share readable documents while gating wiki edits, source e
     await page.getByRole('button', { name: 'Edit Document', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('textbox', { name: /^Content/ }).fill('Second shared version.');
-    await dialog.getByRole('button', { name: 'Save Changes', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Save and Publish', exact: true }).click();
     await expect(dialog).not.toBeVisible();
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
     await restrictAccess(page, ['edit', 'interact']);
@@ -210,7 +224,7 @@ test('revoked wiki access sets unsaved work aside for export and discard without
     const editor = bob.page.getByRole('dialog');
     const unsaved = `Bob's unsent academic argument ${marker}.`;
     await editor.getByRole('textbox', { name: /^Content/ }).fill(unsaved);
-    await expect(editor).toContainText('Draft kept in this tab only');
+    await expect(editor).toContainText('Unsaved local changes stay on this device or in this tab.');
     const submissions: string[] = [];
     bob.page.on('request', request => {
       if (new URL(request.url()).pathname.startsWith(`${base}api/documents/${id}`) && ['PUT', 'POST', 'PATCH'].includes(request.method())) submissions.push(request.url());

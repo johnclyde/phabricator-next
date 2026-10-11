@@ -10,6 +10,7 @@ import { createApp } from '../server/app.ts';
 import { createAuth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
 import type { Audience, ObjectAccess } from '../shared/policy.ts';
+import type { RevisionAuthorshipSnapshot } from '../shared/revision-authorship.ts';
 import type { ApplySuggestionInput, RevisionDetail, ReviewComment } from '../shared/types.ts';
 
 type ErrorBody = { error: string; code?: string };
@@ -99,6 +100,13 @@ test('applying suggestions requires current edit and write authority while propo
     await app.create('alice', endpoint, input, 'protected-apply');
     const current = (await app.request<ObjectAccess>('alice', `/api/policies/${before.revision.id}`)).body.policy;
     assert.equal((await app.request('alice', `/api/policies/${before.revision.id}`, 'PUT', { expectedVersion: current.version, spaceId: 'S1', view: workspace, edit: workspace, interact: workspace })).status, 200);
+    const authorship = (await app.request<RevisionAuthorshipSnapshot>('alice', `${path}/authorship`)).body;
+    assert.equal((await app.request('alice', `${path}/authorship`, 'POST', {
+      action: 'assign', authorId: app.bob.id, message: 'Hand over the manuscript before access is revoked.',
+      expectedAuthorVersion: authorship.authorship.version, expectedVersion: authorship.head.number,
+      expectedVersionId: authorship.head.versionId, expectedContentHash: authorship.head.contentHash,
+      expectedAccessEpoch: authorship.accessEpoch,
+    }, 'handoff-before-apply-revocation')).status, 200);
     const transferable = (await app.request<ObjectAccess>('bob', `/api/policies/${before.revision.id}`)).body.policy;
     assert.equal((await app.request('bob', `/api/policies/${before.revision.id}`, 'PUT', { expectedVersion: transferable.version, spaceId: 'S1', view: selected(app.bob.id), edit: selected(app.bob.id), interact: selected(app.bob.id) })).status, 200);
     const denied = await app.request('alice', endpoint, 'POST', input, 'protected-apply');
@@ -137,7 +145,8 @@ test('suggestion application rechecks revocation after waiting for a SQLite writ
   const app = await start(databasePath); const transaction = app.store.transaction.bind(app.store);
   try {
     for (const phase of ['write', 'replay'] as const) {
-      const created = await app.create<RevisionDetail>('alice', '/api/revisions', createInput); const proposal = await app.suggest(created);
+      // Alice edits another author's manuscript, so removing her explicit access can revoke the operation.
+      const created = await app.create<RevisionDetail>('bob', '/api/revisions', createInput); const proposal = await app.suggest(created);
       const path = `/api/revisions/${created.revision.id}/suggestions/${proposal.id}/apply`; const input = app.input(created); const key = `suggestion-lock-${phase}`;
       let replay: { key: string; fingerprint: string; status: number; body: string; created_at: string } | undefined;
       if (phase === 'replay') {

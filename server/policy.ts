@@ -86,6 +86,11 @@ export class PolicyStore {
     return row ? JSON.parse(row.data) as Space : undefined;
   }
   private owner(id: string): string | null {
+    if (/^[DPL][1-9]\d*$/.test(id)) {
+      if (!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'revision_authorship'").get()) return null;
+      const row = this.database.prepare('SELECT author_id FROM revision_authorship WHERE revision_id = ?').get(id) as { author_id: unknown } | undefined;
+      return typeof row?.author_id === 'string' ? row.author_id : null;
+    }
     if (!/^(?:PA|T|F)[1-9]\d*$/.test(id)) return null;
     const row = this.database.prepare("SELECT CASE WHEN kind IN ('file','paste') THEN json_extract(data, '$.authorId') ELSE json_extract(data, '$.ownerId') END AS owner_id FROM entities WHERE id = ?").get(id) as { owner_id: unknown } | undefined;
     return typeof row?.owner_id === 'string' ? row.owner_id : null;
@@ -164,7 +169,7 @@ export class PolicyStore {
     const row = this.database.prepare("SELECT p.data, s.data AS space_data, e.kind AS entity_kind, CASE WHEN e.kind = 'revision' THEN e.data ELSE NULL END AS entity_data, CASE WHEN e.kind = 'task' THEN json_extract(e.data, '$.ownerId') WHEN e.kind IN ('file','paste') THEN json_extract(e.data, '$.authorId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
     if (!row) return undefined;
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
-    const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
+    const ownerId = row.entity_kind === 'revision' ? this.owner(id) : typeof row.owner_id === 'string' ? row.owner_id : null;
     try {
       const wiki = row.entity_kind === 'document' && this.hasWikiLocations();
       if (wiki && !this.wikiAncestorsVisible(id, principalId, traversal)) return undefined;
@@ -188,7 +193,7 @@ export class PolicyStore {
         if (!parent || parent.policy.kind !== 'project' || !graph.parentId) return undefined;
         return { policy: { ...parent.policy, objectId: id }, space: parent.space, capabilities: { ...parent.capabilities, managePolicy: false }, ownerId: null, parentId: graph.parentId, inheritedFrom: { projectId: graph.parentId, policyVersion: parent.policy.version } };
       }
-      let capabilities = effectiveAccess(policy, space, principalId, ownerId === principalId, this.projectMember(id, principalId), parent?.capabilities);
+      let capabilities = effectiveAccess(policy, space, principalId, ownerId === principalId ? row.entity_kind === 'revision' ? 'revision-author' : true : false, this.projectMember(id, principalId), parent?.capabilities);
       if (row.entity_kind === 'file' && !capabilities.view && spaceAccess(space, principalId).view) {
         for (const objectId of this.fileCandidates(id, traversal)) {
           if (this.resolved(objectId, principalId, new Set(seen), traversal)?.capabilities.view) { capabilities = { ...capabilities, view: true }; break; }
@@ -251,8 +256,8 @@ export class PolicyStore {
     const result = this.resolve(id, principalId);
     if (!result?.capabilities.view) throw notFound();
     const { policy, space, capabilities, ownerId, repositoryId, parentId, inheritedFrom, wiki } = result;
-    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId ? (id.startsWith('F') ? '; file author also has access' : id.startsWith('PA') ? '; paste author also has access' : '; task owner also has access') : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${repositoryId ? '; requires linked repository view access' : ''}${id.startsWith('F') && capability === 'view' ? '; viewers of explicitly attached objects also have access, within the File Space' : ''}${inheritedFrom ? '; inherited from parent project' : ''}`;
-    return { policy, capabilities, viewLabel: label('view') + (wiki ? '; requires view access to every existing ancestor document' : ''), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: id.startsWith('F') ? 'file-author' as const : id.startsWith('PA') ? 'paste-author' as const : 'task-owner' as const, principalId: ownerId } } : {}) };
+    const label = (capability: Capability) => `${audienceLabel(policy.rules[capability])}${ownerId && (!/^[DPL][1-9]\d{0,14}$/.test(id) || capability !== 'interact') ? (/^[DPL][1-9]\d{0,14}$/.test(id) ? '; revision author also has view and edit access' : id.startsWith('F') ? '; file author also has access' : id.startsWith('PA') ? '; paste author also has access' : '; task owner also has access') : policy.kind === 'project' && capability === 'view' ? '; project members also have access' : ''}${parentId ? capability === 'edit' ? '; parent project editors also have edit access' : capability === 'view' ? '; requires parent project view access' : '' : ''}${space.view.kind === 'workspace' ? '' : '; limited by Space access'}${capability === 'view' ? '' : '; requires object view access'}${repositoryId ? '; requires linked repository view access' : ''}${id.startsWith('F') && capability === 'view' ? '; viewers of explicitly attached objects also have access, within the File Space' : ''}${inheritedFrom ? '; inherited from parent project' : ''}`;
+    return { policy, capabilities, viewLabel: label('view') + (wiki ? '; requires view access to every existing ancestor document' : ''), editLabel: label('edit'), interactLabel: label('interact'), ...(inheritedFrom ? { inheritedFrom } : {}), ...(policy.kind === 'project' ? { joinLabel: `${audienceLabel(policy.rules.join)}; project editors also may join ordinary leaf projects; requires project and Space view access`, automatic: { kind: 'project-member' as const, ...(parentId ? { parentEditProjectId: parentId } : {}) } } : ownerId ? { automatic: { kind: /^[DPL][1-9]\d{0,14}$/.test(id) ? 'revision-author' as const : id.startsWith('F') ? 'file-author' as const : id.startsWith('PA') ? 'paste-author' as const : 'task-owner' as const, principalId: ownerId } } : {}) };
   }
   private audience(input: unknown): Audience {
     const data = object(input, ['kind', 'principalIds']);
@@ -325,7 +330,7 @@ export class PolicyStore {
       const space = this.destination(data.spaceId, principalId, current.spaceId);
       const base = { objectId: id, spaceId: space.id, version: this.version(current.version, data.expectedVersion) };
       const policy: ObjectPolicy = project ? { ...base, kind: 'project', rules: { view: this.projectAudience(data.view), edit: this.projectAudience(data.edit), interact: this.projectAudience(data.interact), join: data.join === undefined ? current.rules.join : this.projectAudience(data.join) } } : { ...base, rules: { view: this.audience(data.view), edit: this.audience(data.edit), interact: this.audience(data.interact) } };
-      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId, this.projectMember(id, principalId), graph?.parentId ? this.access(graph.parentId, principalId) : undefined));
+      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId ? /^[DPL][1-9]\d{0,14}$/.test(id) ? 'revision-author' : true : false, this.projectMember(id, principalId), graph?.parentId ? this.access(graph.parentId, principalId) : undefined));
       this.save(policy); return policy;
     });
   }
@@ -356,7 +361,7 @@ export class PolicyStore {
       const base = { objectId: id, spaceId: space.id, version: 1 };
       const wikiRules = wikiParent?.policy.kind === 'project' ? undefined : wikiParent?.policy.rules;
       const policy: ObjectPolicy = project ? { ...base, kind: 'project', rules: { view: data.view === undefined ? workspace() : this.projectAudience(data.view), edit: data.edit === undefined ? workspace() : this.projectAudience(data.edit), interact: data.interact === undefined ? workspace() : this.projectAudience(data.interact), join: data.join === undefined ? workspace() : this.projectAudience(data.join) } } : { ...base, rules: { view: data.view === undefined ? wikiRules?.view ?? workspace() : this.audience(data.view), edit: data.edit === undefined ? wikiRules?.edit ?? workspace() : this.audience(data.edit), interact: data.interact === undefined ? wikiRules?.interact ?? workspace() : this.audience(data.interact) } };
-      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId, this.projectMember(id, principalId), parent?.capabilities));
+      this.retain(effectiveAccess(policy, space, principalId, this.owner(id) === principalId ? /^[DPL][1-9]\d{0,14}$/.test(id) ? 'revision-author' : true : false, this.projectMember(id, principalId), parent?.capabilities));
       this.save(policy); return policy;
     });
   }

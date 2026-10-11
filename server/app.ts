@@ -29,6 +29,7 @@ import { canonicalWikiPath } from '../shared/wiki.ts';
 import { conduitRequest } from './conduit.ts';
 import { wikiDocumentQuery } from './wiki-query.ts';
 import { parseRevisionDependencyInput } from './store.ts';
+import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -143,7 +144,7 @@ export function createApp(options: AppOptions = {}): App {
   const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath });
   let auth: Auth;
-  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath }); }
+  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
   catch (error) { if (!options.store) store.close(); throw error; }
   if (options.seed !== false) seedDemo(store);
   const policies = new PolicyStore(store.database, { principalExists: id =>
@@ -277,6 +278,24 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const authorship = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/authorship$/.exec(path) : null;
+    if (authorship) {
+      auth.revalidate(context, 'write');
+      if (!rawKey) throw new HttpError(400, 'Authorship changes require an Idempotency-Key.');
+      let data;
+      try { data = revisionAuthorInput(input); } catch { throw new HttpError(400, 'Provide an exact author action, source identity, author version and access epoch.'); }
+      const id = authorship[1]!;
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      // This dedicated replay path can acknowledge a proved self-handoff after
+      // its author loses access. No other mutation bypasses current authority.
+      return store.mutate(key, fingerprint, () => {
+        const author = access.revisionAuthorTarget(id, data);
+        if (data.expectedAccessEpoch !== policies.epoch()) throw new HttpError(409, 'Access changed. Reload authorship before saving.', 'ACCESS_EPOCH_CHANGED');
+        return { status: 200, body: store.revisionAuthorship.mutate(id, data, actor, author) };
+      }, () => auth.revalidate(context, 'write'), response => access.presentRevisionAuthor(id, data, response));
+    }
     const reviewMatch = /^\/api\/revisions\/([DPL]\d+)\/reviews$/.exec(path);
     const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
@@ -639,6 +658,18 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const authorship = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/authorship(\/history)?$/.exec(path);
+          if (authorship) {
+            const id = authorship[1]!; access.require(id);
+            const allowed = authorship[2] ? ['before', 'limit', 'expectedAuthorVersion'] : [];
+            for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid revision authorship query.');
+            const parameter = (name: string): number | undefined => {
+              const raw = url.searchParams.get(name); if (raw === null) return undefined;
+              if (!(name === 'expectedAuthorVersion' ? /^(?:0|[1-9]\d*)$/ : /^[1-9]\d*$/).test(raw) || !Number.isSafeInteger(Number(raw))) throw new HttpError(400, 'Provide a valid authorship history cursor and limit.');
+              return Number(raw);
+            };
+            send(res, 200, authorship[2] ? access.revisionAuthorHistory(id, { before: parameter('before'), limit: parameter('limit'), expectedAuthorVersion: parameter('expectedAuthorVersion') }) : access.revisionAuthorship(id)); return;
+          }
           const stack = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies\/graph$/.exec(path);
           if (stack) {
             const id = stack[1]!; access.require(id);

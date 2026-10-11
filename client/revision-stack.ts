@@ -14,7 +14,7 @@ export function stackNarration(stack: RevisionStack, selected: string, summary =
   const parents = stack.edges.filter(edge => edge.childId === selected).map(edge => edge.parentId), children = stack.edges.filter(edge => edge.parentId === selected).map(edge => edge.childId);
   const links = (ids: string[]) => ids.length ? `${ids.slice(0, 12).join(', ')}${ids.length > 12 ? `, and ${ids.length - 12} more visible revisions` : ''}` : 'none visible';
   const lead = summary ? `Stack for ${stack.revisionId}: ${stack.nodes.length} visible revisions and ${stack.openParentIds.length} open transitive parents. This count is advisory. ` : '';
-  return `${lead}${node.id}: ${node.title.slice(0, 240)}. ${node.status.replaceAll('_', ' ')}. Original author: ${node.author?.displayName ?? 'not recorded'}. Direct parents: ${links(parents)}. Direct children: ${links(children)}.`;
+  return `${lead}${node.id}: ${node.title.slice(0, 240)}. ${node.status.replaceAll('_', ' ')}. Current author: ${node.author?.displayName ?? 'not recorded'}. Direct parents: ${links(parents)}. Direct children: ${links(children)}.`;
 }
 
 /** Verify every saved or fetched graph before rendering labels, links, or traces. */

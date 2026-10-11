@@ -49,9 +49,13 @@ async function start(options: AppOptions = {}) {
     const current = app.policies.policy(id, principal);
     return app.policies.setPolicy(id, { expectedVersion: current.version, spaceId: current.spaceId, ...current.rules, ...changes }, principal);
   }
+  function transferAuthor(id: string) {
+    const { authorship, head } = store.revisionAuthorship.snapshot(id);
+    store.revisionAuthorship.mutate(id, { action: 'assign', authorId: bob.id, expectedAuthorVersion: authorship.version, expectedVersion: head.number, expectedVersionId: head.versionId, expectedContentHash: head.contentHash, expectedAccessEpoch: app.policies.epoch(), message: 'Transfer before testing former-author privacy.' }, { principalId: alice.id, displayName: alice.displayName, credentialId: null, requestId: 'test-author-handoff' }, { principalId: bob.id, displayName: bob.displayName });
+  }
   const evidence = () => Object.fromEntries(['entities', 'versions', 'activity', 'object_policies', 'policy_meta', 'idempotency', 'sequences'].map(table => [table, store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
   let closed = false;
-  return { ...app, alice, bob, tokens, origin, request, policy, evidence, shutdown: app.close, close: async () => { if (closed) return; closed = true; await app.close(); store.close(); } };
+  return { ...app, alice, bob, tokens, origin, request, policy, transferAuthor, evidence, shutdown: app.close, close: async () => { if (closed) return; closed = true; await app.close(); store.close(); } };
 }
 
 test('Git imports atomically retain exact files, modes, attribution, source rules and Space, with immutable provenance across restart', async () => {
@@ -66,7 +70,7 @@ test('Git imports atomically retain exact files, modes, attribution, source rule
     assert.deepEqual(version.files, source); assert.equal(version.contentHash, contentHash(source)); assert.deepEqual(version.gitSource, snapshot().provenance);
     assert.equal(version.attribution?.principalId, app.alice.id); assert.equal(detail.activity[0]?.attribution?.principalId, app.alice.id);
     assert.deepEqual(detail.access!.policy.rules, policy.rules); assert.equal(detail.access!.policy.spaceId, space.id); assert.match(detail.access!.viewLabel, /linked repository view/);
-    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 24);
+    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 25);
     const raw = app.store.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id);
     await app.close(); const reopened = createStore({ path });
     try { assert.deepEqual(reopened.detail(detail.revision.id).versions[0], version); assert.deepEqual(reopened.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id), raw); } finally { reopened.close(); }
@@ -128,6 +132,7 @@ test('a saved import retries without Git but checks created revision authority a
     const stored = app.store.database.prepare('SELECT body FROM idempotency').all();
     const replay = await app.request<RevisionDetail>(route, 'POST', input(), 'alice', 'stable-import'); assert.equal(replay.status, 201); assert.equal(calls, 1); assert.deepEqual(replay.body.versions, first.body.versions);
     assert.equal((await app.request(route, 'POST', input('Changed'), 'alice', 'stable-import')).status, 409); assert.equal(calls, 1);
+    app.transferAuthor(first.body.revision.id);
     app.policy(first.body.revision.id, { view: members(app.bob.id), edit: members(app.bob.id) });
     const hidden = await app.request(route, 'POST', input(), 'alice', 'stable-import'); assert.equal(hidden.status, 404); assert.equal(hidden.body.code, 'REVISION_REFERENCE_UNAVAILABLE'); assert.equal((await app.request('/api/repositories/R1')).status, 200);
     app.policy(first.body.revision.id, { view: workspace }); assert.equal((await app.request(route, 'POST', input(), 'alice', 'stable-import')).status, 403);
@@ -240,6 +245,7 @@ test('competing writer revocation blocks fresh Git imports and newly visible sav
       let protectedId = 'R1';
       if (phase === 'replay') {
         const created = await app.request<RevisionDetail>(route, 'POST', body, 'alice', key); assert.equal(created.status, 201); protectedId = created.body.revision.id;
+        app.transferAuthor(protectedId);
         replay = app.store.database.prepare('SELECT * FROM idempotency ORDER BY created_at DESC LIMIT 1').get() as typeof replay; assert.ok(replay);
         app.store.database.prepare('DELETE FROM idempotency WHERE key = ?').run(replay.key);
       }

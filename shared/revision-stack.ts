@@ -1,12 +1,15 @@
 import { isRevisionId, type RevisionDependencyReference } from './revision-dependencies';
+import { isRevisionAuthor, type RevisionAuthor } from './revision-authorship';
 
-export const REVISION_STACK_FORMAT = 'phabricator.revision-stack.v1' as const;
+export const REVISION_STACK_FORMAT = 'phabricator.revision-stack.v2' as const;
 export const REVISION_STACK_LIMITS = { nodes: 1_000, edges: 5_000, scannedEdges: 50_000, candidates: 10_000, bytes: 2 * 1024 * 1024 } as const;
 export interface RevisionStackNode extends RevisionDependencyReference {
   relationshipVersion: number;
   head: { versionId: string; number: number; contentHash: string };
-  /** Original recorded author, not a current owner or assigned reviewer. */
-  author: { principalId: string | null; displayName: string } | null;
+  /** Mutable ownership and immutable original source attribution are distinct. */
+  author: RevisionAuthor | null;
+  originalAuthor: RevisionAuthor | null;
+  authorVersion: number;
 }
 export interface RevisionStackEdge { childId: string; parentId: string }
 export interface RevisionStack {
@@ -58,7 +61,8 @@ export function canonicalRevisionStack(stack: RevisionStackContent | RevisionSta
     format: stack.format, revisionId: stack.revisionId, accessEpoch: stack.accessEpoch,
     nodes: stack.nodes.map(node => ({ id: node.id, title: node.title, kind: node.kind, status: node.status, currentVersion: node.currentVersion, updatedAt: node.updatedAt,
       relationshipVersion: node.relationshipVersion, head: { versionId: node.head.versionId, number: node.head.number, contentHash: node.head.contentHash },
-      author: node.author === null ? null : { principalId: node.author.principalId, displayName: node.author.displayName } })),
+      author: node.author === null ? null : { principalId: node.author.principalId, displayName: node.author.displayName },
+      originalAuthor: node.originalAuthor === null ? null : { principalId: node.originalAuthor.principalId, displayName: node.originalAuthor.displayName }, authorVersion: node.authorVersion })),
     edges: stack.edges.map(edge => ({ childId: edge.childId, parentId: edge.parentId })), openParentIds: [...stack.openParentIds],
   });
 }
@@ -76,13 +80,12 @@ export function isRevisionStack(value: unknown, revisionId?: string): value is R
     || !integer(value.accessEpoch) || !isRevisionStackId(value.snapshotId) || !Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > REVISION_STACK_LIMITS.nodes
     || !Array.isArray(value.edges) || value.edges.length > REVISION_STACK_LIMITS.edges || !Array.isArray(value.openParentIds) || value.openParentIds.length > value.nodes.length) return false;
   for (const node of value.nodes) {
-    if (!record(node) || !exactKeys(node, ['id', 'title', 'kind', 'status', 'currentVersion', 'updatedAt', 'relationshipVersion', 'head', 'author'])
+    if (!record(node) || !exactKeys(node, ['id', 'title', 'kind', 'status', 'currentVersion', 'updatedAt', 'relationshipVersion', 'head', 'author', 'originalAuthor', 'authorVersion'])
       || !isRevisionId(node.id) || !text(node.title, 1_000) || typeof node.kind !== 'string' || !['code', 'paper', 'document'].includes(node.kind)
       || typeof node.status !== 'string' || !['draft', 'needs_review', 'changes_requested', 'accepted', 'closed'].includes(node.status) || !integer(node.currentVersion, 1) || !integer(node.relationshipVersion)
       || !text(node.updatedAt, 64) || !Number.isFinite(Date.parse(node.updatedAt)) || !record(node.head) || !exactKeys(node.head, ['versionId', 'number', 'contentHash'])
       || !text(node.head.versionId, 240) || node.head.number !== node.currentVersion || !isRevisionStackId(node.head.contentHash)) return false;
-    if (node.author !== null && (!record(node.author) || !exactKeys(node.author, ['principalId', 'displayName']) || !text(node.author.displayName, 240)
-      || !(node.author.principalId === null || typeof node.author.principalId === 'string' && /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(node.author.principalId)))) return false;
+    if (!integer(node.authorVersion) || node.author !== null && !isRevisionAuthor(node.author) || node.originalAuthor !== null && !isRevisionAuthor(node.originalAuthor)) return false;
   }
   for (let index = 0; index < value.edges.length; index++) {
     const edge = value.edges[index], previous = value.edges[index - 1];

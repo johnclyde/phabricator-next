@@ -10,6 +10,7 @@ import { createApp } from '../server/app.ts';
 import { createAuth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
 import type { Audience, ObjectAccess } from '../shared/policy.ts';
+import type { RevisionAuthorshipSnapshot } from '../shared/revision-authorship.ts';
 import type { RevisionDetail, ReviewComment, ReviewThread } from '../shared/types.ts';
 
 type ErrorBody = { error: string; code?: string };
@@ -107,8 +108,15 @@ test('thread replies require interact and write scope, resolution requires edit,
     assert.equal((await app.request('bob', replies, 'POST', reply, 'protected-reply')).status, 403);
     const stateBody = { status: 'resolved', expectedThreadVersion: 2, versionId };
     assert.equal((await app.request('alice', state, 'PATCH', stateBody, 'protected-state')).status, 200);
-    // Another current editor may remove the first writer's access; creators have no bypass.
+    // Transfer current authorship before revoking the former author's explicit access.
     await app.restrict(created.revision.id, { edit: workspace, interact: workspace });
+    const authorship = (await app.request<RevisionAuthorshipSnapshot>('alice', `${path}/authorship`)).body;
+    assert.equal((await app.request('alice', `${path}/authorship`, 'POST', {
+      action: 'assign', authorId: app.bob.id, message: 'Hand over responsibility for this discussion.',
+      expectedAuthorVersion: authorship.authorship.version, expectedVersion: authorship.head.number,
+      expectedVersionId: authorship.head.versionId, expectedContentHash: authorship.head.contentHash,
+      expectedAccessEpoch: authorship.accessEpoch,
+    }, 'handoff-before-thread-revocation')).status, 200);
     const policy = (await app.request<ObjectAccess>('bob', `/api/policies/${created.revision.id}`)).body.policy;
     const changed = await app.request('bob', `/api/policies/${created.revision.id}`, 'PUT', { expectedVersion: policy.version, spaceId: policy.spaceId, view: selected(app.bob.id), edit: selected(app.bob.id), interact: selected(app.bob.id) });
     assert.equal(changed.status, 200);

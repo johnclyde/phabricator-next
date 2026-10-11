@@ -14,7 +14,9 @@ Ordinary object and Space rules permit either workspace members or an explicit l
 | Join Project | Join an ordinary leaf project when its join rule allows; editors may join automatically; requires view |
 | Manage Space | Change Space settings and its view/manage rules; does not grant edit access to its contents |
 
-Task owners automatically have view, edit and interact access, including policy editing, subject to their Space's view rule. This is upstream Maniphest behavior. Assignment can therefore grant or remove access even when explicit object rules are unchanged; it advances the workspace access epoch. Authorship and task subscription preferences grant no access.
+Task owners automatically have view, edit and interact access, including policy editing, subject to their Space's view rule. This is upstream Maniphest behavior. Assignment can therefore grant or remove access even when explicit object rules are unchanged; it advances the workspace access epoch. Task authorship and subscription preferences grant no access.
+
+Current revision authors automatically have view and edit access, including policy editing, within their Space, linked repository and historical source File visibility requirements. They receive no automatic interact permission. Transferring authorship advances the access epoch and can remove the previous author's access. Immutable source attribution alone grants no access after a transfer. See [revision authorship](revision-authorship.md), including its narrow content-free confirmation for an author's own access-losing handoff.
 
 A revision linked to a repository also requires current view access to that repository and its Space. This applies to all revision capabilities, every historical version, discussion, review evidence, exports and saved retry responses. Missing or malformed repository dependencies deny access. It applies to existing manually linked revisions as well as Git imports. Editing an imported version does not remove the dependency. A revision's own rules can further restrict access, but cannot bypass the repository rule.
 
@@ -53,7 +55,7 @@ Authenticated content and drafts remain in tab memory. Export work before sign-o
 - Project creation and policy updates additionally support `join`; older policy updates which omit it preserve the current join rule. `{ "kind": "project-members" }` applies only to the containing project, never to a Space or another object.
 - Audiences use `{ "kind": "workspace" }` or `{ "kind": "principals", "principalIds": ["stable-account-id"] }`.
 
-Schema 4 migration is transactional and preserves existing content, versions and replay records. It does not fabricate ownership. Older binaries must refuse this schema. Back up the database before upgrading. Before activating password mode, local-only member grants require an explicit terminal handoff to an enabled account; see [authentication](authentication.md). Local task ownership, active project membership and local principals in project join rules also require an explicit handoff before password activation. This preserves selected-member privacy; there is no administrator or creator bypass.
+Schema 4 migration is transactional and preserves existing content, versions and replay records. It does not fabricate ownership. Older binaries must refuse this schema. Back up the database before upgrading. Before activating password mode, local-only member grants require an explicit terminal handoff to an enabled account; see [authentication](authentication.md). Local task and current revision ownership, active project membership and local principals in project join rules also require an explicit handoff before password activation. This preserves selected-member privacy; there is no administrator or creator bypass.
 
 ## Remaining parity
 

@@ -1,6 +1,8 @@
 import type { AuthContext } from '../shared/auth.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { revisionDependencyInputHash } from './revision-dependencies.ts';
+import { type RevisionAuthorInput, type RevisionAuthorshipSnapshot, type RevisionAuthorHistory } from '../shared/revision-authorship.ts';
+import { revisionAuthorInputHash } from './revision-authorship.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
@@ -58,6 +60,42 @@ export class AccessLayer {
   revision(id: string): RevisionDetail {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  revisionAuthorship(id: string): RevisionAuthorshipSnapshot {
+    this.require(id);
+    return { ...this.store.revisionAuthorship.snapshot(id), access: this.describe(id), accessEpoch: this.policies.epoch() };
+  }
+  revisionAuthorHistory(id: string, query: { before?: number; limit?: number; expectedAuthorVersion?: number }): RevisionAuthorHistory {
+    this.require(id);
+    return { ...this.store.revisionAuthorship.history(id, query), accessEpoch: this.policies.epoch() };
+  }
+  revisionAuthorTarget(id: string, input: RevisionAuthorInput): { principalId: string; displayName: string } {
+    this.require(id, 'edit');
+    const principalId = input.action === 'commandeer' ? this.principal : input.authorId;
+    this.principalReference(principalId);
+    return { principalId, displayName: principalId === this.principal ? this.context.displayName : this.auth.listAccounts().find(account => account.id === principalId)!.displayName };
+  }
+  /** Only a proven original self-handoff may be acknowledged after losing access.
+   * Stored source or current revision metadata are never loaded for this path. */
+  presentRevisionAuthor(id: string, input: RevisionAuthorInput, response: MutationResponse): MutationResponse {
+    const invalid = (): never => { throw new HttpError(409, 'This saved authorship receipt does not match the requested operation.', 'REVISION_AUTHOR_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.revisionAuthorship.operationRevisionId(body.operationId) !== id) return invalid();
+      operation = this.store.revisionAuthorship.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.attribution.principalId !== this.principal
+      || operation.inputSha256 !== revisionAuthorInputHash(input) || !isDeepStrictEqual(operation.input, input)
+      || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    const capabilities = this.policies.access(id, this.principal);
+    if (!capabilities.view || !capabilities.edit) {
+      const transaction = operation.receipt.transaction;
+      if (input.action !== 'assign' || transaction.previousAuthor?.principalId !== this.principal || transaction.author.principalId === this.principal) this.require(id, 'edit');
+      return { status: 200, body: { revisionId: id, operationId: operation.id, inputSha256: operation.inputSha256, saved: true, accessLost: true, accessEpoch: this.policies.epoch() } };
+    }
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   pastes(query: PasteListQuery): PastePage { return { ...this.store.pastes.list(query, id => this.canView(id)), accessEpoch: this.policies.epoch() }; }
   paste(id: string): PasteDetail { this.require(id); return { ...this.store.pastes.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() }; }

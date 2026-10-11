@@ -10,6 +10,7 @@ import { canonicalRevisionStack, REVISION_STACK_LIMITS } from '../shared/revisio
 import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
 import { RevisionStackStore } from './revision-stack.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
+import { initializeRevisionAuthorship, RevisionAuthorshipStore } from './revision-authorship.ts';
 
 const alice: ActorAttribution = { principalId: 'alice', displayName: 'Original Alice', credentialId: 'credential-1', requestId: 'request-1' };
 const bob: ActorAttribution = { principalId: 'bob', displayName: 'Later Bob', credentialId: 'credential-2', requestId: 'request-2' };
@@ -19,8 +20,11 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
   const db = new DatabaseSync(path);
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA user_version=24;
     CREATE TABLE entities(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)));
+    CREATE TABLE policy_meta(name TEXT PRIMARY KEY,value INTEGER NOT NULL); INSERT INTO policy_meta VALUES('epoch',1);
     CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),UNIQUE(revision_id,number));`);
   initializeRevisionDependencies(db);
+  initializeRevisionAuthorship(db);
+  const authorship = new RevisionAuthorshipStore(db);
   const reader = new RevisionStackStore(db), dependencies = new RevisionDependencyStore(db);
   const version = (id: string, number = 1, attribution: ActorAttribution | undefined = alice, content = 'Original source\n') => {
     const files = [{ path: 'source.txt', content }];
@@ -30,11 +34,11 @@ function fixture(ids = ['D1', 'D2', 'D3', 'D4', 'P1', 'L1'], path = ':memory:') 
   };
   const entity = (id: string, attribution: ActorAttribution | undefined = alice) => {
     const value: Revision = { id, title: `Title ${id}`, summary: 'Original summary', kind: id.startsWith('P') ? 'paper' : id.startsWith('L') ? 'document' : 'code', status: 'needs_review', repositoryId: null, projectId: null, currentVersion: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-    db.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'revision',?)").run(id, JSON.stringify(value)); version(id, 1, attribution); return value;
+    db.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'revision',?)").run(id, JSON.stringify(value)); version(id, 1, attribution); authorship.ensure(id); return value;
   };
   for (const id of ids) entity(id);
   const mutate = (id: string, add: string[], remove: string[] = []) => dependencies.mutate(id, { direction: 'parents', add, remove, expectedRelationshipVersion: dependencies.version(id), expectedAccessEpoch: 1 }, alice);
-  const snapshot = () => ({ schema: db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY name").all(), rows: Object.fromEntries(['entities', 'versions', 'revision_dependency_versions', 'revision_dependency_edges', 'revision_dependency_operations', 'revision_dependency_transactions'].map(table => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()])), version: db.prepare('PRAGMA user_version').get() });
+  const snapshot = () => ({ schema: db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY name").all(), rows: Object.fromEntries(['entities', 'versions', 'revision_dependency_versions', 'revision_dependency_edges', 'revision_dependency_operations', 'revision_dependency_transactions', 'revision_authorship', 'revision_author_transactions', 'revision_author_operations'].map(table => [table, db.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all()])), version: db.prepare('PRAGMA user_version').get() });
   // Large boundary fixtures seed only edges; they do not fabricate source bodies
   // or run tens of thousands of mutation requests just to exercise read budgets.
   const seedEdges = (edges: [string, string][]) => {
@@ -92,10 +96,12 @@ test('hidden intermediates stop traversal without placeholder topology, hidden c
   } finally { f.close(); }
 });
 
-test('authors come from version one only, with null for legacy absence and no credential or request disclosure', () => {
+test('original attribution comes from version one, with null for legacy absence and no credential or request disclosure', () => {
   const f = fixture(); try {
     const head = f.version('D1', 2, bob, 'New source'); f.mutate('D1', ['P1']);
     f.db.prepare("UPDATE versions SET data=json_remove(data,'$.attribution') WHERE revision_id='P1' AND number=1").run();
+    // Establish the legacy baseline after constructing its unattributed source.
+    f.db.prepare("DELETE FROM revision_authorship WHERE revision_id='P1'").run(); initializeRevisionAuthorship(f.db);
     const stack = f.reader.read('D1', visible, 1), root = stack.nodes.find(node => node.id === 'D1')!;
     assert.deepEqual(root.author, { principalId: 'alice', displayName: 'Original Alice' }); assert.deepEqual(root.head, { versionId: head.id, number: 2, contentHash: head.contentHash });
     assert.equal(stack.nodes.find(node => node.id === 'P1')!.author, null);
@@ -113,7 +119,9 @@ test('snapshot pins cover exact heads, transitive relationships, node metadata, 
     const rootRelationship = f.dependencies.version('D1'); f.mutate('P1', ['L1']); check(); assert.equal(f.dependencies.version('D1'), rootRelationship);
     f.title('L1', 'Changed distant title'); check(); f.status('P1', 'closed'); check();
     f.version('L1', 2, bob, 'Later source'); check();
-    f.db.prepare("UPDATE versions SET data=json_set(data,'$.attribution.displayName','Historical Author') WHERE revision_id='L1' AND number=1").run(); check();
+    const ownership = new RevisionAuthorshipStore(f.db), context = ownership.snapshot('L1');
+    ownership.mutate('L1', { action: 'assign', authorId: bob.principalId, expectedAuthorVersion: context.authorship.version, expectedVersion: context.head.number, expectedVersionId: context.head.versionId, expectedContentHash: context.head.contentHash, expectedAccessEpoch: 1, message: 'Handoff' }, alice, { principalId: bob.principalId, displayName: bob.displayName }); check();
+    const handed = previous.nodes.find(node => node.id === 'L1')!; assert.equal(handed.author?.principalId, bob.principalId); assert.equal(handed.originalAuthor?.principalId, alice.principalId); assert.equal(handed.authorVersion, 1);
     const nextEpoch = f.reader.read('D1', visible, 2); assert.notEqual(nextEpoch.snapshotId, previous.snapshotId);
     assert.throws(() => f.reader.read('D1', visible, 2, previous.snapshotId), { code: 'REVISION_STACK_CHANGED' });
     assert.notEqual(f.reader.read('D1', id => id !== 'L1', 1).snapshotId, previous.snapshotId);
@@ -192,12 +200,11 @@ test('canonical UTF-8 payloads admit exactly 2 MiB and fail one byte above witho
   try {
     f.seedEdges(ids.slice(0, -1).map((id, i) => [id, ids[i + 1]!]));
     const expected = f.reader.read('D1', visible, 1);
-    for (const node of expected.nodes) { node.title = 'a'.repeat(240); node.author!.displayName = 'a'.repeat(240); }
+    for (const node of expected.nodes) node.title = 'a'.repeat(1000);
     let remaining = REVISION_STACK_LIMITS.bytes - Buffer.byteLength(canonicalRevisionStack(expected)); assert.ok(remaining > 0);
     const fill = (value: string) => Array.from(value, char => { if (remaining >= 5) { remaining -= 5; return '\u0001'; } if (remaining > 0) { remaining--; return '\u0080'; } return char; }).join('');
     for (const node of expected.nodes) {
-      node.title = fill(node.title); node.author!.displayName = fill(node.author!.displayName);
-      f.title(node.id, node.title); f.db.prepare("UPDATE versions SET data=json_set(data,'$.attribution.displayName',?) WHERE revision_id=? AND number=1").run(node.author!.displayName, node.id);
+      node.title = fill(node.title); f.title(node.id, node.title);
     }
     assert.equal(remaining, 0); assert.equal(Buffer.byteLength(canonicalRevisionStack(expected)), REVISION_STACK_LIMITS.bytes);
     const exact = f.reader.read('D1', visible, 1); assert.equal(Buffer.byteLength(canonicalRevisionStack(exact)), REVISION_STACK_LIMITS.bytes); assert.equal(exact.snapshotId, sha(canonicalRevisionStack(expected)));
