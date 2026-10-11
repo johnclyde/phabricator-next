@@ -1,10 +1,16 @@
 import { isGitObjectId, isGitPath } from '../shared/repositories';
 
-export interface RepositorySelection { commitId: string; path: string; view: 'tree' | 'file' | 'history'; historyFrom?: 'tree' | 'file' }
+export interface RepositorySelection { commitId: string; path: string; view: 'tree' | 'file' | 'history' | 'changes'; historyFrom?: 'tree' | 'file'; baseCommitId?: string | null; beforePath?: string | null; afterPath?: string | null }
 export function repositorySelection(value: unknown): RepositorySelection | null {
   if (!value || typeof value !== 'object') return null;
   const item = value as Record<string, unknown>;
-  if (typeof item.commitId !== 'string' || !isGitObjectId(item.commitId) || typeof item.path !== 'string' || !isGitPath(item.path) || !['tree', 'file', 'history'].includes(String(item.view)) || typeof item.view !== 'string') return null;
+  if (typeof item.commitId !== 'string' || !isGitObjectId(item.commitId) || typeof item.path !== 'string' || !isGitPath(item.path) || !['tree', 'file', 'history', 'changes'].includes(String(item.view)) || typeof item.view !== 'string') return null;
+  if (item.view === 'changes') {
+    if (item.baseCommitId !== null && (typeof item.baseCommitId !== 'string' || !isGitObjectId(item.baseCommitId) || item.baseCommitId.length !== item.commitId.length)) return null;
+    for (const key of ['beforePath', 'afterPath']) if (item[key] !== null && item[key] !== undefined && (typeof item[key] !== 'string' || !item[key] || !isGitPath(item[key]))) return null;
+    if (item.baseCommitId === null && item.beforePath != null) return null;
+    return { commitId: item.commitId, path: '', view: 'changes', baseCommitId: item.baseCommitId, beforePath: item.beforePath as string | null ?? null, afterPath: item.afterPath as string | null ?? null };
+  }
   if (item.historyFrom !== undefined && item.historyFrom !== 'tree' && item.historyFrom !== 'file') return null;
   return { commitId: item.commitId, path: item.path, view: item.view as RepositorySelection['view'], ...(item.view === 'history' && item.historyFrom ? { historyFrom: item.historyFrom } : {}) };
 }

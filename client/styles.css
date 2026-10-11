@@ -547,6 +547,35 @@
 }
 .repository-detail { grid-template-columns: minmax(0, 1fr); }
 .repository-detail > .panel { min-width: 0; }
+.repository-comparison { min-width: 0; }
+.repository-comparison-controls,.repository-selected-change { padding: 16px; }
+.repository-comparison-controls form { display:flex; flex-wrap:wrap; gap:12px; align-items:end; }
+.repository-comparison-controls .field { flex:1 1 280px; margin:0; min-width:0; }
+.repository-comparison-controls .small-actions { align-items:end; margin-top:12px; }
+.repository-comparison-pair { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; }
+.repository-comparison-pair code,.repository-selected-change h3 { overflow-wrap:anywhere; }
+.repository-change-list { max-height:360px; overflow:auto; border-bottom:1px solid var(--border); }
+.repository-change-row { display:flex; align-items:center; gap:12px; width:100%; min-height:48px; padding:12px 16px; border:0; border-bottom:1px solid var(--border); background:white; text-align:left; color:var(--text); }
+.repository-change-row:hover,.repository-change-row.selected { background:#edf5fb; }
+.repository-change-row strong { flex:1; min-width:0; overflow-wrap:anywhere; }
+.repository-change-row small { color:var(--muted); }
+.repository-change-status { font-size:11px; min-width:65px; color:#516678; }
+.repository-change-status.added { color:#216b3a; }.repository-change-status.deleted { color:#a52b35; }
+.repository-change-navigation { display:flex; justify-content:space-between; gap:8px; align-items:center; font-size:12px; }
+.repository-comparison-sides { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:12px 0; }
+.repository-comparison-side { padding:12px; border:1px solid var(--border); background:#f7f9fb; font-size:12px; min-width:0; }
+.repository-comparison-side h4 { margin:0 0 8px; }.repository-comparison-side code { display:block; overflow-wrap:anywhere; }
+.repository-literal-comparison { margin:12px 0; min-width:0; }.repository-literal-comparison .diff-scroll { max-height:70vh; }
+@media(max-width:700px) {
+  .repository-comparison-controls form { flex-direction:column; align-items:stretch; }
+  .repository-comparison-controls .field { flex-basis:auto; width:100%; }
+  .repository-comparison-controls .small-actions { flex-wrap:wrap; }
+  .repository-comparison-controls input,.repository-comparison-controls select { min-height:44px; }
+  .repository-comparison-sides { grid-template-columns:minmax(0,1fr); }
+  .repository-change-row { flex-wrap:wrap; gap:6px 10px; }
+  .repository-change-row strong { flex-basis:calc(100% - 90px); }
+  .repository-change-row small { flex-basis:100%; padding-left:75px; }
+}
 
 .repository-import{scroll-margin-top:112px}.repository-import fieldset{border:0;padding:0;margin:0;min-width:0}.repository-import-actions{display:flex;flex-wrap:wrap;gap:8px}.repository-import .repository-commit-id{display:block}.git-provenance{margin-bottom:18px}.git-provenance dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 16px}.git-provenance dd{margin:0;overflow-wrap:anywhere}.git-provenance summary{cursor:pointer;min-height:44px;display:flex;align-items:center}.git-provenance li{display:flex;flex-wrap:wrap;gap:8px;padding:8px 0;overflow-wrap:anywhere}.git-provenance li code:last-child{width:100%;font-size:11px;color:var(--muted)}
 @media(max-width:700px){.repository-import .button,.repository-import input,.repository-import select{min-height:44px}.repository-import-actions{flex-direction:column}.repository-commit .panel-heading{flex-wrap:wrap}.git-provenance dl{grid-template-columns:minmax(0,1fr);gap:4px}.git-provenance dd{margin-bottom:8px}}

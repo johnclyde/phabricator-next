@@ -7,6 +7,9 @@ export const GIT_LIMITS = Object.freeze({
   historyDefault: 25, historyPage: 100, historyOffset: 100_000,
   messageBytes: 16_000, pathLength: 4_096, timeoutMs: 10_000,
   concurrency: 4, queued: 16,
+  comparisonEntries: 2_000, comparisonChanges: 1_000,
+  comparisonBlobBytes: 8 * 1024 * 1024, comparisonSourceBytes: 64 * 1024 * 1024,
+  comparisonCandidates: 1_000, comparisonCandidatePairs: 250_000,
 });
 export type GitObjectFormat = 'sha1' | 'sha256';
 export function isGitObjectId(value: string, format?: GitObjectFormat): boolean {
@@ -31,6 +34,18 @@ interface GitBlobIdentity extends GitResponse { commitId: string; path: string; 
 export type GitBlob = GitBlobIdentity & ({ state: 'text'; content: string; size: number } | { state: 'binary' | 'oversized' | 'unsupported_encoding' | 'symlink'; size: number } | { state: 'submodule'; size: null });
 export interface GitHistoryQuery { commit: string; path?: string; after?: number; limit?: number }
 export interface GitHistory extends GitResponse { commitId: string; path: string; commits: GitCommit[]; nextAfter: number | null }
+
+export interface GitComparisonQuery { base: string | null; target: string }
+export interface GitComparisonFileQuery extends GitComparisonQuery { beforePath: string | null; afterPath: string | null }
+export interface GitComparisonEntry { path: string; objectId: string; mode: string; type: GitEntryType; size: number | null }
+export type GitComparisonStatus = 'added' | 'deleted' | 'modified' | 'type_changed' | 'renamed' | 'copied';
+export interface GitComparisonChange { id: string; status: GitComparisonStatus; similarity: number | null; before: GitComparisonEntry | null; after: GitComparisonEntry | null }
+export interface GitComparisonIdentity extends GitResponse { baseCommit: GitCommit | null; targetCommit: GitCommit; baseTreeId: string; targetTreeId: string }
+/** Complete changed-path inventory, or an explicit failure; no truncated inventories. */
+export interface GitComparison extends GitComparisonIdentity { algorithm: 'git-M50-C50'; changes: GitComparisonChange[] }
+export type GitComparisonSide = GitBlob | (GitBlobIdentity & { state: 'tree'; size: null });
+/** Both sides belong to this exact inventory entry; null means absent, never binary. */
+export interface GitComparisonFile extends GitComparisonIdentity { change: GitComparisonChange; before: GitComparisonSide | null; after: GitComparisonSide | null }
 
 /** Original Git identity of a complete imported text tree, never inherited by edited versions. */
 export interface GitSourceProvenance {

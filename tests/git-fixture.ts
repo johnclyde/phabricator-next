@@ -105,3 +105,40 @@ export async function createGitFixture(objectFormat: 'sha1' | 'sha256' = 'sha1')
     };
   } catch (error) { await rm(root, { recursive: true, force: true }); throw error; }
 }
+
+/** Independent comparison pair; ordinary browse fixtures do not pay its setup cost. */
+export async function createGitComparisonFixture(fixture: GitFixture): Promise<{ base: string; target: string }> {
+  const blob = async (content: string | Buffer) => (await fixture.git(['hash-object', '-w', '--stdin'], content)).trim();
+  const lines = Array.from({ length: 40 }, (_, index) => `Line ${index}: stable content for similarity detection.\n`).join('');
+  const copyLines = Array.from({ length: 40 }, (_, index) => `Copy source ${index}: distinct content for copy detection.\n`).join('');
+  const oldText = await blob(lines), copySource = await blob(copyLines), empty = await blob('');
+  const oldEntries = [
+    `100644 blob ${oldText}\trename-before.txt\0`,
+    `100644 blob ${copySource}\tcopy-source.txt\0`,
+    `100644 blob ${await blob('#!/bin/sh\nexit 0\n')}\texecutable.sh\0`,
+    `100644 blob ${await blob('delete me\n')}\tdeleted.txt\0`,
+    `100644 blob ${await blob('old file type\n')}\ttype-change\0`,
+    `100644 blob ${empty}\tempty.txt\0`,
+    `100644 blob ${await blob('directory replaced\n')}\tto-directory\0`,
+  ];
+  const childTree = (await fixture.git(['mktree', '-z'], `100644 blob ${await blob('nested content\n')}\tchild.txt\0`)).trim();
+  const newEntries = [
+    `100644 blob ${await blob(lines.replace('Line 20:', 'Updated 20:'))}\trename-after.txt\0`,
+    `100644 blob ${await blob(copyLines.replace('Copy source 20:', 'Updated source 20:'))}\tcopy-source.txt\0`,
+    `100644 blob ${copySource}\tcopy-result.txt\0`,
+    oldEntries[2]!.replace('100644', '100755'),
+    `120000 blob ${await blob('copy-source.txt')}\ttype-change\0`,
+    `100644 blob ${empty}\tempty-added.txt\0`,
+    `040000 tree ${childTree}\tto-directory\0`,
+    `100644 blob ${await blob(Buffer.from([1, 0, 2]))}\tbinary.dat\0`,
+    `100644 blob ${await blob(Buffer.from([0xc0, 0xaf]))}\tinvalid.txt\0`,
+    `100644 blob ${await blob('x'.repeat(256_001))}\toversized.txt\0`,
+    `160000 commit ${fixture.base}\tmodule\0`,
+    `100644 blob ${await blob('\ufeffLiteral exact source.\r\n')}\t:(literal) unicode 研究\tname.txt\0`,
+  ];
+  const make = async (entries: string[], parent?: string) => {
+    const tree = (await fixture.git(['mktree', '-z'], entries.join(''))).trim();
+    return (await fixture.git(['commit-tree', tree, ...(parent ? ['-p', parent] : [])], 'Comparison fixture\n')).trim();
+  };
+  const base = await make(oldEntries); return { base, target: await make(newEntries, base) };
+}

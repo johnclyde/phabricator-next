@@ -58,6 +58,88 @@ Responses include a current `accessEpoch` and are served with `Cache-Control: no
 
 Repository browsing is read-only. It never changes Git objects or references, and viewing source does not create review evidence. Repository hosting, clone/fetch orchestration, SSH or HTTP serving, push policy, commit-record import, commit review and blame remain separate work. Explicit source import into a revision is described below.
 
+## Compare exact committed trees
+
+**Show Commit Changes** opens the pinned commit against its first parent. An
+initial commit uses an explicit empty tree. The comparison shows both complete
+commit IDs; select another merge parent, enter a different exact base/target,
+or swap two commits explicitly. Refreshing branches never changes this pair.
+Merge parents are individual comparisons, not a combined merge diff. Equal,
+reverse and unrelated commit pairs are supported. This is a source comparison,
+not a branch reachability or commit-range history report.
+
+The inventory includes additions, deletions, modified paths, mode/type changes,
+renames and copies, with both paths, modes, object types and IDs. Directory
+changes are explicit, including empty trees and file-to-directory transitions;
+their changed children remain separate entries. Git's 50% rename/copy heuristic
+aligns paths (`-M50% -C50%`). Similarity is an inference from the installed Git
+implementation, not an identity recorded in a commit. Copies from unchanged
+files are not exhaustively detected; `--find-copies-harder` is not used.
+
+Select a changed path to load its exact sides and a literal line comparison.
+An absent side and an existing empty file are distinct. BOMs, CRLF and missing
+final newlines are preserved. Binary, invalid UTF-8, oversized, symlink, gitlink
+and directory sides have explicit states. Links and submodules are never
+followed, fetched or executed. Nontext sides are never substituted with empty
+strings. The browser compares text locally within the existing deterministic
+display budgets; a limit shows an explicit message and links to exact source.
+Viewing a comparison creates no review, acceptance or AI evidence.
+
+These native read endpoints use the existing repository/session/Space checks
+before and after asynchronous Git work, with current access epochs and
+`Cache-Control: no-store`:
+
+| Endpoint | Meaning |
+| --- | --- |
+| `GET /api/repositories/R1/compare?base=<full-id-or-empty>&target=<full-id>` | Complete bounded inventory for an explicit ordered pair. |
+| `GET /api/repositories/R1/compare/file?base=<full-id-or-empty>&target=<full-id>&beforePath=<path>&afterPath=<path>` | Exact sides of one inventory entry. Omit a path only when that side is absent. |
+
+No default base is chosen by the API. `empty` selects a synthetic empty tree
+whose ID is computed for the repository's hash format without writing an
+object. Both commit selectors otherwise require complete lowercase IDs of the
+same object format. Duplicate/unknown parameters and empty supplied paths fail.
+The file endpoint recomputes the bounded inventory and requires the exact
+before/after path tuple; it cannot invent a rename between arbitrary files.
+Responses include `baseCommit`, `targetCommit`, `baseTreeId`, `targetTreeId`
+and repository identity. Each change has a pair-bound ID, status, optional
+similarity score and exact `before`/`after` metadata. File responses bind both
+source states to that entry and ordered pair.
+
+The observer verifies raw tree and admitted blob hashes before invoking Git's
+fixed diff operation with external diff, text conversion and submodule
+traversal disabled. It reuses one operation deadline and queue permit. Limits
+are 2,000 examined tree entries, 1,000 changes, 1,000 source/destination
+candidates, 250,000 candidate pairs, 8 MiB per changed blob and 64 MiB across
+changed sides. The inventory contains no file bodies. The normal 256,000-byte
+text preview limit applies to each selected side, and serialized responses are
+bounded to 2 MB. Exceeding traversal, source, heuristic, result or time budgets
+fails the whole operation; results are never silently truncated and rename
+detection is never silently disabled. Large changed blobs beyond the admission
+limit remain readable through the existing metadata/blob workflow, but their
+full comparison is explicitly unavailable.
+
+Visited comparison inventories and selected source pairs share the repository's
+16-entry/2 MB cache. Local mode can reopen those exact pairs offline; password
+mode retains them only in the verified tab. Pair/path, response identities,
+current epoch and session lifetime are checked before displaying or retaining
+source. Selecting another pair or path retires earlier responses. Access loss
+removes visible and cached comparison source through the repository boundary.
+
+The CLI exposes the same explicit read:
+
+```sh
+npm run arc -- compare-commits R1 --base BASE_ID --commit TARGET_ID
+npm run arc -- compare-commits R1 --base BASE_ID --commit TARGET_ID \
+  --before-path old/paper.tex --after-path paper.tex
+npm run arc -- compare-commits R1 --base empty --commit TARGET_ID --json
+```
+
+Omit both path options to list changes. Use the listed path tuple for a selected
+change, omitting an absent side. Each invocation makes one read, never follows a
+branch or chooses a newer base, and works with a read-only token. Human output
+escapes terminal controls; `--json` preserves the bounded exact source response.
+This does not change the CLI's separate review-creation `diff` command.
+
 ## Import a complete text tree into review
 
 From a pinned repository snapshot, explicitly import the entire commit as a new code, paper or document review. The browser asks for the kind and title; the CLI equivalent is:
@@ -103,11 +185,12 @@ The browser retains each submitted request, its base pins and key independently 
 
 ## Upstream correspondence and verification
 
-These are the GIT-01/P303a browsing, P303b initial import and P303c later-version import subsets, based on Phabricator `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`:
+These are the GIT-01/P303a browsing, P303b initial import, P303c later-version import and P303d committed-tree comparison subsets, based on Phabricator `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`:
 
 - [Browse queries](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionBrowseQueryConduitAPIMethod.php) identify a commit and path and distinguish trees, files and submodules. Our API requires an explicit full commit and reads exact tree objects; directory pagination and upstream deleted-path recovery remain gaps.
 - [Git file content](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/filecontent/DiffusionGitFileContentQuery.php) reads the blob at a commit/path. Our adapter verifies raw object hashes and exposes bounded UTF-8 content with explicit unsupported states.
 - [History queries](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionHistoryQueryConduitAPIMethod.php) use commit/path, offset/limit and parent relationships. Our initial history supports one exact starting commit and optional literal path. Two-commit ranges, direct/child change details and imported commit metadata remain gaps.
+- [Git raw diff](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/rawdiff/DiffusionGitRawDiffQuery.php) compares explicit trees with rename/copy detection, using the first parent or empty tree by default. P303d exposes this source-comparison behavior through native inventory and selected-file endpoints. It does not implement `diffusion.rawdiffquery`'s temporary File response, `diffusion.diffquery`'s last-modification selection, or the [Compare controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/controller/DiffusionCompareController.php)'s branch reachability report. Unlike upstream's commit UI, the native inventory includes directory entries. Combined merge diffs, patch export, exhaustive copy discovery and Conduit wire compatibility remain gaps.
 - [Differential diff creation](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/conduit/DifferentialCreateDiffConduitAPIMethod.php) records repository/VCS/base provenance. Our import records a complete immutable text-tree snapshot. It does not reproduce working-copy ranges, hunk/changeset submission or upstream Conduit request formats.
 - [Differential revision updates](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/conduit/DifferentialUpdateRevisionConduitAPIMethod.php) require an editable revision and visible diff. Our later-version import similarly requires target edit and source view access, and adds exact version/hash checks. The upstream [update transaction](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/xaction/DifferentialRevisionUpdateTransaction.php) can change the repository with the active diff and conditionally retain acceptance. Our repository link stays fixed and every new version invalidates acceptance. These are deliberate differences. Published/closed revision states and upstream diff publication remain separate parity work.
 

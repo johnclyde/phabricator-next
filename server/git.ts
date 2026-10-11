@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
-import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry } from '../shared/repositories.ts';
+import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry, GitComparison, GitComparisonFile, GitComparisonQuery, GitComparisonFileQuery, GitComparisonEntry, GitComparisonChange, GitComparisonSide } from '../shared/repositories.ts';
 import type { SourceFile } from '../shared/types.ts';
 import { files, HttpError } from './validation.ts';
 
@@ -15,6 +15,8 @@ export interface GitObserver {
   tree(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitTree>;
   blob(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitBlob>;
   history(repositoryId: string, query: GitHistoryQuery, signal?: AbortSignal): Promise<GitHistory>;
+  compare(repositoryId: string, query: GitComparisonQuery, signal?: AbortSignal): Promise<GitComparison>;
+  compareFile(repositoryId: string, query: GitComparisonFileQuery, signal?: AbortSignal): Promise<GitComparisonFile>;
   importSnapshot(repositoryId: string, commit: string, signal?: AbortSignal): Promise<GitImportSnapshot>;
 }
 
@@ -74,14 +76,14 @@ const gitOptions = [
   '-c', 'maintenance.auto=false', '-c', 'core.commitGraph=false', '-c', 'core.multiPackIndex=false',
 ];
 
-function run(args: string[], signal: AbortSignal): Promise<{ data: Buffer; code: number | null }> {
+function run(args: string[], signal: AbortSignal, maximum: number = GIT_LIMITS.outputBytes): Promise<{ data: Buffer; code: number | null }> {
   checkAbort(signal);
   return new Promise((resolve, reject) => {
     const child = spawn('git', [...gitOptions, ...args], { cwd: '/', env: environment, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let failure: HttpError | undefined; let size = 0; let errorSize = 0; const chunks: Buffer[] = [];
     const stop = (error: HttpError) => { failure ??= error; child.kill('SIGKILL'); };
     const cancel = () => stop(aborted()); signal.addEventListener('abort', cancel, { once: true });
-    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > GIT_LIMITS.outputBytes) stop(limit()); else if (!failure) chunks.push(chunk); });
+    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maximum) stop(limit()); else if (!failure) chunks.push(chunk); });
     // Diagnostics can contain operator paths, URLs and credentials. Discard them.
     child.stderr.on('data', (chunk: Buffer) => { errorSize += chunk.length; if (errorSize > 32_000) stop(limit()); });
     child.once('error', () => { failure ??= unavailable(); });
@@ -161,15 +163,15 @@ async function inspectRepository(path: string, signal: AbortSignal): Promise<Rep
   } catch (error) { if (error instanceof HttpError) throw error; throw unavailable(); }
 }
 
-async function command(repository: RepositoryHandle, args: string[]): Promise<Buffer> {
-  const result = await run(['--git-dir', repository.path, ...args], repository.signal);
+async function command(repository: RepositoryHandle, args: string[], maximum: number = GIT_LIMITS.outputBytes): Promise<Buffer> {
+  const result = await run(['--git-dir', repository.path, ...args], repository.signal, maximum);
   if (result.code !== 0) throw missing();
   return result.data;
 }
 
-async function rawObject(repository: RepositoryHandle, id: string, type: 'commit' | 'tree' | 'blob' | 'tag'): Promise<Buffer> {
+async function rawObject(repository: RepositoryHandle, id: string, type: 'commit' | 'tree' | 'blob' | 'tag', maximum: number = GIT_LIMITS.outputBytes): Promise<Buffer> {
   if (!isGitObjectId(id, repository.format)) throw invalid();
-  const data = await command(repository, ['cat-file', type, id]);
+  const data = await command(repository, ['cat-file', type, id], maximum);
   const actual = createHash(repository.format).update(`${type} ${data.length}\0`).update(data).digest('hex');
   if (actual !== id) throw corrupt();
   return data;
@@ -239,6 +241,116 @@ async function objectSize(repository: RepositoryHandle, id: string): Promise<num
   const text = (await command(repository, ['cat-file', '-s', id])).toString('ascii').trim();
   if (!/^\d+$/.test(text)) throw missing(); const size = Number(text);
   if (!Number.isSafeInteger(size)) throw limit(); return size;
+}
+
+type ChangedEntries = Map<string, { before: GitComparisonEntry | null; after: GitComparisonEntry | null }>;
+function comparisonQuery(query: GitComparisonQuery): void {
+  if(!query || typeof query!=='object' || (query.base!==null&&(typeof query.base!=='string'||!isGitObjectId(query.base))) || typeof query.target!=='string'||!isGitObjectId(query.target))throw invalid();
+}
+async function changedEntries(repository:RepositoryHandle,beforeTree:string|null,afterTree:string):Promise<ChangedEntries> {
+  const changed:ChangedEntries=new Map(),pending=[{before:beforeTree,after:afterTree as string|null,path:''}];let count=0;
+  while(pending.length){
+    checkAbort(repository.signal);const pair=pending.pop()!;if(pair.before===pair.after&&pair.path!=='')continue;
+    const before=pair.before?await readTree(repository,pair.before,pair.path):[],after=pair.before===pair.after?before:pair.after?await readTree(repository,pair.after,pair.path):[];
+    count+=before.length+after.length;if(count>GIT_LIMITS.comparisonEntries)throw limit();
+    const left=new Map(before.map(entry=>[entry.name,entry])),right=new Map(after.map(entry=>[entry.name,entry]));
+    for(const name of [...new Set([...left.keys(),...right.keys()])].sort()){
+      const old=left.get(name)??null,next=right.get(name)??null;
+      if(old?.objectId===next?.objectId&&old?.mode===next?.mode)continue;
+      const path=(old??next)!.path;
+      const entry=(value:GitTreeEntry|null):GitComparisonEntry|null=>value?{path:value.path,objectId:value.objectId,mode:value.mode,type:value.type,size:null}:null;
+      changed.set(path,{before:entry(old),after:entry(next)});if(changed.size>GIT_LIMITS.comparisonChanges)throw limit();
+      if(old?.type==='tree'||next?.type==='tree')pending.push({before:old?.type==='tree'?old.objectId:null,after:next?.type==='tree'?next.objectId:null,path});
+    }
+  }
+  return changed;
+}
+async function preflightComparison(repository:RepositoryHandle,entries:ChangedEntries):Promise<void> {
+  const sizes=new Map<string,number>();let bytes=0,sources=0,destinations=0;
+  for(const pair of entries.values()){
+    for(const [side,entry]of [['before',pair.before],['after',pair.after]]as const){
+      checkAbort(repository.signal);if(!entry||entry.type==='tree'||entry.type==='submodule')continue;
+      if(side==='before')sources++;else if(!pair.before||pair.before.type!==entry.type)destinations++;
+      if(sources>GIT_LIMITS.comparisonCandidates||destinations>GIT_LIMITS.comparisonCandidates||sources*destinations>GIT_LIMITS.comparisonCandidatePairs)throw limit();
+      let size=sizes.get(entry.objectId);
+      if(size===undefined){
+        size=await objectSize(repository,entry.objectId);if(size>GIT_LIMITS.comparisonBlobBytes||bytes+size>GIT_LIMITS.comparisonSourceBytes)throw limit();
+        // Verify every source admitted to heuristic matching, without retaining
+        // bodies in the inventory or trusting Git's object filename alone.
+        const data=await rawObject(repository,entry.objectId,'blob',GIT_LIMITS.comparisonBlobBytes);if(data.length!==size)throw corrupt();sizes.set(entry.objectId,size);
+      }
+      bytes+=size;if(bytes>GIT_LIMITS.comparisonSourceBytes)throw limit();entry.size=size;
+    }
+  }
+}
+function comparisonChange(repositoryId:string,query:GitComparisonQuery,status:GitComparisonChange['status'],similarity:number|null,before:GitComparisonEntry|null,after:GitComparisonEntry|null):GitComparisonChange {
+  const id=createHash('sha256').update(JSON.stringify(['git-comparison-v1',repositoryId,query.base,query.target,status,similarity,before,after])).digest('hex');
+  return {id,status,similarity,before,after};
+}
+function parseComparison(repositoryId:string,query:GitComparisonQuery,repository:RepositoryHandle,data:Buffer,entries:ChangedEntries):GitComparisonChange[] {
+  const fields=utf8(data).split('\0');if(fields.pop()!=='')throw corrupt();
+  const changes:GitComparisonChange[]=[],oldCovered=new Set<string>(),newCovered=new Set<string>(),identities=new Set<string>();
+  let index=0;
+  while(index<fields.length){
+    const header=/^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]+) ([0-9a-f]+) ([AMDTRC])([0-9]*)$/.exec(fields[index++]!);if(!header)throw corrupt();
+    const oldMode=header[1]!,newMode=header[2]!,oldId=header[3]!,newId=header[4]!,code=header[5]!,score=header[6]!;
+    const path=fields[index++],second=code==='R'||code==='C'?fields[index++]:path;
+    if(!path||!second||!isGitPath(path)||!isGitPath(second))throw corrupt();
+    const before=oldMode==='000000'?null:entries.get(path)?.before??null,after=newMode==='000000'?null:entries.get(second)?.after??null;
+    const valid=(entry:GitComparisonEntry|null,mode:string,id:string)=>mode==='000000'?entry===null&&id==='0'.repeat(repository.format==='sha1'?40:64):!!entry&&entry.mode===mode&&entry.objectId===id;
+    if(!valid(before,oldMode!,oldId!)||!valid(after,newMode!,newId!))throw corrupt();
+    if((code==='A'&&(before!==null||after===null))||(code==='D'&&(before===null||after!==null))||(!['A','D'].includes(code!)&&(!before||!after)))throw corrupt();
+    const similarity=score?Number(score):null;
+    if((code==='R'||code==='C')?(similarity===null||similarity<0||similarity>100):similarity!==null)throw corrupt();
+    if(after&&newCovered.has(after.path))throw corrupt();if(before)oldCovered.add(before.path);if(after)newCovered.add(after.path);
+    const status=({A:'added',D:'deleted',M:'modified',T:'type_changed',R:'renamed',C:'copied'}as const)[code as 'A'|'D'|'M'|'T'|'R'|'C'];
+    const change=comparisonChange(repositoryId,query,status,similarity,before,after);if(identities.has(change.id))throw corrupt();identities.add(change.id);changes.push(change);
+    if(changes.length>GIT_LIMITS.comparisonChanges*2)throw limit();
+  }
+  // Git may infer moves/copies, but every changed source and destination must
+  // remain accounted for. A partial parser result is never a successful diff.
+  for(const [path,pair]of entries)if((pair.before&&!oldCovered.has(path))||(pair.after&&!newCovered.has(path)))throw corrupt();
+  // Git emits file↔directory transitions as two records. Combine only an
+  // actual deletion/addition at the same path; inferred moves retain their
+  // distinct identities and descendants retain their own changed entries.
+  const additions=new Map(changes.filter(change=>change.status==='added').map(change=>[change.after!.path,change]));
+  const removed=new Set<GitComparisonChange>();
+  for(const change of changes){
+    if(change.status!=='deleted')continue;
+    const addition=additions.get(change.before!.path);
+    if(addition&&change.before!.type!==addition.after!.type){
+      removed.add(change);removed.add(addition);
+      changes.push(comparisonChange(repositoryId,query,'type_changed',null,change.before,addition.after));
+    }
+  }
+  const complete=changes.filter(change=>!removed.has(change));
+  if(complete.length>GIT_LIMITS.comparisonChanges)throw limit();return complete;
+}
+async function readComparison(repositoryId:string,query:GitComparisonQuery,repository:RepositoryHandle):Promise<GitComparison> {
+  const targetCommit=await readCommit(repository,query.target),baseCommit=query.base?await readCommit(repository,query.base):null;
+  const baseTreeId=baseCommit?.treeId??createHash(repository.format).update('tree 0\0').digest('hex'),targetTreeId=targetCommit.treeId;
+  const entries=await changedEntries(repository,baseCommit?.treeId??null,targetTreeId);await preflightComparison(repository,entries);
+  let changes:GitComparisonChange[];
+  if(query.base===null)changes=[...entries.values()].map(pair=>comparisonChange(repositoryId,query,'added',null,null,pair.after));
+  else if(!entries.size)changes=[];
+  else {
+    const raw=await command(repository,['diff-tree','--raw','-z','-r','-t','--no-commit-id','--no-abbrev','--no-ext-diff','--no-textconv','--no-color','--diff-algorithm=myers','--submodule=short','--ignore-submodules=none','-M50%','-C50%',`-l${GIT_LIMITS.comparisonCandidates}`,baseTreeId,targetTreeId,'--']);
+    changes=parseComparison(repositoryId,query,repository,raw,entries);
+  }
+  changes.sort((left,right)=>{const a=left.after?.path??left.before!.path,b=right.after?.path??right.before!.path;return a<b?-1:a>b?1:left.id<right.id?-1:left.id>right.id?1:0;});
+  const result:GitComparison={repositoryId,objectFormat:repository.format,baseCommit,targetCommit,baseTreeId,targetTreeId,algorithm:'git-M50-C50',changes};
+  if(Buffer.byteLength(JSON.stringify(result))>GIT_LIMITS.outputBytes)throw limit();return result;
+}
+async function comparisonSide(repositoryId:string,commitId:string,entry:GitComparisonEntry,repository:RepositoryHandle):Promise<GitComparisonSide> {
+  const identity={repositoryId,objectFormat:repository.format,commitId,path:entry.path,objectId:entry.objectId,mode:entry.mode};
+  if(entry.type==='tree')return {...identity,state:'tree',size:null};
+  if(entry.type==='submodule')return {...identity,state:'submodule',size:null};
+  const data=await rawObject(repository,entry.objectId,'blob',GIT_LIMITS.comparisonBlobBytes);if(data.length!==entry.size)throw corrupt();
+  const common={...identity,size:data.length};
+  if(entry.type==='symlink')return {...common,state:'symlink'};
+  if(data.length>GIT_LIMITS.blobBytes)return {...common,state:'oversized'};
+  if(data.includes(0))return {...common,state:'binary'};
+  try{return {...common,state:'text',content:new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(data)};}catch{return {...common,state:'unsupported_encoding'};}
 }
 
 class LocalGitObserver implements GitObserver {
@@ -339,6 +451,20 @@ class LocalGitObserver implements GitObserver {
         commits.push(commit);
       }
       return { repositoryId: id, objectFormat: repository.format, commitId: query.commit, path, commits, nextAfter: identifiers.length > page ? after + page : null };
+    });
+  }
+  async compare(id:string,query:GitComparisonQuery,signal?:AbortSignal):Promise<GitComparison> {
+    comparisonQuery(query);return this.observe(id,signal,repository=>readComparison(id,query,repository));
+  }
+  async compareFile(id:string,query:GitComparisonFileQuery,signal?:AbortSignal):Promise<GitComparisonFile> {
+    comparisonQuery(query);
+    if((query.beforePath!==null&&(typeof query.beforePath!=='string'||!query.beforePath||!isGitPath(query.beforePath)))||(query.afterPath!==null&&(typeof query.afterPath!=='string'||!query.afterPath||!isGitPath(query.afterPath)))||(query.beforePath===null&&query.afterPath===null)||(query.base===null&&query.beforePath!==null))throw invalid();
+    return this.observe(id,signal,async repository=>{
+      const comparison=await readComparison(id,query,repository),change=comparison.changes.find(item=>(item.before?.path??null)===query.beforePath&&(item.after?.path??null)===query.afterPath);
+      if(!change)throw missing();
+      const before=change.before?await comparisonSide(id,query.base!,change.before,repository):null,after=change.after?await comparisonSide(id,query.target,change.after,repository):null;
+      const {changes:_changes,algorithm:_algorithm,...identity}=comparison;const result:GitComparisonFile={...identity,change,before,after};
+      if(Buffer.byteLength(JSON.stringify(result))>GIT_LIMITS.outputBytes)throw limit();return result;
     });
   }
   async importSnapshot(id: string, commit: string, signal?: AbortSignal): Promise<GitImportSnapshot> {

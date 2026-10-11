@@ -28,7 +28,7 @@ type ErrorBody = { error: string; code?: string };
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function observer(importSnapshot: GitObserver['importSnapshot'] = async () => snapshot()): GitObserver {
   const unavailable = async (): Promise<never> => { throw new HttpError(503, 'Fixture read unavailable.', 'GIT_UNAVAILABLE'); };
-  return { importSnapshot, info: async () => ({ state: 'ready', objectFormat: 'sha1' }), refs: unavailable, commit: unavailable, tree: unavailable, blob: unavailable, history: unavailable };
+  return { importSnapshot, info: async () => ({ state: 'ready', objectFormat: 'sha1' }), refs: unavailable, commit: unavailable, tree: unavailable, blob: unavailable, history: unavailable, compare: unavailable, compareFile: unavailable };
 }
 async function start(options: AppOptions = {}) {
   const store = createStore({ path: options.databasePath ?? ':memory:' });

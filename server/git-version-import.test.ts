@@ -28,7 +28,7 @@ type ErrorBody = { error: string; code?: string };
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function observer(importSnapshot: GitObserver['importSnapshot'] = async (_id, commit) => snapshot(commit)): GitObserver {
   const unavailable = async (): Promise<never> => { throw new HttpError(503, 'Fixture read unavailable.', 'GIT_UNAVAILABLE'); };
-  return { importSnapshot, info: async () => ({ state: 'ready', objectFormat: 'sha1' }), refs: unavailable, commit: unavailable, tree: unavailable, blob: unavailable, history: unavailable };
+  return { importSnapshot, info: async () => ({ state: 'ready', objectFormat: 'sha1' }), refs: unavailable, commit: unavailable, tree: unavailable, blob: unavailable, history: unavailable, compare: unavailable, compareFile: unavailable };
 }
 function input(detail: RevisionDetail, commit = commitId): GitVersionImportInput {
   const version = detail.versions.find(item => item.number === detail.revision.currentVersion)!;

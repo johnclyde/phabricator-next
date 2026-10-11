@@ -20,6 +20,7 @@ import { pasteCommand } from './pastes';
 import { docxCommand } from './docx';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
+import { gitComparisonCommand } from './git-comparison';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -34,6 +35,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- refs R1 [--json]
   npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
   npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
+  npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
   npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--project ID|NAME] [--request-id KEY] [--json]
   npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
@@ -161,6 +163,10 @@ the raw source. A receipt may be historical and is not a fresh editing base.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; Git landing/patching is planned.
+compare-commits reads an explicit ordered commit pair. Omit file paths for the
+complete change inventory; supply the listed before/after paths for one change.
+An absent side is omitted, distinct from an existing empty file. Rename/copy
+similarity is Git's inference; comparisons do not create review evidence.
 `;
 
 function terminalText(value: string, multiline = false): string {
@@ -205,6 +211,7 @@ async function main() {
       joined: { type: 'boolean' }, watching: { type: 'boolean' },
       'show-hidden': { type: 'boolean' },
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
+      base: { type: 'string' }, 'before-path': { type: 'string' }, 'after-path': { type: 'string' },
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
@@ -265,6 +272,7 @@ async function main() {
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiWriteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await gitComparisonCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

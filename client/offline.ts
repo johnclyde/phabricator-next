@@ -424,7 +424,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const docxRequest = /^\/api\/revisions(?:\/[DPL]\d+)?\/docx(?:[/?]|$)/.test(path);
     const pasteRequest = /^\/api\/pastes(?:[/?]|$)/.test(path);
     const wikiRequest = /^\/api\/(?:wiki(?:[/?]|$)|documents(?:[/?]|$))/.test(path);
-    const taskRequest = wikiRequest || /^\/api\/revisions\/L\d+$/.test(path) || docxRequest || pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
+    const repositoryRequest = !options && /^\/api\/repositories\/R\d+(?:[/?]|$)/.test(path);
+    const taskRequest = repositoryRequest || wikiRequest || /^\/api\/revisions\/L\d+$/.test(path) || docxRequest || pasteRequest || citationRequest || Boolean(childParent) || /^\/api\/files(?:[/?]|$)/.test(path) || /^\/api\/(?:tasks\/T|projects\/PROJ)\d+(?:[/?]|$)/.test(path);
     if ((options || docxRequest || pasteRequest || citationRequest || path.startsWith('/api/files')) && taskRequest && session.accessEpoch < 0) {
       // Cached task controls may render before startup's state read completes. Verify
       // access before sending a write so that first verification cannot invalidate
@@ -479,7 +480,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (objectId && session.unavailableObjects.has(session.revisionRepositories.get(objectId) || '')) { invalidateObjects([objectId]); throw unavailable(); }
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
       if (relatedGenerations.some(({ id, generation }) => session.unavailableObjects.has(id) || (session.objectGenerations.get(id) || 0) !== generation)) throw referenceUnavailable();
-      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${citationRequest ? 'Citation evidence' : path.startsWith('/api/files') ? 'File' : path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
+      if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${repositoryRequest ? 'Repository' : citationRequest ? 'Citation evidence' : path.startsWith('/api/files') ? 'File' : path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
     };
     const controller = new AbortController();
     session.controllers.add(controller);
