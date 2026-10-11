@@ -14,6 +14,7 @@ import { applySuggestedReplacement, validateSuggestion } from '../shared/suggest
 import { GIT_LIMITS, isGitObjectId, type GitImportInput, type GitImportSnapshot, type GitSourceProvenance, type GitVersionImportInput } from '../shared/repositories.ts';
 import { initializeWorkboards, WorkboardStore, type WorkboardVisibility } from './workboards.ts';
 import type { TaskColumnMove, WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardBulkMoveReceipt, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery, WorkboardReceipt } from '../shared/workboards.ts';
+import type { DiscussionPreferences, SetThreadPreferenceInput, ThreadPreference } from '../shared/discussion.ts';
 
 type Entity = Project | Repository | Revision | Task | WikiDocument;
 type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document';
@@ -21,6 +22,13 @@ export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
 export interface StoreOptions { path?: string }
 type JsonRow = { data: string };
+
+export function threadPreferenceInput(input: unknown): SetThreadPreferenceInput {
+  const data = object(input, ['collapsed', 'expectedVersion']);
+  if (typeof data.collapsed !== 'boolean') throw new HttpError(400, 'collapsed must be a boolean.');
+  if (typeof data.expectedVersion !== 'number' || !Number.isSafeInteger(data.expectedVersion) || data.expectedVersion < 0) throw new HttpError(400, 'expectedVersion must be a nonnegative safe integer.');
+  return { collapsed: data.collapsed, expectedVersion: data.expectedVersion };
+}
 
 /** Public import metadata contains no source, policy, or provenance supplied by a client. */
 export function gitImportInput(input: unknown): GitImportInput {
@@ -55,7 +63,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 13) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 14) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -223,6 +231,18 @@ export class Store {
     if (version < 13) {
       try { this.transaction(() => { initializeWorkboards(this.database); this.database.exec('PRAGMA user_version = 13'); }); }
       catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 14) {
+      try {
+        this.transaction(() => {
+          // Personal presentation state has no historical backfill and never
+          // rewrites shared threads, source, review evidence or saved receipts.
+          this.database.exec(`
+            CREATE TABLE thread_preferences (thread_id TEXT NOT NULL REFERENCES review_threads(id), principal_id TEXT NOT NULL, collapsed INTEGER NOT NULL CHECK(collapsed IN (0, 1)), version INTEGER NOT NULL CHECK(version > 0 AND version <= 9007199254740991), updated_at TEXT NOT NULL, PRIMARY KEY(thread_id, principal_id));
+          `);
+          this.database.exec('PRAGMA user_version = 14');
+        });
+      } catch (error) { this.database.close(); throw error; }
     }
     this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
     this.projects = new ProjectStore(this.database, { nextId: () => this.nextId('project', 'PROJ'), event: (id, action, detail, attribution) => this.event(id, action, detail, attribution), activities: id => this.activities(id), changed: (project, created, attribution) => this.workboards!.projectChanged(project, created, attribution) });
@@ -901,6 +921,35 @@ export class Store {
       ? this.database.prepare('SELECT data FROM review_threads WHERE revision_id = ? AND id = ?').get(id, threadId) as JsonRow | undefined : undefined;
     if (!row) throw new HttpError(404, 'Discussion thread was not found.', 'THREAD_UNAVAILABLE');
     return JSON.parse(row.data) as ReviewThread;
+  }
+  private preferencePrincipal(principalId: string): string {
+    if (typeof principalId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(principalId)) throw new HttpError(400, 'Invalid principal.');
+    return principalId;
+  }
+  discussionPreferences(id: string, principalId: string): DiscussionPreferences {
+    this.get<Revision>('revision', id);
+    const rows = this.database.prepare(`SELECT t.id AS thread_id, p.collapsed, p.version, p.updated_at
+      FROM review_threads t LEFT JOIN thread_preferences p ON p.thread_id = t.id AND p.principal_id = ?
+      WHERE t.revision_id = ? ORDER BY t.rowid`).all(this.preferencePrincipal(principalId), id) as { thread_id: string; collapsed: number | null; version: number | null; updated_at: string | null }[];
+    return { revisionId: id, preferences: rows.map(row => ({ revisionId: id, threadId: row.thread_id, collapsed: row.collapsed === 1, version: row.version ?? 0, updatedAt: row.updated_at })) };
+  }
+  threadPreference(id: string, threadId: string, principalId: string): ThreadPreference {
+    this.get<Revision>('revision', id); this.thread(id, threadId);
+    const row = this.database.prepare('SELECT collapsed, version, updated_at FROM thread_preferences WHERE thread_id = ? AND principal_id = ?').get(threadId, this.preferencePrincipal(principalId)) as { collapsed: number; version: number; updated_at: string } | undefined;
+    return { revisionId: id, threadId, collapsed: row?.collapsed === 1, version: row?.version ?? 0, updatedAt: row?.updated_at ?? null };
+  }
+  setThreadPreference(id: string, threadId: string, input: unknown, principalId: string): ThreadPreference {
+    const data = threadPreferenceInput(input);
+    return this.discussionMutation(() => {
+      const current = this.threadPreference(id, threadId, principalId);
+      if (data.expectedVersion !== current.version) throw new HttpError(409, 'This discussion preference changed. Reload it before saving.');
+      if (data.collapsed === current.collapsed) return current;
+      if (!Number.isSafeInteger(current.version + 1)) throw new HttpError(409, 'This discussion preference has reached the supported version limit.');
+      const next = { ...current, collapsed: data.collapsed, version: current.version + 1, updatedAt: new Date().toISOString() };
+      this.database.prepare(`INSERT INTO thread_preferences (thread_id, principal_id, collapsed, version, updated_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id, principal_id) DO UPDATE SET collapsed = excluded.collapsed, version = excluded.version, updated_at = excluded.updated_at`).run(threadId, principalId, Number(next.collapsed), next.version, next.updatedAt);
+      return next;
+    });
   }
   private insertComment(comment: ReviewComment): void {
     this.database.prepare('INSERT INTO comments (id, revision_id, version_id, data) VALUES (?, ?, ?, ?)').run(comment.id, comment.revisionId, comment.versionId, JSON.stringify(comment));

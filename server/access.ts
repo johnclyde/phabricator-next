@@ -7,7 +7,7 @@ import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import { gitImportInput, gitVersionImportInput, type MutationResponse, type Store } from './store.ts';
+import { gitImportInput, gitVersionImportInput, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 
 const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions']);
@@ -242,13 +242,21 @@ export class AccessLayer {
     const object = /^\/api\/(?:projects|repositories|tasks|documents|revisions)\/((?:PROJ|R|T|W|[DPL])\d+)(?:\/(.*))?$/.exec(path);
     if (!object) return null;
     const discussionReply = method === 'POST' && /^threads\/[^/]+\/replies$/.test(object[2] ?? '');
+    const personalDiscussion = method === 'PATCH' && /^threads\/[^/]+\/preference$/.test(object[2] ?? '');
     const selfProject = object[1]!.startsWith('PROJ') && ['membership', 'watchers', 'silence'].includes(object[2] ?? '');
     const boardMove = method === 'POST' && object[1]!.startsWith('PROJ') && ['workboard/moves', 'workboard/bulk-moves'].includes(object[2] ?? '');
-    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject || boardMove ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
+    return { id: object[1]!, capability: method === 'GET' || object[2] === 'subscriptions' || selfProject || boardMove || personalDiscussion ? 'view' : discussionReply || ['comments', 'reviews'].includes(object[2] ?? '') ? 'interact' : 'edit' };
   }
   authorize(method: string, path: string, input: unknown): void {
     const target = this.target(method, path);
     if (target) this.require(target.id, target.capability);
+    const preference = method === 'PATCH' ? /^\/api\/revisions\/([DPL]\d+)\/threads\/([^/]+)\/preference$/.exec(path) : null;
+    if (preference) {
+      threadPreferenceInput(input);
+      // Child identity and current view are checked even for saved retries;
+      // the preference's optimistic version is checked only on fresh writes.
+      this.store.threadPreference(preference[1]!, preference[2]!, this.principal);
+    }
     if (method === 'POST' && /^\/api\/repositories\/R\d+\/import-revision$/.test(path)) this.references(gitImportInput(input));
     // The target's central policy already requires continuing repository view.
     // Pins are validated here, but their current-head match belongs after replay.

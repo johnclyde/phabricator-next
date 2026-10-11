@@ -366,6 +366,8 @@ export function createApp(options: AppOptions = {}): App {
         if (revision && method === 'PATCH' && !revision[2]) return { status: 200, body: store.updateRevision(revision[1]!, input, attribution) };
         if (revision && method === 'POST' && revision[2] === 'versions') return { status: 201, body: store.createVersion(revision[1]!, input, attribution) };
         if (revision && method === 'POST' && revision[2] === 'comments') return { status: 201, body: store.createComment(revision[1]!, input, attribution) };
+        const preference = /^\/api\/revisions\/([DPL]\d+)\/threads\/([^/]+)\/preference$/.exec(path);
+        if (preference && method === 'PATCH') return { status: 200, body: store.setThreadPreference(preference[1]!, preference[2]!, input, context.principalId) };
         const thread = /^\/api\/revisions\/([DPL]\d+)\/threads\/([^/]+)(\/replies)?$/.exec(path);
         if (thread && method === 'POST' && thread[3]) return { status: 201, body: store.createReply(thread[1]!, thread[2]!, input, attribution) };
         if (thread && method === 'PATCH' && !thread[3]) return { status: 200, body: store.updateThread(thread[1]!, thread[2]!, input, attribution) };
@@ -428,6 +430,12 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const preferences = /^\/api\/revisions\/([DPL]\d+)\/discussion-preferences$/.exec(path);
+          if (preferences) {
+            access.require(preferences[1]!);
+            if (url.search) throw new HttpError(400, 'Discussion preference reads do not accept query parameters.');
+            send(res, 200, { ...store.discussionPreferences(preferences[1]!, context.principalId), accessEpoch: policies.epoch() }); return;
+          }
           const bulkPreview = /^\/api\/projects\/(PROJ\d+)\/workboard\/bulk-move-preview$/.exec(path);
           if (bulkPreview) {
             const id = bulkPreview[1]!; access.require(id);

@@ -1,11 +1,14 @@
 import DraftAvailability from './DraftAvailability';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { MessageSquare, RotateCcw, CheckCircle2 } from 'lucide-react';
 import { diffWordsWithSpace } from 'diff';
 import type { ApplySuggestionInput, PassageInput, RevisionDetail, RevisionVersion, ReviewComment, ReviewThread } from '../shared/types';
 import { lineRange, projectAnchor } from '../shared/anchors';
 import type { MutationMethod } from './offline';
 import { useWorkspace } from './SessionGate';
+import { orderedDiscussionThreads, filterDiscussionThreads, moveDiscussionCursor, type DiscussionFilter } from '../shared/discussion-navigation';
+import { discussionThreadNarration, type DiscussionVoiceAction } from './voice';
+import { useDiscussionPreferences } from './useDiscussionPreferences';
 
 export interface CommentTarget { versionId: string; filePath: string; line: number | null; passage?: PassageInput; nonce: number }
 type Mutate = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
@@ -44,23 +47,67 @@ export function SourcePassages({ content, canComment, selectedLine, onLine, onPa
   </div>;
 }
 
-export default function ReviewThreads({ detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource }: { detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null) => void }) {
-  const [filter, setFilter] = useState<'open' | 'resolved' | 'all'>('all');
-  const threads = useMemo(() => {
-    const listed = new Map((detail.threads || []).map(thread => [thread.id, thread]));
-    for (const comment of detail.comments) {
-      const id = comment.threadId || comment.id;
-      if (!listed.has(id)) listed.set(id, { id, revisionId: detail.revision.id, rootCommentId: id, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt });
+export interface DiscussionController { identity: string; revisionId: string; execute(action: DiscussionVoiceAction): { text: string; identity: string } }
+export type RegisterDiscussion = (controller: DiscussionController | null) => void;
+const ignoreRegistration: RegisterDiscussion = () => {};
+
+export default function ReviewThreads({ detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, register = ignoreRegistration }: { detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null) => void; register?: RegisterDiscussion }) {
+  const { isActive, unavailableObject } = useWorkspace();
+  const [filter, setFilter] = useState<DiscussionFilter>('all'); const filterRef = useRef(filter); filterRef.current = filter;
+  const [selected, setSelected] = useState<string | null>(null); const selectedRef = useRef(selected); selectedRef.current = selected;
+  const [includeCollapsed, setIncludeCollapsed] = useState(false); const [boundary, setBoundary] = useState('');
+  const threads = useMemo(() => orderedDiscussionThreads(detail), [detail]);
+  const preferences = useDiscussionPreferences(detail.revision.id, threads.map(thread => thread.id), online, detail.accessEpoch);
+  const shown = filterDiscussionThreads(threads, filter);
+  const root = useRef<HTMLDivElement>(null); const frame = useRef<number | null>(null); const alive = useRef(true);
+  const active = () => alive.current && isActive() && !unavailableObject(detail.revision.id);
+  const identity = () => JSON.stringify([detail.revision.id, version.id, version.contentHash, filterRef.current, selectedRef.current, includeCollapsed, threads.map(thread => [thread.id, thread.version, thread.status, preferences.collapsed(thread.id)])]);
+  const moveFocus = (id: string | null) => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    if (!id) return; const expected = identity();
+    frame.current = requestAnimationFrame(() => { frame.current = null; if (!active() || expected !== currentIdentity.current()) return; const element = [...(root.current?.querySelectorAll<HTMLElement>('[data-thread-id]') || [])].find(item => item.dataset.threadId === id); element?.focus({ preventScroll: true }); element?.scrollIntoView({ block: 'nearest', behavior: 'instant' }); });
+  };
+  const select = (id: string | null) => { selectedRef.current = id; setSelected(id); moveFocus(id); };
+  const execute = (action: DiscussionVoiceAction): { text: string; identity: string } => {
+    if (!active()) return { text: 'This discussion is unavailable.', identity: identity() };
+    const visible = filterDiscussionThreads(threads, filterRef.current); const current = selectedRef.current;
+    if (action === 'nextThread' || action === 'previousThread' || action === 'nextThreadIncludingCollapsed' || action === 'previousThreadIncludingCollapsed') {
+      const result = moveDiscussionCursor(visible, current, action.startsWith('next') ? 1 : -1, new Set(threads.filter(thread => preferences.collapsed(thread.id)).map(thread => thread.id)), action.endsWith('IncludingCollapsed'));
+      const hint = result.boundary === 'empty' ? 'No eligible threads in this filter. Include collapsed threads to navigate them.' : result.boundary === 'first' ? 'At the beginning of this discussion.' : result.boundary === 'last' ? 'At the end of this discussion.' : '';
+      setBoundary(hint); select(result.threadId);
+      return { text: hint || discussionThreadNarration(detail, result.threadId, Boolean(result.threadId && preferences.collapsed(result.threadId))), identity: identity() };
     }
-    return [...listed.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  }, [detail]);
-  const shown = threads.filter(thread => filter === 'all' || thread.status === filter);
-  return <div className="review-threads"><div className="thread-toolbar"><h3>Discussion across versions</h3><div className="filter-bar" aria-label="Thread status">{(['open', 'resolved', 'all'] as const).map(value => <button key={value} aria-pressed={filter === value} className={filter === value ? 'selected' : ''} onClick={() => setFilter(value)}>{value[0].toUpperCase() + value.slice(1)} <span>{value === 'all' ? threads.length : threads.filter(thread => thread.status === value).length}</span></button>)}</div></div><p className="muted small">Threads retain their original version and quotation. Resolving a discussion does not change source, review evidence, or acceptance.</p>
-    {shown.map(thread => <Thread key={thread.id} thread={thread} detail={detail} version={version} online={online} canEdit={canEdit} canInteract={canInteract} mutate={mutate} saved={saved} suggestionApplied={suggestionApplied} openSource={openSource}/>)}
+    if (!current || !visible.some(thread => thread.id === current)) return { text: 'Select a thread first. Say next thread to begin.', identity: identity() };
+    if (action === 'currentThread') return { text: discussionThreadNarration(detail, current, false), identity: identity() };
+    const collapsed = action === 'collapseThread' || (action === 'toggleThread' && !preferences.collapsed(current));
+    if (collapsed === preferences.collapsed(current)) return { text: `This thread is already ${collapsed ? 'collapsed' : 'expanded'} for you.`, identity: identity() };
+    const result = preferences.choose(current, collapsed);
+    return { text: result.changed ? `${collapsed ? 'Collapsed' : 'Expanded'} for you; ${result.saving ? 'saving your personal preference.' : 'local choice retained. Save explicitly when connected.'}` : 'This personal choice is awaiting confirmation. Retry it or reload saved presentation before changing it.', identity: identity() };
+  };
+  const latest = useRef(execute); latest.current = execute;
+  const manual = (action: DiscussionVoiceAction) => { if (!active()) return; window.dispatchEvent(new Event('discussion-navigation')); return latest.current(action); };
+  const currentIdentity = useRef(identity); currentIdentity.current = identity;
+  const context = identity();
+  useLayoutEffect(() => { register({ get identity() { return currentIdentity.current(); }, revisionId: detail.revision.id, execute: action => latest.current(action) }); }, [context, register]);
+  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; if (frame.current !== null) cancelAnimationFrame(frame.current); register(null); }; }, [register]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (!active() || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || event.ctrlKey || event.altKey || event.metaKey || window.getSelection()?.toString() || [...document.querySelectorAll<HTMLElement>('dialog[open], [role="dialog"], [aria-modal="true"]')].some(dialog => !dialog.hidden && dialog.getAttribute('aria-hidden') !== 'true' && dialog.getClientRects().length > 0)) return;
+      const element = event.target instanceof Element ? event.target : null;
+      if (element?.closest('input, textarea, select, button, a, form, [role="combobox"], [role="slider"], [contenteditable]:not([contenteditable="false"]), [role="textbox"], object, embed')) return;
+      const action: DiscussionVoiceAction | null = event.key === 'n' ? 'nextThread' : event.key === 'p' ? 'previousThread' : event.key === 'N' ? 'nextThreadIncludingCollapsed' : event.key === 'P' ? 'previousThreadIncludingCollapsed' : event.key === 'q' && !event.shiftKey ? 'toggleThread' : null;
+      if (!action) return; event.preventDefault(); manual(action);
+    };
+    document.addEventListener('keydown', keydown); return () => document.removeEventListener('keydown', keydown);
+  });
+  return <div className="review-threads" ref={root}><div className="thread-toolbar"><h3>Discussion across versions</h3><div className="filter-bar" aria-label="Thread status">{(['open', 'resolved', 'all'] as const).map(value => <button key={value} aria-pressed={filter === value} className={filter === value ? 'selected' : ''} onClick={() => { if (!active()) return; window.dispatchEvent(new Event('discussion-navigation')); filterRef.current = value; setFilter(value); setBoundary(''); if (!filterDiscussionThreads(threads, value).some(thread => thread.id === selectedRef.current)) { selectedRef.current = null; setSelected(null); } }}>{value[0].toUpperCase() + value.slice(1)} <span>{value === 'all' ? threads.length : threads.filter(thread => thread.status === value).length}</span></button>)}</div></div><p className="muted small">Threads retain their original version and quotation. Collapse is personal; it does not resolve a discussion or change source, review evidence, or acceptance.</p>
+    <div className="discussion-navigation" aria-label="Discussion navigation"><div className="discussion-navigation-actions"><button className="button" onClick={() => manual(includeCollapsed ? 'previousThreadIncludingCollapsed' : 'previousThread')}>Previous thread</button><button className="button" onClick={() => manual(includeCollapsed ? 'nextThreadIncludingCollapsed' : 'nextThread')}>Next thread</button><label><input type="checkbox" checked={includeCollapsed} onChange={event => { window.dispatchEvent(new Event('discussion-navigation')); setIncludeCollapsed(event.target.checked); }}/>Include collapsed threads</label></div><p className="muted small">{selected && shown.some(thread => thread.id === selected) ? `Thread ${shown.findIndex(thread => thread.id === selected) + 1} of ${shown.length}` : `No thread selected · ${shown.length} threads`} · {shown.filter(thread => preferences.collapsed(thread.id)).length} collapsed. Keyboard: n/p skip collapsed, Shift+N/P include them, q toggles the selected thread.</p>{boundary && <p role="status">{boundary}</p>}</div>
+    {preferences.warning && <p className="info-strip" role="status">{preferences.warning}</p>}
+    {shown.map(thread => <Thread key={thread.id} thread={thread} detail={detail} version={version} online={online} canEdit={canEdit} canInteract={canInteract} mutate={mutate} saved={saved} suggestionApplied={suggestionApplied} openSource={openSource} collapsed={preferences.collapsed(thread.id)} selected={selected === thread.id} onSelect={() => { if (!active()) return; window.dispatchEvent(new Event('discussion-navigation')); select(thread.id); setBoundary(''); }} onToggle={() => { if (!active()) return; window.dispatchEvent(new Event('discussion-navigation')); selectedRef.current = thread.id; setSelected(thread.id); latest.current('toggleThread'); }} presentation={<>{preferences.busy.has(thread.id) ? <p className="muted small" role="status">Saving personal presentation…</p> : preferences.choices[thread.id] ? <div className="thread-presentation-pending"><p className="small">Local personal choice has not been confirmed.{preferences.unsavedMemory(thread.id) ? ' It is only retained in this tab; export unsaved work before closing.' : ''}</p><button className="button" disabled={!online || preferences.choices[thread.id]!.expectedVersion === null} onClick={() => void preferences.save(thread.id)}>{preferences.choices[thread.id]!.attempted ? 'Retry personal presentation' : 'Save personal presentation'}</button><button className="button" disabled={!online} onClick={() => void preferences.reload(thread.id)}>Reload saved presentation</button></div> : null}{preferences.errors[thread.id] && <p className="error-text" role="alert">{preferences.errors[thread.id]}</p>}</>}/>)}
     {!shown.length && <p className="muted no-comments">{threads.length ? 'No threads match this filter.' : 'No discussion threads yet. Start a discussion below or select a source passage.'}</p>}
   </div>;
 }
-function Thread({ thread, detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource }: { thread: ReviewThread; detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null) => void }) {
+function Thread({ thread, detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, collapsed, selected, onSelect, onToggle, presentation }: { collapsed: boolean; selected: boolean; onSelect: () => void; onToggle: () => void; presentation: ReactNode; thread: ReviewThread; detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null) => void }) {
   const [reply, setReply] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const comments = detail.comments.filter(comment => (comment.threadId || comment.id) === thread.id);
   const root = comments.find(comment => comment.id === thread.rootCommentId) || comments[0];
@@ -83,16 +130,17 @@ function Thread({ thread, detail, version, online, canEdit, canInteract, mutate,
     else if (projection.status === 'file_missing') explanation = `The original file is missing from version ${version.number}. The original quotation is retained.`;
     else explanation = `The original quotation is not present verbatim in version ${version.number}. The passage may have changed; inspect the original before resolving.`;
   }
-  return <article className={`review-thread thread-${thread.status}`} data-thread-id={thread.id}><header className="thread-heading"><h4>Thread on version {original?.number ?? 'unknown'}</h4><span className={`badge ${thread.status === 'resolved' ? 'badge-resolved' : 'badge-open'}`}>{thread.status === 'resolved' ? 'Resolved' : 'Open'}</span><span className="muted small">{comments.length} {comments.length === 1 ? 'comment' : 'comments'}</span></header>
-    {root.anchor && <div className="thread-anchor"><blockquote className="thread-quotation">{root.anchor.quote}</blockquote><p className={`anchor-projection projection-${projection?.status}`} role="status">{explanation}</p>{projection?.start !== null && projection?.start !== undefined && source !== undefined && <small>Shown source: {root.anchor.filePath}, line {lineAt(source, projection.start)}</small>}</div>}
+  return <article className={`review-thread thread-${thread.status}`} data-thread-id={thread.id} aria-current={selected ? "true" : undefined} tabIndex={-1}><header className="thread-heading"><h4>Thread on version {original?.number ?? 'unknown'}</h4><span className={`badge ${thread.status === 'resolved' ? 'badge-resolved' : 'badge-open'}`}>{thread.status === 'resolved' ? 'Resolved' : 'Open'}</span><span className="muted small">{comments.length} {comments.length === 1 ? 'comment' : 'comments'}</span><div className="thread-personal-actions"><button className="button" aria-pressed={selected} onClick={onSelect}>Select thread</button><button className="button" aria-expanded={!collapsed} onClick={onToggle}>{collapsed ? 'Expand thread' : 'Collapse thread'}</button></div></header>
     <button className="text-button original-thread-location" onClick={() => openSource(root.versionId, root.filePath, root.line)}>View original version {original?.number ?? ''}{root.filePath ? ` · ${root.filePath}${root.line ? `:${root.line}` : ''}` : ''}</button>
+    {presentation}<div className="thread-content" hidden={collapsed}>
+    {root.anchor && <div className="thread-anchor"><blockquote className="thread-quotation">{root.anchor.quote}</blockquote><p className={`anchor-projection projection-${projection?.status}`} role="status">{explanation}</p>{projection?.start !== null && projection?.start !== undefined && source !== undefined && <small>Shown source: {root.anchor.filePath}, line {lineAt(source, projection.start)}</small>}</div>}
     {root.suggestion && root.anchor && <ThreadSuggestion root={root} thread={thread} detail={detail} online={online} canEdit={canEdit} mutate={mutate} saved={saved} applied={suggestionApplied} openSource={openSource}/>}
     {comments.map(comment => <Comment key={comment.id} comment={comment} versions={detail.versions}/>)}
     {events.length > 0 && <ol className="thread-events" aria-label="Thread state history">{events.map(event => { const viewed = detail.versions.find(item => item.id === event.versionId); return <li key={event.id}><span><strong>{event.actor}</strong> {event.action} while viewing version {viewed?.number ?? 'unknown'} · {timestamp(event.createdAt)}</span><button className="text-button" onClick={() => openSource(event.versionId, root.filePath, null)}>View version {viewed?.number ?? ''}</button></li>; })}</ol>}
     {error && <div className="banner error" role="alert">{error}<button onClick={() => void saved()}>Reload discussion</button></div>}
     <div className="thread-actions">{canInteract && <button className="button" onClick={() => setReply(!reply)}><MessageSquare size={15}/>{reply ? 'Close Reply' : 'Reply'}</button>}{canEdit && <button className="button" disabled={!online || busy} onClick={() => void changeStatus()}>{thread.status === 'open' ? <CheckCircle2 size={15}/> : <RotateCcw size={15}/>}{busy ? 'Saving…' : thread.status === 'open' ? 'Resolve Thread' : 'Reopen Thread'}</button>}{!online && canEdit && <small className="muted">Reconnect to resolve or reopen a thread.</small>}</div>
     {reply && canInteract && <DraftAvailability draftKey={`comment-source:${detail.revision.id}:reply:${thread.id}:${version.id}`}><ReplyComposer key={`${thread.id}:${version.id}`} revisionId={detail.revision.id} threadId={thread.id} version={version} originalNumber={original?.number} mutate={mutate} saved={saved}/></DraftAvailability>}
-  </article>;
+  </div></article>;
 }
 function ThreadSuggestion({ root, thread, detail, online, canEdit, mutate, saved, applied, openSource }: { root: ReviewComment; thread: ReviewThread; detail: RevisionDetail; online: boolean; canEdit: boolean; mutate: Mutate; saved: () => Promise<void>; applied: () => Promise<void>; openSource: (versionId: string, path: string | null, line: number | null) => void }) {
   const [confirmation, setConfirmation] = useState<ApplySuggestionInput | null>(null);

@@ -30,7 +30,7 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | D103 | Sandboxed TeX jobs and PDF artifacts | Reproducible build manifest, source/PDF alignment, compile diagnostics, no unsafe shell or network access |
 | D104 | Citation/evidence objects | Import BibTeX and structured sources; show where a claim came from and whether the source was actually checked |
 | D105 | DOCX interchange | Preserve headings, footnotes, comments and tracked changes across golden-fixture round trips |
-| D106 | Review threads and resolutions | Partial: immutable replies, optimistic resolve/reopen, version-bound state history, exact single-passage suggestions and atomic application as new versions. Multi-passage/file proposals, rebasing, upstream publication semantics and automated proposal provenance remain open. See [suggested edits](suggested-edits.md). |
+| D106 | Review threads and resolutions | Partial: immutable replies, optimistic resolve/reopen, version-bound state history, exact single-passage suggestions and atomic application as new versions, plus viewer-specific collapse and shared touch/keyboard/voice thread navigation. Per-inline diff-order navigation, multi-passage/file proposals, rebasing, upstream publication semantics and automated proposal provenance remain open. See [suggested edits](suggested-edits.md). |
 | D107 | Review evaluations | Curated code/paper/prose fixtures measure false positives, groundedness, missed defects, cost and latency per model |
 
 ## Next: private, hands-off and mobile work
@@ -39,7 +39,7 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | --- | --- | --- |
 | O201 | IndexedDB storage and durable job queue | Large drafts survive reload/quota failures; jobs have cancellation, retry, expiry and version binding |
 | O202 | Local audio inbox and transcription | Record while disconnected; transcription stays local when requested; raw audio retention is explicit |
-| O203 | Full spoken review workflow | Navigate findings, dictate comments, read changed passages, request explicit actions and stop hands-free |
+| O203 | Full spoken review workflow | Partial: read exact changed passages, move among files/passages and discussion threads, read current discussion and change personal collapse with on-device speech output and stale-context cancellation. Finding navigation, dictation, confirmed source/review actions and offline transcription remain open. |
 | O204 | Authenticated mobile deployment | Real phone access over TLS with sessions/tokens, private drafts and installable app testing on iOS/Android |
 | O205 | Cross-device synchronization | Multiple devices retain drafts and detect conflicts; no silent last-write-wins for manuscript revisions |
 | O206 | Local model lifecycle | Model availability/context checks, cancellation, resource budgets, trusted local-only configuration and evaluations |
