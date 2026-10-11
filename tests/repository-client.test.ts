@@ -31,7 +31,7 @@ test('repository cache evicts oldest exact snapshots under entry and byte bounds
   assert.deepEqual(cache.entries.map(entry => entry.key), ['new-epoch']);
   assert.deepEqual(repositoryCache({ entries: new Array(17).fill({ key: 'x', value: 1 }) }), { entries: [] });
   assert.deepEqual(repositoryCache({ entries: [{ key: 'x', value: 'No verified epoch' }] }), { entries: [] });
-  assert.equal(putRepositoryCache(cache, 'oversized', { accessEpoch: 2, source: 'x'.repeat(REPOSITORY_CACHE_LIMITS.bytes) }).entries.length, 0);
+  assert.deepEqual(putRepositoryCache(cache, 'oversized', { accessEpoch: 2, source: 'x'.repeat(REPOSITORY_CACHE_LIMITS.bytes) }).entries, cache.entries);
 });
 
 test('repository source and metadata follow account lifetime, object revocation and unrelated epoch invalidation', () => {

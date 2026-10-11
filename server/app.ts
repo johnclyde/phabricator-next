@@ -167,7 +167,7 @@ export function createApp(options: AppOptions = {}): App {
     };
     // Never hold a SQLite snapshot while waiting for a Git process or its queue.
     store.read(authorize);
-    const comparison = section === 'compare' || section === 'compare/file';
+    const comparison = section === 'compare' || section === 'compare/file' || section === 'compare/patch';
     const allowed = comparison ? ['base', 'target', ...(section === 'compare/file' ? ['beforePath', 'afterPath'] : [])]
       : section === 'tree' || section === 'blob' || section === 'blame' ? ['commit', 'path'] : section === 'history' ? ['commit', 'path', 'after', 'limit'] : [];
     for (const name of url.searchParams.keys()) if (!allowed.includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Invalid repository read parameters.', 'GIT_INVALID_QUERY');
@@ -204,6 +204,7 @@ export function createApp(options: AppOptions = {}): App {
       const signal = controller.signal;
       const result = await Promise.race([canceled, section === 'compare' ? git.compare(id, { base: base === 'empty' ? null : base!, target: target! }, signal)
         : section === 'compare/file' ? git.compareFile(id, { base: base === 'empty' ? null : base!, target: target!, beforePath, afterPath }, signal)
+        : section === 'compare/patch' ? git.patch(id, { base: base === 'empty' ? null : base!, target: target! }, signal)
         : !section ? git.info(id, signal)
         : section === 'refs' ? git.refs(id, signal)
           : section === 'commits' ? git.commit(id, commit!, signal)
@@ -550,7 +551,7 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, bootstrap.session); return;
       }
       if (req.method === 'GET') {
-        const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|blame|history|compare(?:\/file)?)|\/(commits)\/([^/]+))?$/.exec(path);
+        const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|blame|history|compare(?:\/(?:file|patch))?)|\/(commits)\/([^/]+))?$/.exec(path);
         if (repository) { await repositoryRead(req, res, context, repository[1]!, repository[2] ?? repository[3], repository[4], url); return; }
         const docxInspection = /^\/api\/files\/(F[1-9]\d{0,14})\/docx$/.exec(path);
         if (docxInspection) {

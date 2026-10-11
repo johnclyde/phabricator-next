@@ -22,6 +22,7 @@ import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
 import { gitBlameCommand } from './git-blame';
+import { gitPatchCommand } from './git-patch';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -38,6 +39,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
   npm run arc -- blame R1 --commit FULL_ID --path PATH [--json]
   npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
+  npm run arc -- download-patch R1 --base FULL_ID|empty --commit FULL_ID --output NEW_FILE [--json]
   npm run arc -- import-git R1 --commit FULL_ID --title "Title" [--kind code|paper|document] [--project ID|NAME] [--request-id KEY] [--json]
   npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
   npm run arc -- show P2|T1|PROJ1|R1
@@ -164,13 +166,17 @@ an uncertain result. Output contains returned metadata and a content hash, never
 the raw source. A receipt may be historical and is not a fresh editing base.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
-This is not a drop-in Arcanist replacement; Git landing/patching is planned.
+This is not a drop-in Arcanist replacement; working-copy patch application and
+Git landing are planned.
 compare-commits reads an explicit ordered commit pair. Omit file paths for the
 complete change inventory; supply the listed before/after paths for one change.
 An absent side is omitted, distinct from an existing empty file. Rename/copy
 similarity is Git's inference; comparisons do not create review evidence.
 blame attributes every line of an exact text file to its original commit and
 path, including whole-file renames. It never changes source or review evidence.
+download-patch saves a complete binary-capable Git patch for an exact pair,
+verifies its byte length and SHA-256, and never overwrites an existing file.
+It does not apply patches, update references, or select a newer branch head.
 `;
 
 function terminalText(value: string, multiline = false): string {
@@ -278,6 +284,7 @@ async function main() {
   if (await wikiWriteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await gitComparisonCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await gitBlameCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await gitPatchCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

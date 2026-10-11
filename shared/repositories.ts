@@ -10,6 +10,8 @@ export const GIT_LIMITS = Object.freeze({
   comparisonEntries: 2_000, comparisonChanges: 1_000,
   comparisonBlobBytes: 8 * 1024 * 1024, comparisonSourceBytes: 64 * 1024 * 1024,
   comparisonCandidates: 1_000, comparisonCandidatePairs: 250_000,
+  patchBytes: 8 * 1024 * 1024,
+  patchTreeEntries: 20_000, patchTreeObjects: 10_000, patchMetadataBytes: 8 * 1024 * 1024,
   blameLines: 10_000, blameOrigins: 200,
   blameHistoryCommits: 1_000, blameGraphObjects: 10_000, blameTreeEntries: 20_000,
   blameMetadataBytes: 8 * 1024 * 1024,
@@ -50,6 +52,8 @@ export interface GitComparisonChange { id: string; status: GitComparisonStatus; 
 export interface GitComparisonIdentity extends GitResponse { baseCommit: GitCommit | null; targetCommit: GitCommit; baseTreeId: string; targetTreeId: string }
 /** Complete changed-path inventory, or an explicit failure; no truncated inventories. */
 export interface GitComparison extends GitComparisonIdentity { algorithm: 'git-M50-C50'; changes: GitComparisonChange[] }
+/** Byte-preserving complete Git patch for one explicit ordered commit pair. */
+export interface GitPatch extends GitComparisonIdentity { format: 'git-binary-patch-v1'; bytes: number; sha256: string; dataBase64: string }
 export type GitComparisonSide = GitBlob | (GitBlobIdentity & { state: 'tree'; size: null });
 /** Both sides belong to this exact inventory entry; null means absent, never binary. */
 export interface GitComparisonFile extends GitComparisonIdentity { change: GitComparisonChange; before: GitComparisonSide | null; after: GitComparisonSide | null }

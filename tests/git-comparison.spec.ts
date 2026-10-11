@@ -72,6 +72,21 @@ test('reference refresh leaves a comparison pinned and exact visited files reope
 
 test.describe('comparison response races', () => {
   test.use({ serviceWorkers: 'block' });
+  test('swapping commits presents matching editable controls before the new pair can be edited', async ({ page }) => {
+    const data = await fixture(); await open(page, data.head); await compare(page, data.base, data.head);
+    const firstView = page.evaluate(() => new Promise<{ pair: string[]; inputs: string[] }>((resolve, reject) => {
+      const pair = document.querySelector('.repository-comparison-pair')!;
+      const timeout = setTimeout(() => { observer.disconnect(); reject(new Error('The comparison pair did not change.')); }, 5000);
+      const observer = new MutationObserver(() => {
+        clearTimeout(timeout); observer.disconnect();
+        resolve({ pair: [...pair.querySelectorAll('code')].map(element => element.textContent || ''), inputs: ['Comparison base commit', 'Comparison target commit'].map(label => document.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!.value) });
+      });
+      observer.observe(pair, { subtree: true, childList: true, characterData: true });
+    }));
+    await page.getByRole('button', { name: 'Swap Commits', exact: true }).click();
+    expect(await firstView).toEqual({ pair: [data.head, data.base], inputs: [data.head, data.base] });
+    await compare(page, data.base, data.head); await expect(page.locator('.repository-comparison-pair code')).toHaveText([data.base, data.head]);
+  });
   test('automatic first-change selection preserves a newly typed exact commit selector', async ({ page }) => {
     const data = await fixture(); await open(page, data.head);
     let release!: () => void, captured!: () => void; const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { captured = resolve; });

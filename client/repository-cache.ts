@@ -29,7 +29,9 @@ export function repositoryCache(value: unknown): RepositoryCache {
 }
 export function putRepositoryCache(cache: RepositoryCache, key: string, value: unknown): RepositoryCache {
   const accessEpoch = value && typeof value === 'object' && 'accessEpoch' in value && Number.isSafeInteger(value.accessEpoch) ? Number(value.accessEpoch) : cache.accessEpoch;
-  const entries = [...(cache.accessEpoch === accessEpoch ? cache.entries : []).filter(entry => entry.key !== key), { key, value }].slice(-REPOSITORY_CACHE_LIMITS.entries);
+  const previous = (cache.accessEpoch === accessEpoch ? cache.entries : []).filter(entry => entry.key !== key);
+  if (bytes({ accessEpoch, entries: [{ key, value }] }) > REPOSITORY_CACHE_LIMITS.bytes) return { accessEpoch, entries: previous };
+  const entries = [...previous, { key, value }].slice(-REPOSITORY_CACHE_LIMITS.entries);
   while (entries.length && bytes({ accessEpoch, entries }) > REPOSITORY_CACHE_LIMITS.bytes) entries.shift();
   return { accessEpoch, entries };
 }

@@ -29,6 +29,7 @@ function observer(overrides: Partial<GitObserver> = {}): GitObserver {
     importSnapshot: async () => { throw new HttpError(422, 'Import is unavailable in this fixture.', 'GIT_IMPORT_UNSUPPORTED'); },
     compare: async () => { throw new HttpError(503, 'Comparison is unavailable in this fixture.', 'GIT_UNAVAILABLE'); },
     compareFile: async () => { throw new HttpError(503, 'Comparison is unavailable in this fixture.', 'GIT_UNAVAILABLE'); },
+    patch: async () => { throw new HttpError(503, 'Patch is unavailable in this fixture.', 'GIT_UNAVAILABLE'); },
     blame: async () => { throw new HttpError(503, 'Blame is unavailable in this fixture.', 'GIT_UNAVAILABLE'); },
     info: async () => ({ state: 'ready', objectFormat: 'sha1' }),
     refs: async () => ({ ...identity, observedAt: person.timestamp, headCommit: commit, refs: [{ name: 'refs/heads/main', kind: 'branch', objectId: commit, commitId: commit }] }),

@@ -10,7 +10,7 @@ APP_GIT_REPOSITORIES='{"R1":"/srv/git/example.git","R2":"/srv/git/research.git"}
 
 Restart the server after changing this mapping. Omit it, or use `{}`, to leave all repositories unconfigured. The IDs must identify registered repositories; the application does not create registry entries from configuration. Only the server operator selects paths. No API accepts a host filesystem path, and paths from this mapping are absent from browser responses.
 
-Use repositories that the operator controls. The observer requires a supported Git executable and a complete bare repository. Working checkouts, shallow or partial/promisor repositories, external object alternates, replacement objects, grafts, and unsupported repository configuration are rejected. Git runs with a restricted environment, a fixed set of read operations, output limits, timeouts, and a bounded queue. It does not run hooks, filters, text conversion, or network operations. Detailed repository availability is visible only to readers who retain both repository and Space access.
+Use repositories that the operator controls. The observer requires a supported Git executable and a complete bare repository. Working checkouts, shallow or partial/promisor repositories, external object alternates, replacement objects, grafts, and unsupported repository configuration are rejected. Git runs with a restricted environment, a fixed set of operations, isolated patch verification, output limits, timeouts, and a bounded queue. It does not run hooks, filters, text conversion, or network operations. Detailed repository availability is visible only to readers who retain both repository and Space access.
 
 A registered repository can report three states: ready, unconfigured, or unavailable. An unavailable binding does not fall back to its remote URL. Correct the operator configuration or local repository and retry. The service remains loopback-only; these settings do not enable network hosting or replace authentication.
 
@@ -140,6 +140,72 @@ branch or chooses a newer base, and works with a read-only token. Human output
 escapes terminal controls; `--json` preserves the bounded exact source response.
 This does not change the CLI's separate review-creation `diff` command.
 
+## Download an exact Git patch
+
+In a committed-tree comparison, **Prepare Exact Patch** collects the complete
+patch for the displayed ordered pair. **Download Exact Patch** then saves the
+verified bytes. Preparation is explicit: opening a comparison, changing a file,
+refreshing a branch or reconnecting never starts an export. Changing the commit
+pair retires a pending export; selecting a different file in the same pair does
+not change the patch's scope. The patch always covers the whole comparison.
+
+The export preserves binary data, invalid UTF-8 source bytes, BOMs, CRLF, missing
+final newlines, executable bits, renames/copies, symbolic-link contents and
+submodule object IDs. It never follows links or fetches submodules. Git patch
+syntax cannot represent explicit empty directory entries: a non-root empty
+tree on either side fails the export. Equal trees produce a valid zero-byte
+patch, distinct from a failed or truncated export.
+
+To undo a comparison, swap the exact commits and prepare that inverse patch.
+Git's reverse application of a copy-containing patch can fail even when its
+forward application is valid; each export guarantees its selected direction.
+
+```sh
+npm run arc -- download-patch R1 --base FULL_BASE_ID --commit FULL_TARGET_ID --output change.patch
+npm run arc -- download-patch R1 --base empty --commit FULL_TARGET_ID --output initial.patch --json
+```
+
+The CLI verifies the entire response before writing. It stages a private file
+in the output directory and publishes it only after the write completes,
+without overwriting an existing file or symbolic link. It prints a receipt
+with the exact commit/tree identities, byte count and SHA-256; patch contents
+are never sent to the terminal. This command exports changes; it does not
+apply them to a working copy, update refs or create review evidence.
+
+`GET /api/repositories/R1/compare/patch?base=<full-id-or-empty>&target=<full-id>`
+returns the native `git-binary-patch-v1` envelope: repository/object format,
+`baseCommit`, `targetCommit`, both tree IDs, current `accessEpoch`, `bytes`,
+`sha256` and `dataBase64`. Base64 preserves raw bytes that cannot be represented
+by a UTF-8 JSON string. Unknown/duplicate parameters and mutable selectors are
+rejected. The existing repository/Space/session/read-token checks run before
+and after collection, including failures; responses use `no-store`.
+
+The observer verifies source commit/tree/blob identities and copies the
+required objects into a private temporary Git database. Patch generation uses
+fixed three-line context, full object IDs, binary hunks, `a/` and `b/` prefixes,
+Myers differences and the existing 50% rename/copy heuristics. Operator,
+system, global and source-tree attributes cannot change those settings. It
+then applies the patch to a temporary index and requires the resulting tree ID
+to equal the exact target. No checkout is created, no source files execute,
+and the operator's repository is never written. Temporary objects and index
+are removed after success, failure or cancellation.
+
+The raw patch limit is 8 MiB; changed blob and similarity budgets are those of
+the comparison above. Complete-tree verification admits 20,000 visited entries,
+10,000 distinct tree objects and 8 MiB of tree metadata, retaining the existing
+1,000-entry per-directory limit. Reused subtrees still count their entries at
+each path. All work shares the existing deadline and queue permit. An output, source,
+tree, time or representability failure returns no partial patch. Large-tree
+and larger-patch exports remain future work.
+
+Prepared envelopes share the existing 16-entry/2 MB repository cache. A local
+snapshot that fits can be reopened offline and is rehashed before download.
+Larger exports remain in the current tab with an explicit retention notice.
+Password workspaces keep patch bytes in verified-session memory only. Access,
+session and repository-snapshot retirement invalidate pending and prepared
+downloads. A saved patch is an immutable exported copy; later access changes
+cannot recall a file the user already downloaded.
+
 ## Trace a source line to its origin
 
 Open an exact file and select **Blame** to inspect its line provenance. Git
@@ -268,12 +334,12 @@ The browser retains each submitted request, its base pins and key independently 
 
 ## Upstream correspondence and verification
 
-These are the GIT-01/P303a browsing, P303b initial import, P303c later-version import, P303d committed-tree comparison and P303e line-provenance subsets, based on Phabricator `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`:
+These are the GIT-01/P303a browsing, P303b initial import, P303c later-version import, P303d committed-tree comparison, P303e line-provenance and P303f patch-export subsets, based on Phabricator `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`:
 
 - [Browse queries](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionBrowseQueryConduitAPIMethod.php) identify a commit and path and distinguish trees, files and submodules. Our API requires an explicit full commit and reads exact tree objects; directory pagination and upstream deleted-path recovery remain gaps.
 - [Git file content](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/filecontent/DiffusionGitFileContentQuery.php) reads the blob at a commit/path. Our adapter verifies raw object hashes and exposes bounded UTF-8 content with explicit unsupported states.
 - [History queries](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionHistoryQueryConduitAPIMethod.php) use commit/path, offset/limit and parent relationships. Our initial history supports one exact starting commit and optional literal path. Two-commit ranges, direct/child change details and imported commit metadata remain gaps.
-- [Git raw diff](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/rawdiff/DiffusionGitRawDiffQuery.php) compares explicit trees with rename/copy detection, using the first parent or empty tree by default. P303d exposes this source-comparison behavior through native inventory and selected-file endpoints. It does not implement `diffusion.rawdiffquery`'s temporary File response, `diffusion.diffquery`'s last-modification selection, or the [Compare controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/controller/DiffusionCompareController.php)'s branch reachability report. Unlike upstream's commit UI, the native inventory includes directory entries. Combined merge diffs, patch export, exhaustive copy discovery and Conduit wire compatibility remain gaps.
+- [Git raw diff](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/rawdiff/DiffusionGitRawDiffQuery.php) compares explicit trees with rename/copy detection, using the first parent or empty tree by default. P303d exposes this source-comparison behavior through native inventory and selected-file endpoints. P303f adds a native binary-capable patch download with full object IDs and three-line context; upstream uses 65,535 context lines by default and does not enable binary hunks. It does not implement `diffusion.rawdiffquery`'s temporary File response, `diffusion.diffquery`'s last-modification selection, or the [Compare controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/controller/DiffusionCompareController.php)'s branch reachability report. Unlike upstream's commit UI, the native inventory includes directory entries. Combined merge diffs, larger patch exports, exhaustive copy discovery and Conduit wire compatibility remain gaps.
 - [Git blame](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/query/blame/DiffusionGitBlameQuery.php) uses root-aware, whitespace-sensitive Git attribution without extra move/copy flags. P303e adds exact native file reads with verified origin source, mobile/offline navigation and CLI output. It does not implement [diffusion.blame](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/diffusion/conduit/DiffusionBlameConduitAPIMethod.php)'s multi-path map, partial-success omission, repository selectors or shared immutable cache. Imported identities/revision links, upstream skip-past controls, Mercurial/SVN blame and Conduit wire compatibility remain gaps.
 - [Differential diff creation](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/conduit/DifferentialCreateDiffConduitAPIMethod.php) records repository/VCS/base provenance. Our import records a complete immutable text-tree snapshot. It does not reproduce working-copy ranges, hunk/changeset submission or upstream Conduit request formats.
 - [Differential revision updates](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/conduit/DifferentialUpdateRevisionConduitAPIMethod.php) require an editable revision and visible diff. Our later-version import similarly requires target edit and source view access, and adds exact version/hash checks. The upstream [update transaction](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/xaction/DifferentialRevisionUpdateTransaction.php) can change the repository with the active diff and conditionally retain acceptance. Our repository link stays fixed and every new version invalidates acceptance. These are deliberate differences. Published/closed revision states and upstream diff publication remain separate parity work.

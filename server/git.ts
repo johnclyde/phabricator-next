@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, opendir, realpath } from 'node:fs/promises';
+import { lstat, open, opendir, realpath, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
+import { deflate } from 'node:zlib';
 import { isAbsolute, join } from 'node:path';
 import { GIT_LIMITS, isGitObjectId, isGitPath } from '../shared/repositories.ts';
-import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry, GitComparison, GitComparisonFile, GitComparisonQuery, GitComparisonFileQuery, GitComparisonEntry, GitComparisonChange, GitComparisonSide, GitBlame, GitBlameLine } from '../shared/repositories.ts';
+import type { GitBlob, GitCommit, GitCommitResult, GitHistory, GitHistoryQuery, GitImportSnapshot, GitObjectFormat, GitObserverInfo, GitPerson, GitRefs, GitTree, GitTreeEntry, GitComparison, GitComparisonFile, GitComparisonQuery, GitComparisonFileQuery, GitComparisonEntry, GitComparisonChange, GitComparisonSide, GitBlame, GitBlameLine, GitPatch } from '../shared/repositories.ts';
 import type { SourceFile } from '../shared/types.ts';
 import { files, HttpError } from './validation.ts';
 
@@ -17,6 +20,7 @@ export interface GitObserver {
   blame(repositoryId: string, commit: string, path: string, signal?: AbortSignal): Promise<GitBlame>;
   history(repositoryId: string, query: GitHistoryQuery, signal?: AbortSignal): Promise<GitHistory>;
   compare(repositoryId: string, query: GitComparisonQuery, signal?: AbortSignal): Promise<GitComparison>;
+  patch(repositoryId: string, query: GitComparisonQuery, signal?: AbortSignal): Promise<GitPatch>;
   compareFile(repositoryId: string, query: GitComparisonFileQuery, signal?: AbortSignal): Promise<GitComparisonFile>;
   importSnapshot(repositoryId: string, commit: string, signal?: AbortSignal): Promise<GitImportSnapshot>;
 }
@@ -26,6 +30,8 @@ const missing = () => new HttpError(404, 'The requested Git object or path is un
 const corrupt = () => new HttpError(422, 'The Git object cannot be safely decoded or verified.', 'GIT_INVALID_OBJECT');
 const invalid = () => new HttpError(400, 'Provide a full Git commit identifier and a valid repository path or history query.', 'GIT_INVALID_QUERY');
 const limit = () => new HttpError(422, 'This Git operation exceeds the supported size, time, or result limit.', 'GIT_LIMIT_EXCEEDED');
+const unrepresentablePatch = () => new HttpError(422, 'These exact Git trees cannot be represented by a portable complete patch.', 'GIT_PATCH_UNREPRESENTABLE');
+const compressObject = promisify(deflate);
 const aborted = () => new HttpError(499, 'The Git operation was cancelled.', 'GIT_ABORTED');
 const unsupportedImport = () => new HttpError(422, 'Import requires a complete nonempty tree of UTF-8 text files with supported source paths. Empty directories, binary files, symlinks and submodules are unsupported.', 'GIT_IMPORT_UNSUPPORTED');
 const checkAbort = (signal: AbortSignal): void => { if (signal.aborted) throw aborted(); };
@@ -67,7 +73,7 @@ const environment: NodeJS.ProcessEnv = {
   PATH: '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', HOME: '/nonexistent',
   GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_COUNT: '0', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1',
-  GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '', GIT_OPTIONAL_LOCKS: '0',
+  GIT_ATTR_NOSYSTEM: '1', GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '', GIT_OPTIONAL_LOCKS: '0',
   GIT_PAGER: 'cat', GIT_SSH_COMMAND: '/usr/bin/false', LC_ALL: 'C', TZ: 'UTC',
 };
 const gitOptions = [
@@ -273,7 +279,7 @@ async function changedEntries(repository:RepositoryHandle,beforeTree:string|null
   }
   return changed;
 }
-async function preflightComparison(repository:RepositoryHandle,entries:ChangedEntries):Promise<void> {
+async function preflightComparison(repository:RepositoryHandle,entries:ChangedEntries,capture?:(id:string,data:Buffer)=>Promise<void>):Promise<void> {
   const sizes=new Map<string,number>();let bytes=0,sources=0,destinations=0;
   for(const pair of entries.values()){
     for(const [side,entry]of [['before',pair.before],['after',pair.after]]as const){
@@ -286,6 +292,7 @@ async function preflightComparison(repository:RepositoryHandle,entries:ChangedEn
         // Verify every source admitted to heuristic matching, without retaining
         // bodies in the inventory or trusting Git's object filename alone.
         const data=await rawObject(repository,entry.objectId,'blob',GIT_LIMITS.comparisonBlobBytes);if(data.length!==size)throw corrupt();sizes.set(entry.objectId,size);
+        if(capture)await capture(entry.objectId,data);
       }
       bytes+=size;if(bytes>GIT_LIMITS.comparisonSourceBytes)throw limit();entry.size=size;
     }
@@ -359,6 +366,80 @@ async function comparisonSide(repositoryId:string,commitId:string,entry:GitCompa
   if(data.length>GIT_LIMITS.blobBytes)return {...common,state:'oversized'};
   if(data.includes(0))return {...common,state:'binary'};
   try{return {...common,state:'text',content:new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(data)};}catch{return {...common,state:'unsupported_encoding'};}
+}
+
+/** Only verified objects enter this private database; no alternate object stores,
+ * checkout, source index, hooks, attributes or mutable refs are inherited. */
+async function capturePatchObject(repository: RepositoryHandle, id: string, type: 'tree' | 'blob', data: Buffer): Promise<void> {
+  checkAbort(repository.signal);
+  const object = Buffer.concat([Buffer.from(`${type} ${data.length}\0`), data]);
+  if (createHash(repository.format).update(object).digest('hex') !== id) throw corrupt();
+  const compressed = await compressObject(object); checkAbort(repository.signal);
+  const directory = join(repository.path, 'objects', id.slice(0, 2));
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(join(directory, id.slice(2)), compressed, { flag: 'wx', mode: 0o600 });
+}
+
+/** Walk both complete trees, including unchanged subtrees. An index cannot
+ * represent explicit empty directories, so accepting them would lose identity. */
+async function capturePatchTrees(source: RepositoryHandle, destination: RepositoryHandle, roots: string[]): Promise<void> {
+  const trees = new Map<string, Buffer>();
+  const pending = [...new Set(roots)].map(id => ({ id, path: '' }));
+  let metadataBytes = 0, entries = 0;
+  while (pending.length) {
+    checkAbort(source.signal); const current = pending.pop()!;
+    let data = trees.get(current.id);
+    if (data === undefined) {
+      if (trees.size >= GIT_LIMITS.patchTreeObjects) throw limit();
+      data = await rawObject(source, current.id, 'tree');
+      metadataBytes += data.length; if (metadataBytes > GIT_LIMITS.patchMetadataBytes) throw limit();
+      trees.set(current.id, data); await capturePatchObject(destination, current.id, 'tree', data);
+    }
+    const children = decodeTree(source, data, current.path);
+    if (!children.length && current.path) throw unrepresentablePatch();
+    entries += children.length; if (entries > GIT_LIMITS.patchTreeEntries) throw limit();
+    for (const child of children) if (child.type === 'tree') pending.push({ id: child.objectId, path: child.path });
+  }
+}
+
+async function readPatch(repositoryId: string, query: GitComparisonQuery, source: RepositoryHandle): Promise<GitPatch> {
+  const targetCommit = await readCommit(source, query.target), baseCommit = query.base ? await readCommit(source, query.base) : null;
+  const emptyTree = createHash(source.format).update('tree 0\0').digest('hex');
+  const baseTreeId = baseCommit?.treeId ?? emptyTree, targetTreeId = targetCommit.treeId;
+  const directory = await mkdtemp(join(tmpdir(), 'phab-git-patch-'));
+  const isolated: RepositoryHandle = { path: directory, format: source.format, signal: source.signal };
+  try {
+    for (const name of ['objects', 'refs', 'info']) await mkdir(join(directory, name), { mode: 0o700 });
+    await writeFile(join(directory, 'HEAD'), 'ref: refs/heads/unborn\n', { mode: 0o600 });
+    await writeFile(join(directory, 'config'), `[core]\n repositoryformatversion = ${source.format === 'sha256' ? 1 : 0}\n bare = true\n attributesfile = /dev/null\n quotePath = true\n${source.format === 'sha256' ? '[extensions]\n objectformat = sha256\n' : ''}`, { mode: 0o600 });
+    // Highest-precedence constant attributes reset diff drivers. Before the
+    // diff, this repository has neither a populated index nor a HEAD commit.
+    await writeFile(join(directory, 'info', 'attributes'), '* !diff\n', { mode: 0o600 });
+    await capturePatchTrees(source, isolated, [targetTreeId, ...(baseCommit ? [baseTreeId] : [])]);
+    // The operator database need not contain Git's canonical empty tree.
+    if (baseTreeId === emptyTree || targetTreeId === emptyTree) {
+      try { await capturePatchObject(isolated, emptyTree, 'tree', Buffer.alloc(0)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
+    const changes = await changedEntries(isolated, baseTreeId, targetTreeId);
+    await preflightComparison(source, changes, (id, data) => capturePatchObject(isolated, id, 'blob', data));
+    const patch = await command(isolated, ['diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--no-color', '--diff-algorithm=myers', '--no-indent-heuristic', '--submodule=short', '--ignore-submodules=none', '--src-prefix=a/', '--dst-prefix=b/', '-U3', '-M50%', '-C50%', `-l${GIT_LIMITS.comparisonCandidates}`, baseTreeId, targetTreeId, '--'], GIT_LIMITS.patchBytes);
+    if (!patch.length && baseTreeId !== targetTreeId) throw unrepresentablePatch();
+    // Verify actual application, including binary payloads, modes and Git's
+    // index path rules. Missing unchanged blobs are safe: their exact object
+    // identities are already bound by both hash-verified complete trees.
+    const prepare = await run(['--git-dir', directory, 'read-tree', baseTreeId], source.signal);
+    if (prepare.code !== 0) throw unrepresentablePatch();
+    if (patch.length) {
+      const applied = await run(['--git-dir', directory, 'apply', '--cached', '--binary', '--whitespace=nowarn'], source.signal, GIT_LIMITS.outputBytes, patch);
+      if (applied.code !== 0) throw unrepresentablePatch();
+    }
+    const written = await run(['--git-dir', directory, 'write-tree', '--missing-ok'], source.signal);
+    if (written.code !== 0 || written.data.toString('ascii') !== `${targetTreeId}\n`) throw unrepresentablePatch();
+    checkAbort(source.signal);
+    return { repositoryId, objectFormat: source.format, baseCommit, targetCommit, baseTreeId, targetTreeId, format: 'git-binary-patch-v1', bytes: patch.length, sha256: createHash('sha256').update(patch).digest('hex'), dataBase64: patch.toString('base64') };
+  } catch (error) { if (error instanceof HttpError) throw error; throw unavailable(); }
+  finally { await rm(directory, { recursive: true, force: true }); }
 }
 
 interface BlameObject { id: string; type: 'commit' | 'tree' | 'blob'; size: number }
@@ -701,6 +782,9 @@ class LocalGitObserver implements GitObserver {
   }
   async compare(id:string,query:GitComparisonQuery,signal?:AbortSignal):Promise<GitComparison> {
     comparisonQuery(query);return this.observe(id,signal,repository=>readComparison(id,query,repository));
+  }
+  async patch(id:string,query:GitComparisonQuery,signal?:AbortSignal):Promise<GitPatch> {
+    comparisonQuery(query);return this.observe(id,signal,repository=>readPatch(id,query,repository));
   }
   async compareFile(id:string,query:GitComparisonFileQuery,signal?:AbortSignal):Promise<GitComparisonFile> {
     comparisonQuery(query);

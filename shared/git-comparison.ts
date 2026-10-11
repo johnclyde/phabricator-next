@@ -10,7 +10,7 @@ function commit(value: unknown, id: string, format: GitObjectFormat): value is G
     || typeof value.message !== 'string' || typeof value.messageTruncated !== 'boolean') return false;
   return [value.author, value.committer].every(person => record(person) && typeof person.name === 'string' && typeof person.email === 'string' && typeof person.timestamp === 'string' && Number.isFinite(Date.parse(person.timestamp)));
 }
-function identity(value: unknown, repositoryId: string, query: GitComparisonQuery): value is GitComparisonIdentity {
+export function validGitComparisonIdentity(value: unknown, repositoryId: string, query: GitComparisonQuery): value is GitComparisonIdentity {
   if (!record(value) || value.repositoryId !== repositoryId || (value.objectFormat !== 'sha1' && value.objectFormat !== 'sha256')) return false;
   const format = value.objectFormat;
   return isGitObjectId(query.target, format) && (query.base === null || isGitObjectId(query.base, format))
@@ -39,7 +39,7 @@ export function sameGitComparisonChange(left: GitComparisonChange, right: GitCom
 }
 /** Bind a response to the ordered pair before rendering or retaining its source. */
 export function validGitComparison(value: unknown, repositoryId: string, query: GitComparisonQuery): value is GitComparison {
-  if (!identity(value, repositoryId, query) || !('algorithm' in value) || value.algorithm !== 'git-M50-C50' || !('changes' in value) || !Array.isArray(value.changes)
+  if (!validGitComparisonIdentity(value, repositoryId, query) || !('algorithm' in value) || value.algorithm !== 'git-M50-C50' || !('changes' in value) || !Array.isArray(value.changes)
     || value.changes.length > GIT_LIMITS.comparisonChanges || value.changes.some(item => !change(item, value.objectFormat))) return false;
   const changes = value.changes as GitComparisonChange[];
   return new Set(changes.map(item => item.id)).size === changes.length
@@ -57,7 +57,7 @@ function side(value: unknown, expected: GitComparisonEntry | null, id: string, c
   return ['binary', 'oversized', 'unsupported_encoding'].includes(String(value.state)) && !('content' in value);
 }
 export function validGitComparisonFile(value: unknown, repositoryId: string, query: GitComparisonFileQuery, expected?: GitComparisonChange): value is GitComparisonFile {
-  if (!identity(value, repositoryId, query) || !('change' in value) || !change(value.change, value.objectFormat) || !('before' in value) || !('after' in value)) return false;
+  if (!validGitComparisonIdentity(value, repositoryId, query) || !('change' in value) || !change(value.change, value.objectFormat) || !('before' in value) || !('after' in value)) return false;
   const item = value.change;
   return (item.before?.path ?? null) === query.beforePath && (item.after?.path ?? null) === query.afterPath
     && (!expected || sameGitComparisonChange(item, expected))

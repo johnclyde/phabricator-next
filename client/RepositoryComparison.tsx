@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { GitComparison, GitComparisonChange, GitComparisonFile, GitComparisonSide } from '../shared/repositories';
 import { isGitObjectId } from '../shared/repositories';
 import { compareFile } from '../shared/comparison';
 import ComparisonLines from './ComparisonLines';
+import RepositoryPatch from './RepositoryPatch';
 import { useWorkspace } from './SessionGate';
 import { isNetworkError } from './offline';
 import type { RepositorySelection } from './repository-cache';
@@ -12,7 +13,7 @@ const short = (value: string) => value.slice(0, 12);
 const labels = { added: 'Added', deleted: 'Deleted', modified: 'Modified', type_changed: 'Type changed', renamed: 'Renamed', copied: 'Copied' };
 const types = { file: 'File', tree: 'Directory', symlink: 'Symbolic link', submodule: 'Submodule' };
 const title = (change: GitComparisonChange) => change.before && change.after && change.before.path !== change.after.path ? `${change.before.path} → ${change.after.path}` : change.after?.path ?? change.before!.path;
-type Props = { id: string; selection: RepositorySelection; online: boolean; generation: number; choose: (selection: RepositorySelection, automatic?: boolean) => void; cached: <T>(key: string) => T | null; saveCache: (key: string, value: unknown) => void; dropCache: (key: string) => void };
+type Props = { id: string; selection: RepositorySelection; online: boolean; generation: number; choose: (selection: RepositorySelection, automatic?: boolean) => void; cached: <T>(key: string) => T | null; saveCache: (key: string, value: unknown) => boolean; dropCache: (key: string) => void };
 export default function RepositoryComparison({ id, selection, online, generation, choose, cached, saveCache, dropCache }: Props) {
   const { request, isActive, unavailableObject, onRepositorySnapshotChange, onAccessChange } = useWorkspace();
   const pair = comparisonPair(selection), inventoryKey = comparisonCacheKey(selection), fileKey = comparisonCacheKey(selection, true);
@@ -27,7 +28,9 @@ export default function RepositoryComparison({ id, selection, online, generation
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; inventoryReads.current++; fileReads.current++; }; }, []);
   useEffect(() => onRepositorySnapshotChange(() => { inventoryReads.current++; fileReads.current++; setInventory(null); setFile(null); setLoading(false); setFileLoading(false); }), []);
   useEffect(() => onAccessChange(ids => { if (ids.includes(id)) { inventoryReads.current++; fileReads.current++; setInventory(null); setFile(null); setLoading(false); setFileLoading(false); setError('This repository is no longer available.'); setFileError(''); } }), [id]);
-  useEffect(() => { setBaseInput(selection.baseCommitId ?? 'empty'); setTargetInput(selection.commitId); }, [pair]);
+  // Synchronize a newly selected pair before its inputs can receive edits.
+  // A deferred reset can otherwise overwrite typing immediately after Swap.
+  useLayoutEffect(() => { setBaseInput(selection.baseCommitId ?? 'empty'); setTargetInput(selection.commitId); }, [pair]);
   useEffect(() => { const focus = () => { if (active()) setReload(value => value + 1); }; window.addEventListener('focus', focus); return () => window.removeEventListener('focus', focus); }, []);
   useEffect(() => {
     const sequence = ++inventoryReads.current; fileReads.current++; setFile(null); setFileLoading(false); setFileError(''); setError(''); setLoading(true);
@@ -91,6 +94,7 @@ export default function RepositoryComparison({ id, selection, online, generation
       <p className="small muted">This compares two committed trees. Reference updates never move this pair. Merge parents are compared individually; branch reachability is not shown.</p>
       {visible && visible.targetCommit.parentIds.length > 1 && <p className="info-strip">Merge commit · {selection.baseCommitId && visible.targetCommit.parentIds.includes(selection.baseCommitId) ? `comparing parent ${visible.targetCommit.parentIds.indexOf(selection.baseCommitId) + 1} with the target.` : 'comparing the selected custom base or empty tree with the target.'}</p>}
     </div>
+    <RepositoryPatch id={id} selection={selection} expected={visible} online={online} generation={generation} cached={cached} saveCache={saveCache} dropCache={dropCache}/>
     {(!online || saved || savedFile) && <p className="info-strip">Reading saved comparison snapshots. Only previously loaded commit pairs and changed files are available offline.</p>}
     {loading && <p className="card-body" role="status">Loading changed files…</p>}{error && <p className="info-strip" role="alert">{error}</p>}
     {visible && <>

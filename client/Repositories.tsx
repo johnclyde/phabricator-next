@@ -35,10 +35,12 @@ export default function RepositoryPage({ id, state, online, manageAccess, refres
   useEffect(() => onAccessChange(ids => { if (ids.includes(id)) { reads.current++; refReads.current++; profileReads.current++; cache.current = { entries: [] }; setDetail(null); setRefs(null); setCommit(null); setContent(null); } }), []);
   useEffect(() => onRepositorySnapshotChange(() => { reads.current++; refReads.current++; profileReads.current++; setPaging(false); setLoading(false); setRefLoading(false); cache.current = { entries: [] }; setDetail(null); setRefs(null); setCommit(null); setContent(null); setCacheGeneration(repositorySnapshotGeneration()); }), []);
   const saveCache = (key: string, value: unknown) => {
-    if (!active()) return;
+    if (!active()) return false;
     cache.current = putRepositoryCache(cache.current, key, value);
-    if (!cache.current.entries.some(entry => entry.key === key)) setWarning('This snapshot exceeds the offline cache limit. Keep this tab open or reconnect to load it again.');
-    else if (!writeStored(`repository:${id}:cache`, cache.current)) setWarning('This snapshot could not be saved in browser storage. Keep this tab open or reconnect to load it again.');
+    const included = cache.current.entries.some(entry => entry.key === key), persisted = writeStored(`repository:${id}:cache`, cache.current);
+    if (!included) setWarning('This snapshot exceeds the offline cache limit. Keep this tab open or reconnect to load it again.');
+    else if (!persisted) setWarning('This snapshot could not be saved in browser storage. Keep this tab open or reconnect to load it again.');
+    return included && persisted;
   };
   const dropCache = (key: string) => { if (!active()) return; cache.current = { ...cache.current, entries: cache.current.entries.filter(entry => entry.key !== key) }; writeStored(`repository:${id}:cache`, cache.current); };
   const choose = (next: RepositorySelection, automatic = false) => {

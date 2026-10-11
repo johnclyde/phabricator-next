@@ -839,6 +839,13 @@
 @media(max-width:600px) { .wiki-child-row { padding: 14px; } .wiki-breadcrumbs { gap: 6px; } .wiki-path-search { flex-basis: 100%; } }
 
 .repository-blame { min-width: 0; }
+.repository-patch { padding: 16px; border-block: 1px solid var(--border); background: #f7f9fb; min-width: 0; }
+.repository-patch-heading, .repository-patch-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.repository-patch > p { margin-top: 10px; line-height: 1.6; }
+.repository-patch-ready { display: grid; gap: 9px; margin-top: 14px; overflow-wrap: anywhere; }
+.repository-patch-ready > code, .repository-patch-ready details code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.repository-patch-ready summary { cursor: pointer; color: var(--blue); }
+@media(max-width:600px) { .repository-patch { padding: 14px; } .repository-patch-actions { width: 100%; } .repository-patch-actions .button { flex: 1 1 auto; min-height: 44px; white-space: normal; } }
 .repository-blame-heading, .repository-blame-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
 .repository-blame > .card-body > p, .repository-blame-origin { overflow-wrap: anywhere; }
 .repository-blame-origin { border-block: 1px solid var(--border); background: #f6f9fc; }
