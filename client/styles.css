@@ -782,6 +782,28 @@
 .wiki-child-row small { color: var(--muted); margin-top: 4px; }
 .wiki-path-search { display: flex; flex: 1; gap: 8px; }
 .wiki-path-search input { min-width: 0; flex: 1; }
+.wiki-discovery > .file-actions { margin-bottom: 16px; }
+.wiki-search-controls { padding: 18px; border-bottom: 1px solid var(--border); }
+.wiki-search-controls .field { margin-bottom: 14px; min-width: 0; }
+.wiki-search-controls small { line-height: 1.6; }
+.wiki-search-controls summary { color: var(--blue); cursor: pointer; padding: 6px 0; }
+.wiki-search-controls details form { padding-top: 12px; }
+.wiki-status-filters { border: 0; padding: 0; margin: 0 0 16px; display: flex; gap: 12px; flex-wrap: wrap; }
+.wiki-status-filters legend { font-weight: 600; margin-bottom: 9px; }
+.wiki-status-filters small { flex-basis: 100%; color: var(--muted); }
+.wiki-search-paths { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.wiki-search-controls form > .file-actions { margin-top: 12px; }
+.wiki-search-row { display: flex; align-items: flex-start; gap: 14px; padding: 19px; border-bottom: 1px solid var(--border); }
+.wiki-search-row > svg { flex-shrink: 0; color: var(--muted); margin-top: 2px; }
+.wiki-search-row > div { flex: 1; min-width: 0; }
+.wiki-search-row h3 { font-size: 15px; overflow-wrap: anywhere; }
+.wiki-search-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 7px 0; font-size: 11px; }
+.wiki-search-path { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.wiki-search-snippet { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; margin: 10px 0; }
+.wiki-search-row small { color: var(--muted); line-height: 1.7; }
+.wiki-search-inactive { background: #f8f9fb; }
+.wiki-search-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 19px; color: var(--muted); }
+@media(max-width:600px) { .wiki-search-controls { padding: 14px; } .wiki-search-paths { grid-template-columns: minmax(0, 1fr); gap: 0; } .wiki-search-row { padding: 15px; gap: 10px; } .wiki-search-row h3 { font-size: 14px; } }
 .wiki-path-preview, .wiki-move-preview, .wiki-move-recovery { margin: 14px 0; border: 1px solid var(--border); padding: 14px; overflow-wrap: anywhere; }
 .wiki-path-preview nav { display: flex; flex-wrap: wrap; gap: 12px; }
 .wiki-moved { border-left: 3px solid #d5a028; }

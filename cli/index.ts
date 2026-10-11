@@ -18,6 +18,7 @@ import { fileCommand } from './files';
 import { citationCommand } from './citations';
 import { pasteCommand } from './pastes';
 import { docxCommand } from './docx';
+import { wikiCommand } from './wiki';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -72,6 +73,11 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- comment-paste PA1 --version N --comment-file FILE [--request-id KEY]
   npm run arc -- archive-paste PA1 --version N [--status active] [--request-id KEY]
   npm run arc -- download-paste PA1 --version N --output NEW_FILE
+  npm run arc -- wiki [--query TEXT] [--status active|all|deleted|moved|stub] [--path PATH] [--parent-path PATH] [--ancestor-path PATH] [--order newest|oldest] [--after CURSOR|--before CURSOR] [--limit N] [--json]
+  npm run arc -- wiki-document W1
+  npm run arc -- wiki-version W1 --version N
+  npm run arc -- wiki-history W1 [--before N] [--limit N]
+  npm run arc -- wiki-transactions W1 [--before N] [--limit N]
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -185,6 +191,7 @@ async function main() {
       joined: { type: 'boolean' }, watching: { type: 'boolean' },
       'show-hidden': { type: 'boolean' },
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
+      'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
@@ -242,6 +249,7 @@ async function main() {
   if (await docxCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   const kind = values.kind || 'code';
   if (!['code', 'paper', 'document'].includes(kind)) throw new Error('--kind must be code, paper or document.');
   const getDetail = (id: string | undefined) => {

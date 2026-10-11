@@ -143,6 +143,10 @@ test('invalid compiler artifacts roll back publication as one transaction, and g
 /** Historical fixture uses only the schema14 table definitions, never relabels a current Store. */
 function oldSchema(path:string) {
   const db=new DatabaseSync(path);db.exec(`CREATE TABLE sequences(name TEXT PRIMARY KEY,value INTEGER NOT NULL);CREATE TABLE entities(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL);CREATE TABLE versions(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),number INTEGER NOT NULL,data TEXT NOT NULL);CREATE TABLE thread_preferences(thread_id TEXT NOT NULL,principal_id TEXT NOT NULL,collapsed INTEGER NOT NULL,version INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(thread_id,principal_id));PRAGMA user_version=14;`);
+  // Schema14 already includes the immutable wiki table introduced by schema2.
+  db.exec(`CREATE TABLE wiki_versions (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES entities(id), number INTEGER NOT NULL CHECK(number > 0), data TEXT NOT NULL CHECK(json_valid(data)), UNIQUE(document_id, number));
+    CREATE TRIGGER wiki_versions_no_update BEFORE UPDATE ON wiki_versions BEGIN SELECT RAISE(ABORT, 'Wiki versions are immutable'); END;
+    CREATE TRIGGER wiki_versions_no_delete BEFORE DELETE ON wiki_versions BEGIN SELECT RAISE(ABORT, 'Wiki versions are immutable'); END;`);
   db.prepare('INSERT INTO entities VALUES(?,?,?)').run('P1','revision','{ "old" : "preserve raw bytes" }');db.prepare('INSERT INTO versions VALUES(?,?,?,?)').run('v1','P1',1,'{ "immutable" : true }');db.prepare('INSERT INTO thread_preferences VALUES(?,?,?,?,?)').run('thread','alice',1,2,'2024-01-01');const rows=['entities','versions','thread_preferences'].map(table=>db.prepare(`SELECT * FROM ${table}`).all());db.close();return rows;
 }
 test('schema15 adds empty job/artifact storage without rewriting schema14 evidence and rolls failed migrations back',()=>{
@@ -150,7 +154,7 @@ test('schema15 adds empty job/artifact storage without rewriting schema14 eviden
   try{
     const exec=DatabaseSync.prototype.exec;try{DatabaseSync.prototype.exec=function(sql:string){if(sql==='PRAGMA user_version = 15')throw new Error('Injected migration failure');return exec.call(this,sql);};assert.throws(()=>new Store({path}),/Injected migration failure/);}finally{DatabaseSync.prototype.exec=exec;}
     const db=new DatabaseSync(path);assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,14);assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='paper_builds'").get(),undefined);db.close();
-    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,21);assert.deepEqual(['entities','versions','thread_preferences'].map(table=>store!.database.prepare(`SELECT * FROM ${table}`).all()),old);assert.deepEqual(store.database.prepare('SELECT * FROM paper_builds').all(),[]);assert.deepEqual(store.database.prepare('SELECT * FROM paper_build_artifacts').all(),[]);
+    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,22);assert.deepEqual(['entities','versions','thread_preferences'].map(table=>store!.database.prepare(`SELECT * FROM ${table}`).all()),old);assert.deepEqual(store.database.prepare('SELECT * FROM paper_builds').all(),[]);assert.deepEqual(store.database.prepare('SELECT * FROM paper_build_artifacts').all(),[]);
   }finally{store?.close();rmSync(directory,{recursive:true,force:true});}
 });
 

@@ -91,14 +91,14 @@ test('bounded child scans filter visibility, expose visible missing parents, and
 test('schema20 adds canonical locations only, preserves every prior row/schema, and permits legacy orphan edits',()=>{
   const directory=mkdtempSync(join(tmpdir(),'wiki-schema20-')),path=join(directory,'workspace.sqlite');let store=new Store({path});
   try{
-    make(store,'/');make(store,'old');store.database.exec('DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; PRAGMA user_version=19;');
+    make(store,'/');make(store,'old');store.database.exec('DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; PRAGMA user_version=19;');
     const old:WikiDocument={id:'W300',title:'Legacy orphan',slug:'missing/'+ 'x'.repeat(150),content:'Exact old source',version:3,createdAt:'2020-01-01',updatedAt:'2020-02-01'};
     store.database.prepare("INSERT INTO entities(id,kind,data) VALUES (?,'document',?)").run(old.id,JSON.stringify(old,null,2));
     store.database.prepare('INSERT INTO wiki_versions(id,document_id,number,data) VALUES(?,?,?,?)').run('old-wiki-version',old.id,old.version,JSON.stringify({id:'old-wiki-version',documentId:old.id,number:old.version,title:old.title,slug:old.slug,content:old.content,createdAt:old.updatedAt,kind:'legacy',author:null,message:'Legacy',restoredFrom:null}));
     store.database.exec('CREATE VIEW old_document_view AS SELECT id,data FROM entities WHERE kind=\'document\'; ALTER TABLE wiki_versions ADD COLUMN operator_note TEXT;');
     const schemas=store.database.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all() as {name:string;sql:string}[];
     const rows=new Map((store.database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as {name:string}[]).map(({name})=>[name,store.database.prepare(`SELECT rowid,* FROM ${name} ORDER BY rowid`).all()]));
-    store.close();store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,21);
+    store.close();store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,22);
     for(const schema of schemas)assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql,schema.sql,schema.name);
     for(const [name,before] of rows)assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM ${name} ORDER BY rowid`).all(),before,name);
     assert.equal(store.documentAtPath('missing'),null);assert.equal(store.documentAtPath(old.slug)?.id,old.id);assert.deepEqual(store.documentAncestry(old.slug).map(ref=>ref.document?.id??null),['W1',null]);
@@ -112,7 +112,7 @@ test('schema20 adds canonical locations only, preserves every prior row/schema, 
 
 test('canonical collisions abort schema20 atomically without rewriting original entities',()=>{
   const directory=mkdtempSync(join(tmpdir(),'wiki-schema20-collision-')),path=join(directory,'workspace.sqlite');const store=new Store({path});
-  store.database.exec('DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; PRAGMA user_version=19;');
+  store.database.exec('DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; PRAGMA user_version=19;');
   for(const [id,slug]of [['W1','Name'],['W2','name/']])store.database.prepare("INSERT INTO entities(id,kind,data) VALUES (?,'document',?)").run(id,JSON.stringify({id,title:'Old',slug,content:'Keep',version:1,createdAt:'old',updatedAt:'old'}));
   const before=store.database.prepare('SELECT * FROM entities').all();store.close();
   try{assert.throws(()=>new Store({path}),/UNIQUE/);const db=new DatabaseSync(path);try{assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,19);assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name='wiki_locations'").get(),undefined);assert.deepEqual(db.prepare('SELECT * FROM entities').all(),before);}finally{db.close();}}finally{rmSync(directory,{recursive:true,force:true});}

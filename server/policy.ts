@@ -6,7 +6,7 @@ import { ancestorIds, effectiveMember, hierarchy } from './project-graph.ts';
 import { canonicalWikiPath, wikiAncestors, wikiParentPath } from '../shared/wiki.ts';
 
 type JsonRow = { data: string };
-type PolicyRow = { data: string; space_data: string; owner_id: string | null; entity_kind: string; entity_data: string };
+type PolicyRow = { data: string; space_data: string; owner_id: string | null; entity_kind: string; entity_data: string | null };
 type ResolvedPolicy = { policy: ObjectPolicy; space: Space; capabilities: EffectiveAccess; ownerId: string | null; repositoryId?: string; parentId?: string; wiki?: boolean; inheritedFrom?: { projectId: string; policyVersion: number } };
 type Traversal = { remaining: number };
 /** Per decision: policy nodes, active attachment edges and distinct source File checks. */
@@ -159,7 +159,9 @@ export class PolicyStore {
     if (!isObjectId(id) || !this.member(principalId)) return undefined;
     if (seen.has(id) || seen.size >= 16) return undefined;
     seen.add(id);
-    const row = this.database.prepare("SELECT p.data, s.data AS space_data, e.kind AS entity_kind, e.data AS entity_data, CASE WHEN e.kind = 'task' THEN json_extract(e.data, '$.ownerId') WHEN e.kind IN ('file','paste') THEN json_extract(e.data, '$.authorId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
+    // Only revision dependency checks need entity metadata. Wiki entity JSON
+    // contains source text, which must not be materialized before authorization.
+    const row = this.database.prepare("SELECT p.data, s.data AS space_data, e.kind AS entity_kind, CASE WHEN e.kind = 'revision' THEN e.data ELSE NULL END AS entity_data, CASE WHEN e.kind = 'task' THEN json_extract(e.data, '$.ownerId') WHEN e.kind IN ('file','paste') THEN json_extract(e.data, '$.authorId') ELSE NULL END AS owner_id FROM object_policies p JOIN policy_spaces s ON s.id = p.space_id JOIN entities e ON e.id = p.object_id WHERE p.object_id = ?").get(id) as PolicyRow | undefined;
     if (!row) return undefined;
     const policy = JSON.parse(row.data) as ObjectPolicy; const space = JSON.parse(row.space_data) as Space;
     const ownerId = typeof row.owner_id === 'string' ? row.owner_id : null;
@@ -168,6 +170,7 @@ export class PolicyStore {
       if (wiki && !this.wikiAncestorsVisible(id, principalId, traversal)) return undefined;
       let repositoryId: string | undefined;
       if (row.entity_kind === 'revision') {
+        if (row.entity_data === null) return undefined;
         const entity: unknown = JSON.parse(row.entity_data);
         if (!entity || typeof entity !== 'object' || Array.isArray(entity)) return undefined;
         const dependency: unknown = (entity as { repositoryId?: unknown }).repositoryId;

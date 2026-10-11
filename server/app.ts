@@ -23,6 +23,9 @@ import type { FileListQuery } from '../shared/files.ts';
 import { AccessLayer } from './access.ts';
 import { createGitObserver, type GitObserver } from './git.ts';
 import { PaperBuildService, type PaperRunner } from './paper-builds.ts';
+import { canonicalWikiPath } from '../shared/wiki.ts';
+import { conduitRequest } from './conduit.ts';
+import { wikiDocumentQuery } from './wiki-query.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -503,7 +506,17 @@ export function createApp(options: AppOptions = {}): App {
       if (!pathname.startsWith(basePath)) throw new HttpError(404, 'Route not found.');
       const path = `/${pathname.slice(basePath.length)}`;
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+      if ((req.method === 'GET' || req.method === 'HEAD') && path.startsWith('/w/')) {
+        if (url.search) throw new HttpError(400, 'Wiki links do not accept query parameters.');
+        let wikiPath: string;
+        try { wikiPath = canonicalWikiPath(decodeURIComponent(path.slice(3))); } catch { throw new HttpError(400, 'Invalid wiki path.'); }
+        const fragment = wikiPath === '/' ? '' : wikiPath.split('/').map(encodeURIComponent).join('/');
+        res.writeHead(302, { Location: `${basePath}#wiki/${fragment}`, 'Cache-Control': 'no-store' }); res.end(); return;
+      }
       if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath); return; }
+      if (path.startsWith('/api/phriction.')) {
+        send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath)); return;
+      }
       if (req.method === 'GET' && path === '/api/health') { send(res, 200, { ok: true }); return; }
       if (req.method === 'GET' && path === '/api/session') {
         const result = auth.session(req);
@@ -796,6 +809,7 @@ export function createApp(options: AppOptions = {}): App {
             if (url.search) throw new HttpError(400, 'Task read URLs may not contain query parameters.');
             send(res, 200, access.task(task[1]!)); return;
           }
+          if (path === '/api/documents') { send(res, 200, access.searchWikiDocuments(wikiDocumentQuery(url.searchParams))); return; }
           if (path === '/api/wiki') {
             for (const name of url.searchParams.keys()) if (!['path', 'after', 'limit'].includes(name) || url.searchParams.getAll(name).length !== 1) throw new HttpError(400, 'Wiki browsing accepts one path, after cursor and limit.');
             const value = url.searchParams.get('path');

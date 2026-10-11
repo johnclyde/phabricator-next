@@ -265,7 +265,7 @@ test('schema 10 migrates scalar relationships without altering any prior task, s
   const directory = mkdtempSync(join(tmpdir(), 'phab-tags-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaNine(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 21);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 22);
     for (const [table, rows] of old.preserved) assert.deepEqual(raw(store, table), rows, table);
     const { projectId, ...metadata } = old.task;
     assert.deepEqual(current(store, old.task.id), { ...metadata, projectIds: [projectId] });

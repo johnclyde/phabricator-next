@@ -1,3 +1,4 @@
+export type { WikiSearchOrder, WikiSearchPaging, WikiDocumentSearchQuery, WikiContentSearchQuery, WikiDocumentIdentity, WikiContentIdentity, WikiContentSearchItem, WikiDocumentSearchItem, WikiDocumentSearchPage, WikiContentSearchPage } from './wiki-search';
 import type { EffectiveAccess, NewObjectAccessInput, ObjectAccess, Space } from './policy';
 import type { PublicAccount } from './auth';
 import type { Project } from './projects';

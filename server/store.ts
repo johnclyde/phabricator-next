@@ -1,3 +1,5 @@
+import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
+import type { WikiDocumentSearchQuery, WikiContentSearchQuery, WikiDocumentSearchPage, WikiContentSearchPage, WikiDocumentIdentity, WikiContentIdentity } from '../shared/wiki-search.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { initializePaperBuilds } from './paper-builds.ts';
 import { FileStore } from './files.ts';
@@ -146,6 +148,7 @@ export class Store {
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
+  private wikiSearch?:WikiSearchStore;
   private projects: ProjectStore;
   private workboards?: WorkboardStore;
   constructor(options: StoreOptions = {}) {
@@ -154,7 +157,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 21) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 22) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -393,6 +396,8 @@ export class Store {
         this.database.exec('PRAGMA user_version = 21');
       });}catch(error){this.database.close();throw error;}
     }
+    if(version<22){try{this.transaction(()=>{initializeWikiSearch(this.database);this.database.exec('PRAGMA user_version = 22');});}catch(error){this.database.close();throw error;}}
+    this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;
     this.pastes = new PasteStore(this.database, { nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor) });
@@ -469,7 +474,7 @@ export class Store {
     if (kind === 'document') { const { location: _location, publication: _publication, ...rest } = value as WikiDocument; metadata = rest; }
     const json = JSON.stringify(metadata);
     const created = this.database.prepare('INSERT INTO entities (id, kind, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(value.id, kind, json);
-    if (created.changes) registerDefaultPolicy(this.database, value.id);
+    if (created.changes) { registerDefaultPolicy(this.database, value.id); if(kind==='document')this.wikiSearch?.ensureDocument(value.id); }
     else this.database.prepare('UPDATE entities SET data = ? WHERE id = ?').run(json, value.id);
     if (kind === 'task') this.workboards?.touchTask(value as Task);
   }
@@ -870,6 +875,12 @@ export class Store {
       return this.taskDetail(id);
     });
   }
+  searchWikiDocuments(query:WikiDocumentSearchQuery={},canView:(id:string)=>boolean,principalId:string):WikiDocumentSearchPage{return this.read(()=>this.wikiSearch!.documents(query,canView,principalId));}
+  searchWikiContent(query:WikiContentSearchQuery={},canView:(id:string)=>boolean,principalId:string):WikiContentSearchPage{return this.read(()=>this.wikiSearch!.contents(query,canView,principalId));}
+  wikiDocumentIdentity(id:string):WikiDocumentIdentity{return this.wikiSearch!.documentIdentity(id);}
+  wikiContentIdentity(versionId:string):WikiContentIdentity{return this.wikiSearch!.contentIdentity(versionId);}
+  resolveWikiDocumentIdentity(value:number|string):WikiDocumentIdentity|null{return this.wikiSearch!.resolveDocument(value);}
+  resolveWikiContentIdentity(value:number|string):WikiContentIdentity|null{return this.wikiSearch!.resolveContent(value);}
   private documentMutation<T>(work: () => T): T {
     this.database.exec('SAVEPOINT wiki_document_write');
     try {
@@ -1094,6 +1105,7 @@ export class Store {
     const version: WikiVersion = { id: randomUUID(), documentId: document.id, number: document.version, title: document.title,
       slug: document.slug, content: document.content, createdAt: document.updatedAt, ...(document.location?{location:document.location}:{}), ...metadata };
     this.database.prepare('INSERT INTO wiki_versions (id, document_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, document.id, version.number, JSON.stringify(version));
+    this.wikiSearch?.ensureContent(version.id);
     return version;
   }
   documentHistory(id: string, options: { before?: number; limit?: number } = {}): WikiHistory {

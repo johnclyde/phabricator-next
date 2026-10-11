@@ -231,11 +231,7 @@ export class Auth {
     if (authorization !== undefined) {
       if (this.cookie(req, this.sessionCookie)) throw new HttpError(401, 'Use one authentication method per request.');
       const match = /^Bearer (phab_[A-Za-z0-9_-]{43})$/.exec(authorization);
-      const row = match ? this.database.prepare('SELECT * FROM auth_tokens WHERE secret_hash = ?').get(hash(match[1]!)) as TokenRow | undefined : undefined;
-      if (!row) throw new HttpError(401, 'A valid access token is required.');
-      const account = this.account(row.account_id);
-      const context: AuthContext = { workspaceId: this.workspaceId, principalId: row.account_id, displayName: account?.display_name ?? '', credentialId: row.id, kind: 'token', sessionContext: null, scopes: JSON.parse(row.scopes) as AuthScope[] };
-      this.revalidate(context, scope); return context;
+      return this.tokenContext(match?.[1], scope);
     }
     const row = this.sessionRow(req);
     if (!row) throw new HttpError(401, 'Sign in to this workspace.');
@@ -243,6 +239,28 @@ export class Auth {
     this.requireHeader(req, 'x-session-context', row.context, 401);
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method ?? 'GET')) { this.sameOrigin(req); this.requireHeader(req, 'x-csrf-token', row.context); }
     const context: AuthContext = { workspaceId: this.workspaceId, principalId: row.account_id, displayName: state.account!.displayName, credentialId: row.id, kind: 'session', sessionContext: row.context, scopes: [...SCOPES] };
+    this.revalidate(context, scope); return context;
+  }
+  /** Conduit carries tokens in its body. Never rewrite headers or weaken cookie CSRF checks. */
+  authenticateConduit(req: IncomingMessage, token: unknown, scope: AuthScope = 'read'): AuthContext {
+    const authorization = req.headers.authorization;
+    const cookie = this.cookie(req, this.sessionCookie);
+    if (token !== undefined) {
+      if (authorization !== undefined || cookie !== undefined) throw new HttpError(401, 'Use one authentication method per request.');
+      return this.tokenContext(token, scope);
+    }
+    if (authorization !== undefined) {
+      if (cookie !== undefined) throw new HttpError(401, 'Use one authentication method per request.');
+      return this.tokenContext(typeof authorization === 'string' ? /^Bearer (phab_[A-Za-z0-9_-]{43})$/.exec(authorization)?.[1] : undefined, scope);
+    }
+    return this.authenticate(req, scope);
+  }
+  private tokenContext(token: unknown, scope: AuthScope): AuthContext {
+    const row = typeof token === 'string' && /^phab_[A-Za-z0-9_-]{43}$/.test(token)
+      ? this.database.prepare('SELECT * FROM auth_tokens WHERE secret_hash = ?').get(hash(token)) as TokenRow | undefined : undefined;
+    if (!row) throw new HttpError(401, 'A valid access token is required.');
+    const account = this.account(row.account_id);
+    const context: AuthContext = { workspaceId: this.workspaceId, principalId: row.account_id, displayName: account?.display_name ?? '', credentialId: row.id, kind: 'token', sessionContext: null, scopes: JSON.parse(row.scopes) as AuthScope[] };
     this.revalidate(context, scope); return context;
   }
   revalidate(context: AuthContext, scope?: AuthScope): void {

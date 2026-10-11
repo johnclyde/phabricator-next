@@ -17,6 +17,7 @@ import { validatePasteContent, type PasteDetail, type PasteListQuery, type Paste
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
 import type { CitationEvidenceRecord } from '../shared/citation-evidence.ts';
 import { parseCitationEvidenceInput } from './citation-evidence.ts';
+import type { WikiContentSearchPage, WikiContentSearchQuery, WikiDocumentSearchPage, WikiDocumentSearchQuery } from '../shared/wiki-search.ts';
 
 const CREATES = new Set(['/api/projects', '/api/repositories', '/api/tasks', '/api/documents', '/api/revisions', '/api/revisions/docx', '/api/files', '/api/pastes']);
 const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -76,6 +77,12 @@ export class AccessLayer {
     this.require(id);
     const detail = this.store.documentDetail(id);
     return this.redact({ ...detail, hierarchy: this.wikiHierarchy(detail.document.location?.path ?? detail.document.slug), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  searchWikiDocuments(query: WikiDocumentSearchQuery): WikiDocumentSearchPage {
+    return { ...this.store.searchWikiDocuments(query, id => this.canView(id), this.principal), accessEpoch: this.policies.epoch() };
+  }
+  searchWikiContent(query: WikiContentSearchQuery): WikiContentSearchPage {
+    return { ...this.store.searchWikiContent(query, id => this.canView(id), this.principal), accessEpoch: this.policies.epoch() };
   }
   documentHistory(id: string, options: { before?: number; limit?: number } = {}): WikiHistory {
     this.require(id); return this.redact({ ...this.store.documentHistory(id, options), accessEpoch: this.policies.epoch() });
