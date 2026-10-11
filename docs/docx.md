@@ -27,9 +27,66 @@ flattened to make them editable. Unsupported edits fail before saving.
 
 Download selects one immutable version, verifies its byte length and SHA-256,
 and exports a DOCX. Import Next Version adds a complete replacement package and
-retains the earlier source and discussion. Whole-version application discussion
-is separate from imported Word comments. Editing never implicitly adds those
-application discussions to the Word package.
+retains the earlier source and discussion. Application discussion is separate
+from imported Word comments. Editing never implicitly adds those discussions
+to the Word package; a selected discussion export is an explicit operation.
+
+## Passage discussion and Word comment export
+
+Choose **Discuss passage** in the main document to discuss a supported
+ordinary text run. Select text or use the character controls, inspect the exact
+quotation, then write a review comment. The thread records its original version
+ID, content hash, package part, block, range, UTF-16 offsets, quotation and bounded
+context. Replies inherit that anchor. Opening another version never relocates
+a Word thread by matching similar wording. Open its original version to inspect
+the evidence it addressed. Existing general discussion remains supported.
+
+Passage drafts use the same retention and recovery rules as other review
+comments: local-mode drafts can enter the explicit comment outbox; authenticated
+drafts remain in the verified tab. Source File and revision access continue to
+apply. Quota failures retain drafts in memory with an export warning. Posting a
+comment, replying, or resolving discussion does not alter the Word package or
+accept its content.
+
+Select threads anchored to the inspected original Word version and explicitly
+prepare an export. Download becomes available after checking the source and
+thread identities, byte length and SHA-256. The resulting DOCX contains one
+classic Word comment per selected application thread, with its root message,
+all replies, message authors and dates, viewed-version context, and the recorded
+application status. Imported Word comments stay intact. Application resolved
+state is described in the comment text; this does not invent Word's modern
+threaded-comment state or identity mapping.
+
+Export binds an immutable Word version and every selected thread's current
+version, and checks them again after package processing. An intervening reply,
+resolution, changed access, or invalid source rejects the entire export. A newer
+document head does not prevent an explicit export of an older pinned version.
+Exports do not create revision versions, Files or acceptance evidence. The
+original version's ordinary download remains byte-identical. Reimporting an
+export is a separate new-version operation with the usual source policies.
+
+The browser keeps prepared bytes in memory and retires them when the selected
+source, selected thread snapshots, session or access changes. Preparation
+requires a connection and never enters the outbox or runs on reconnect.
+
+The current anchor surface covers the parser's supported ordinary runs in the
+main story, including supported table cells. Cross-run ranges, notes, existing
+tracked-change runs, fields and unsupported structures are not flattened into
+editable text. Exports support overlapping selections in one run. They preserve
+run formatting and untouched XML around the inserted markers, append to or
+create the comments part and its package relationships, and preserve every
+unrelated ZIP entry's uncompressed bytes. Signed packages and malformed or
+ambiguous comment relationships/anchors are rejected. Export is bounded to
+64 selected threads and 500,000 UTF-16 code units of complete generated comment
+text in total, in addition to the package and projection limits. Nothing is
+silently omitted or truncated to fit.
+
+The classic comment wiring follows Microsoft's
+[WordprocessingML insertion contract](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-insert-a-comment-into-a-word-processing-document):
+matching range-start, range-end and reference IDs link the main document to the
+comments part. This is an extension of the application's immutable passage
+discussion model; [upstream Differential](review-threads.md#upstream-relationship-and-gaps)
+does not provide DOCX interchange.
 
 ## Preservation contract
 
@@ -88,6 +145,8 @@ npm run arc -- import-docx import-request.json --request-id original-import
 npm run arc -- edit-docx L1 --intent edit-request.json --request-id original-edit
 npm run arc -- reimport-docx L1 --intent reimport-request.json --request-id original-reimport
 npm run arc -- download-docx L1 --version 2 --version-id VERSION_ID --content-hash SHA256 --output new-document.docx
+npm run arc -- comment-docx L1 --intent comment-request.json --request-id original-comment
+npm run arc -- export-docx-discussion L1 --intent discussion-export.json --output reviewed-document.docx
 ```
 
 An import request contains:
@@ -124,6 +183,30 @@ Unicode surrogate pair. Reimport requests use the same version/access pins plus
 `sourceFile`, `shareSource`, and `message`, without a text range. Optional import
 `access` uses the application's standard new-object policy shape.
 
+A passage comment request contains `versionId`, `body`, and
+`docxPassage: { rangeId, start, end, quote }`. It cannot also specify a text-file
+path, line, text passage or suggested replacement. The server derives the full
+stored Word anchor from that immutable version.
+
+A discussion export request contains:
+
+```json
+{
+  "versionId": "ORIGINAL_VERSION_ID",
+  "contentHash": "ORIGINAL_CONTENT_HASH",
+  "expectedAccessEpoch": 12,
+  "threads": [{ "threadId": "THREAD_ID", "expectedThreadVersion": 3 }]
+}
+```
+
+The CLI preserves the ordered thread selection and original request pins. It
+verifies the source snapshot and export bytes, then publishes a complete private
+file atomically without overwriting an existing path or symlink. Its receipt
+contains identifiers and digests, without printing source or comment text.
+Export accepts read-scoped credentials; creating discussion requires interact
+permission and token write scope. No idempotency key is needed for an export
+because it does not write workspace state.
+
 | Operation | Endpoint |
 | --- | --- |
 | Inspect an uploaded File | `GET /api/files/F1/docx` |
@@ -131,6 +214,8 @@ Unicode surrogate pair. Reimport requests use the same version/access pins plus
 | Import the next package | `POST /api/revisions/L1/docx/import` |
 | Apply a tracked replacement | `POST /api/revisions/L1/docx/replace` |
 | Download exact version bytes | `GET /api/revisions/L1/docx/VERSION_ID/download` |
+| Create an exact Word passage thread | `POST /api/revisions/L1/comments` with `docxPassage` |
+| Prepare selected threads as Word comments | `POST /api/revisions/L1/docx/export-discussion` |
 
 CLI downloads verify the snapshot hash and package bytes and create a new file
 with private permissions. They never overwrite an existing file or follow a
@@ -140,9 +225,9 @@ uncertain-result retry; the CLI does not silently refresh old pins.
 ## Remaining work
 
 D105 remains partial. General rich editing, cross-run replacements, paragraph or
-table restructuring, accepting/rejecting imported changes, editing Word comments,
-modern threaded-comment semantics, application passage discussions mapped into
-Word, generated Word comment export, and complete page layout are not implemented.
+table restructuring, accepting/rejecting imported changes, editing imported Word
+comments, modern threaded-comment semantics, cross-run/note/field discussion
+anchors, cross-version mapping and complete page layout are not implemented.
 Automated local/hosted review and citation indexing currently reject DOCX sources
 rather than recording evidence for an empty text snapshot. They need explicit
 projection scope and coverage before being enabled. Broader Word/LibreOffice

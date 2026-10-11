@@ -1,6 +1,7 @@
 import Files from './Files';
 import Pastes from './Pastes';
 import DocxWorkspace, { DocxImport } from './DocxWorkspace';
+import type { DocxPassageInput } from '../shared/docx-discussion';
 import VersionEditor, { versionDraftChanged, type VersionDraft } from './VersionEditor';
 import { RevisionAssets } from './RevisionAssets';
 import GitVersionImport from './GitVersionImport';
@@ -14,7 +15,7 @@ import { COMPARISON_LIMITS } from '../shared/comparison';
 import { isTaskClosed, taskProjectIds } from '../shared/tasks';
 import { analyzeLocally } from '../shared/review';
 import { validateSuggestion } from '../shared/suggestions';
-import { canQueue, isNetworkError, type MutationMethod, type PendingMutation } from './offline';
+import { canQueue, isNetworkError, RequestError, type MutationMethod, type PendingMutation } from './offline';
 import { useWorkspace } from './SessionGate';
 import { onSessionLocked } from './session';
 import { discussionSummary, parseCommand, projectMatches, type WorkspaceView } from './voice';
@@ -292,6 +293,7 @@ function RevisionPage({ id, state, online, mutate, navigate, notify, manageAcces
   const loadGeneration = useRef(0); const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; loadGeneration.current += 1; }; }, []);
   const [detail, setDetail] = useState<RevisionDetail | null>(() => readStored(`revision:${id}`, null));
+  const loadedDetail = useRef(Boolean(detail));
   const [storedSelection, setStoredSelection] = useState<unknown>(() => readStored(`revision-comparison:${id}`, null));
   const selection = isComparisonSelection(storedSelection, id) ? storedSelection : null;
   const selectionGeneration = useRef(0); const [comparisonWarning, setComparisonWarning] = useState('');
@@ -304,12 +306,19 @@ function RevisionPage({ id, state, online, mutate, navigate, notify, manageAcces
     if (!mounted.current) return;
     const generation = ++loadGeneration.current;
     try {
-      const result = await request<RevisionDetail>(`/api/revisions/${id}`);
+      let result: RevisionDetail;
+      try { result = await request<RevisionDetail>(`/api/revisions/${id}`); }
+      catch (err) {
+        // Startup's workspace read can retire this first request before its kind
+        // is known. Read once more under current authority; never retry a write.
+        if (!(err instanceof RequestError && err.code === 'ACCESS_CHANGED') || loadedDetail.current || !mounted.current || generation !== loadGeneration.current || !isActive() || unavailableObject(id) || !navigator.onLine) throw err;
+        result = await request<RevisionDetail>(`/api/revisions/${id}`);
+      }
       if (!mounted.current || !isActive() || unavailableObject(id)) return;
       // A superseded authorized response may identify the version created by an
       // explicit action, but only the newest request may render/cache its body.
       if (generation !== loadGeneration.current) return result;
-      setDetail(result); const cached = writeStored(`revision:${id}`, result); setError(cached ? '' : 'Revision loaded, but browser storage is full or unavailable. This snapshot was not saved for offline access.'); return result;
+      loadedDetail.current = true; setDetail(result); const cached = writeStored(`revision:${id}`, result); setError(cached ? '' : 'Revision loaded, but browser storage is full or unavailable. This snapshot was not saved for offline access.'); return result;
     } catch (err) {
       if (!mounted.current || generation !== loadGeneration.current) return;
       if (!isNetworkError(err)) setError(err instanceof Error ? err.message : 'Could not load revision');
@@ -327,7 +336,7 @@ function RevisionPage({ id, state, online, mutate, navigate, notify, manageAcces
   const canEdit = Boolean(access?.capabilities.edit);
   const canInteract = Boolean(access?.capabilities.interact);
   const revision = detail.revision;
-  if (detail.versions.some(item => item.docx)) return <DocxWorkspace detail={detail} state={state} online={online} reload={load} refreshWorkspace={refreshWorkspace} manageAccess={manageAccess} discussion={(version, choose) => <><ReviewThreads register={registerDiscussion} detail={detail} version={version} online={online} canEdit={canEdit} canInteract={canInteract} mutate={mutate} saved={async () => { await load(); }} suggestionApplied={async () => { await load(); }} openSource={versionId => choose(versionId)}/>{canInteract ? <DraftAvailability draftKey={`comment-source:${id}:${version.id}`}><CommentComposer key={version.id} revisionId={id} versionId={version.id} versionNumber={version.number} target={null} clearTarget={() => {}} setLine={() => {}} mutate={mutate} saved={async () => { await load(); }}/></DraftAvailability> : <p className="info-strip">Interact access is required to comment.</p>}</>}/>;
+  if (detail.versions.some(item => item.docx)) return <DocxWorkspace detail={detail} state={state} online={online} reload={load} refreshWorkspace={refreshWorkspace} manageAccess={manageAccess} onPassage={(version, docxPassage) => setCommentTarget({ versionId: version.id, filePath: null, line: null, docxPassage, nonce: ++targetSequence.current })} discussion={(version, choose) => <><ReviewThreads register={registerDiscussion} detail={detail} version={version} online={online} canEdit={canEdit} canInteract={canInteract} mutate={mutate} saved={async () => { await load(); }} suggestionApplied={async () => { await load(); }} openSource={(versionId, _path, _line, wordPassage) => choose(versionId, wordPassage)}/>{canInteract ? <DraftAvailability draftKey={`comment-source:${id}:${version.id}`}><CommentComposer key={version.id} revisionId={id} versionId={version.id} versionNumber={version.number} target={commentTarget} clearTarget={() => setCommentTarget(null)} setLine={() => {}} mutate={mutate} saved={async () => { await load(); }}/></DraftAvailability> : <p className="info-strip">Interact access is required to comment.</p>}</>}/>;
   const showCurrent = (fresh = detail) => { const next = defaultComparison(fresh); if (next) changeSelection(next); };
   const resolved = selection ? resolveComparison(detail, selection) : { error: storedSelection === null ? (defaultComparison(detail) ? 'Preparing comparison…' : 'The current immutable version is unavailable. Reload the revision to try again.') : 'Saved comparison selection is invalid. Choose the current version explicitly to replace it.' };
   if ('error' in resolved) return <><div className="revision-page-heading"><h1>{id} {revision.title}</h1></div>{selection && <ComparisonPicker detail={detail} selection={selection} change={changeSelection} current={() => showCurrent()}/>}<div className="banner warning" role="status">{resolved.error}</div>{!selection && <button className="button" onClick={() => showCurrent()}>Show current version</button>}<button className="button" onClick={() => void load()}>Reload revision</button></>;
@@ -458,7 +467,7 @@ function VoicePanel({ command, close, context }: { context: string; command: (te
 function CommentComposer({ revisionId, versionId, versionNumber, target, clearTarget, setLine, mutate, saved }: { revisionId: string; versionId: string; versionNumber: number; target: CommentTarget | null; clearTarget: () => void; setLine: (value: number | null) => void; mutate: Mutate; saved: () => Promise<void> }) {
   const { durable, assertActive, draftIsHeld, removeStoredIfEqual } = useWorkspace();
   const key = `comment-source:${revisionId}:${versionId}`;
-  const [draft, setDraft, persisted, resetDraftInMemory] = useDraft<{ body: string; versionId: string; filePath: string | null; line: number | null; passage?: PassageInput; suggestion?: SuggestedReplacement }>(key, { body: '', versionId, filePath: null, line: null });
+  const [draft, setDraft, persisted, resetDraftInMemory] = useDraft<{ body: string; versionId: string; filePath: string | null; line: number | null; passage?: PassageInput; docxPassage?: DocxPassageInput; suggestion?: SuggestedReplacement }>(key, { body: '', versionId, filePath: null, line: null });
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const mounted = useRef(true); const latestDraft = useRef(draft); latestDraft.current = draft;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -468,8 +477,8 @@ function CommentComposer({ revisionId, versionId, versionNumber, target, clearTa
   useEffect(() => {
     if (!target || target.versionId !== versionId) return;
     if (busy) { setError('Wait for this comment to finish saving before changing its location.'); clearTarget(); return; }
-    const changed = draft.filePath !== target.filePath || draft.line !== target.line || JSON.stringify(draft.passage) !== JSON.stringify(target.passage);
-    if (!held && changed && ((!draft.body.trim() && !draft.suggestion) || window.confirm(`Move this unsaved comment to ${target.passage ? 'the selected passage' : `line ${target.line}`} in ${target.filePath}, version ${versionNumber}? Its existing location will be replaced; your comment text will be kept.${draft.suggestion ? ' The proposed replacement will be discarded. Write a new suggestion for the new passage.' : ''}`))) setDraft(current => ({ ...current, versionId: target.versionId, filePath: target.filePath, line: target.line, passage: target.passage, suggestion: undefined }));
+    const changed = draft.filePath !== target.filePath || draft.line !== target.line || JSON.stringify(draft.passage) !== JSON.stringify(target.passage) || JSON.stringify(draft.docxPassage) !== JSON.stringify(target.docxPassage);
+    if (!held && changed && ((!draft.body.trim() && !draft.suggestion) || window.confirm(`Move this unsaved comment to ${target.docxPassage ? 'the selected Word passage' : target.passage ? 'the selected passage' : `line ${target.line}`} ${target.filePath ? `in ${target.filePath}` : ''}, version ${versionNumber}? Its existing location will be replaced; your comment text will be kept.${draft.suggestion ? ' The proposed replacement will be discarded. Write a new suggestion for the new passage.' : ''}`))) setDraft(current => ({ ...current, versionId: target.versionId, filePath: target.filePath, line: target.line, passage: target.passage, docxPassage: target.docxPassage, suggestion: undefined }));
     clearTarget();
   }, [target]);
   return <form className="comment-form" onSubmit={async event => {
@@ -477,13 +486,13 @@ function CommentComposer({ revisionId, versionId, versionNumber, target, clearTa
     const submitted = { ...draft };
     setBusy(true); setError('');
     try {
-      await mutate(`/api/revisions/${revisionId}/comments`, 'POST', { body: submitted.body, versionId: submitted.versionId, filePath: submitted.filePath, line: submitted.line, ...(submitted.passage ? { passage: submitted.passage } : {}), ...(submitted.suggestion ? { suggestion: validateSuggestion(submitted.passage!, submitted.suggestion) } : {}) }, submitted.suggestion ? 'Suggested edit added' : 'Comment added'); assertActive();
+      await mutate(`/api/revisions/${revisionId}/comments`, 'POST', { body: submitted.body, versionId: submitted.versionId, ...(submitted.docxPassage ? { docxPassage: submitted.docxPassage } : { filePath: submitted.filePath, line: submitted.line, ...(submitted.passage ? { passage: submitted.passage } : {}), ...(submitted.suggestion ? { suggestion: validateSuggestion(submitted.passage!, submitted.suggestion) } : {}) }) }, submitted.suggestion ? 'Suggested edit added' : 'Comment added'); assertActive();
       removeStoredIfEqual(key, submitted);
       if (mounted.current && JSON.stringify(latestDraft.current) === JSON.stringify(submitted)) { resetDraftInMemory({ body: '', versionId, filePath: null, line: null }); setLine(null); }
       await saved();
     } catch (err) { if (mounted.current) setError(err instanceof Error ? err.message : 'Could not save comment'); } finally { if (mounted.current) setBusy(false); }
   }}>
-    <h3>Start a new thread</h3>{error && <div className="banner error" role="alert">{error}</div>}<div className="comment-target">Comment on version {versionNumber}{draft.filePath && <span> · {draft.filePath}{draft.line ? `:${draft.line}` : draft.passage ? ' · selected passage' : ''}<button type="button" disabled={busy || held} aria-label={draft.passage ? 'Remove passage anchor' : 'Remove line anchor'} onClick={() => { if (draft.suggestion && !window.confirm('Remove this passage anchor and discard its proposed replacement? Your explanatory comment will be kept.')) return; setLine(null); setDraft({ ...draft, filePath: null, line: null, passage: undefined, suggestion: undefined }); }}><X size={13}/></button></span>}{draft.passage && <blockquote className="thread-quotation">{draft.passage.quote}</blockquote>}</div>
+    <h3>Start a new thread</h3>{error && <div className="banner error" role="alert">{error}</div>}<div className="comment-target">Comment on version {versionNumber}{draft.filePath && <span> · {draft.filePath}{draft.line ? `:${draft.line}` : draft.passage ? ' · selected passage' : ''}<button type="button" disabled={busy || held} aria-label={draft.passage ? 'Remove passage anchor' : 'Remove line anchor'} onClick={() => { if (draft.suggestion && !window.confirm('Remove this passage anchor and discard its proposed replacement? Your explanatory comment will be kept.')) return; setLine(null); setDraft({ ...draft, filePath: null, line: null, passage: undefined, suggestion: undefined }); }}><X size={13}/></button></span>}{draft.passage && <blockquote className="thread-quotation">{draft.passage.quote}</blockquote>}{draft.docxPassage && <><span> · Original Word passage<button type="button" disabled={busy || held} aria-label="Remove Word passage anchor" onClick={() => setDraft({ ...draft, docxPassage: undefined })}><X size={13}/></button></span><blockquote className="thread-quotation">{draft.docxPassage.quote}</blockquote></>}</div>
     {held && <p className="info-strip">This comment draft is set aside for export or discard. Clear that recovery copy before starting another draft here.</p>}
     <textarea disabled={held || busy} id="review-comment" aria-label="Review comment" required rows={4} placeholder={draft.suggestion ? 'Explain why this edit should be made (required)…' : 'Leave a comment, question, or suggestion…'} value={draft.body} onChange={e => { const body = e.target.value; setDraft(current => ({ ...current, body })); }}/>
     {draft.passage && <div className="suggestion-composer"><label className="suggestion-toggle"><input type="checkbox" checked={Boolean(draft.suggestion)} disabled={held || busy} onChange={event => { const checked = event.target.checked; if (!checked && !window.confirm('Discard this proposed replacement? Your explanatory comment and passage anchor will be kept.')) return; setDraft(current => ({ ...current, suggestion: checked ? { replacement: current.passage!.quote } : undefined })); }}/>Suggest an edit</label>{draft.suggestion && <><Field label="Suggested replacement" hint="Exact source text, including spaces and line breaks. Leave empty to propose deletion. Explain the edit in the comment above."><textarea aria-label="Suggested replacement" className="source-editor" rows={5} maxLength={20000} disabled={held || busy} value={draft.suggestion.replacement} onChange={event => { const replacement = event.target.value; setDraft(current => ({ ...current, suggestion: { replacement } })); }}/></Field>{suggestionError && <p className="error-text small" role="status">{suggestionError}</p>}<SuggestionPreview original={draft.passage.quote} replacement={draft.suggestion.replacement}/></>}</div>}

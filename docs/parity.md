@@ -244,9 +244,14 @@ stores a version-bound structural reading view, and supports bounded tracked
 replacements followed by exact export/reimport. Source File policies continue
 to restrict all derived versions. Golden fixtures verify preserved headings,
 notes, comments, existing revisions and opaque parts; original and edited files
-also render in bundled LibreOffice. This is partial interchange support:
-general rich edits, Word comment export, semantic document comparisons,
-projection-aware automated review and broader independent validation remain open.
+also render in bundled LibreOffice. D105b adds immutable main-story passage
+threads and explicit selected-thread exports as classic Word comments, with
+complete attributed replies/status and exact source/thread/access checks.
+Original packages remain unchanged; generated exports preserve unrelated
+parts and existing annotations. This is partial interchange support: general
+rich edits, imported-comment editing, modern Word thread semantics, broader
+anchors, semantic document comparisons, projection-aware automated review and
+broader independent validation remain open.
 
 | Workflow | Planned acceptance requirement |
 | --- | --- |

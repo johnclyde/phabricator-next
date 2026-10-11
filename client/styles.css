@@ -839,6 +839,17 @@
 @media(max-width:600px) { .wiki-child-row { padding: 14px; } .wiki-breadcrumbs { gap: 6px; } .wiki-path-search { flex-basis: 100%; } }
 
 .repository-blame { min-width: 0; }
+.docx-passage-picker, .docx-discussion-export { min-width: 0; overflow-wrap: anywhere; scroll-margin-top: 115px; }
+.docx-passage-source { padding: 14px; border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.docx-passage-offsets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-block: 14px; }
+.docx-export-thread { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0; border-top: 1px solid var(--border); cursor: pointer; }
+.docx-export-thread > input { flex: 0 0 auto; margin-top: 5px; }
+.docx-export-thread > span { min-width: 0; display: grid; gap: 6px; }
+.docx-export-thread strong, .docx-export-thread q { white-space: pre-wrap; overflow-wrap: anywhere; }
+.docx-export-thread small { color: var(--muted); }
+.docx-thread-anchor h5 { margin-block: 12px 6px; }
+.docx-block > .text-button { margin: 8px 12px 0 0; }
+@media(max-width:600px) { .docx-passage-picker .file-actions .button, .docx-discussion-export .file-actions .button { min-height: 44px; flex: 0 0 auto; white-space: normal; } .docx-block > .text-button { min-height: 44px; } .docx-passage-offsets input { min-width: 0; width: 100%; } }
 .repository-patch { padding: 16px; border-block: 1px solid var(--border); background: #f7f9fb; min-width: 0; }
 .repository-patch-heading, .repository-patch-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .repository-patch > p { margin-top: 10px; line-height: 1.6; }

@@ -13,7 +13,7 @@ const record = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The Word request must be a JSON object.');
   return value as Record<string, unknown>;
 };
-async function readIntent(path: string): Promise<Record<string, unknown>> {
+export async function readDocxIntent(path: string): Promise<Record<string, unknown>> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await handle.stat(); const max = 256 * 1024;
@@ -58,7 +58,7 @@ export async function docxCommand({ command, args, options, optionNames, request
   }
   if (creation && option('intent')) throw new Error('import-docx accepts its request file as the sole positional argument.');
   const intentPath = creation ? id : option('intent'); if (!intentPath) throw new Error('--intent must name the original Word request JSON file.');
-  const input = await readIntent(intentPath);
+  const input = await readDocxIntent(intentPath);
   const fields = creation ? ['title', 'summary', 'sourceFile', 'expectedAccessEpoch', 'shareSource', 'access']
     : command === 'reimport-docx' ? ['sourceFile', 'shareSource', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch']
       : ['rangeId', 'start', 'end', 'quote', 'replacement', 'message', 'expectedVersion', 'expectedVersionId', 'expectedContentHash', 'expectedAccessEpoch'];

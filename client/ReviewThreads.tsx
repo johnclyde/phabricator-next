@@ -9,8 +9,9 @@ import { useWorkspace } from './SessionGate';
 import { orderedDiscussionThreads, filterDiscussionThreads, moveDiscussionCursor, type DiscussionFilter } from '../shared/discussion-navigation';
 import { discussionThreadNarration, type DiscussionVoiceAction } from './voice';
 import { useDiscussionPreferences } from './useDiscussionPreferences';
+import type { DocxPassageAnchor, DocxPassageInput } from '../shared/docx-discussion';
 
-export interface CommentTarget { versionId: string; filePath: string; line: number | null; passage?: PassageInput; nonce: number }
+export interface CommentTarget { versionId: string; filePath: string | null; line: number | null; passage?: PassageInput; docxPassage?: DocxPassageInput; nonce: number }
 type Mutate = <T>(path: string, method: MutationMethod, body: unknown, label: string, allowQueue?: boolean) => Promise<T | null>;
 function timestamp(value: string) { return new Date(value).toLocaleString(); }
 function lineAt(content: string, offset: number) { return content.slice(0, offset).split('\n').length; }
@@ -51,7 +52,7 @@ export interface DiscussionController { identity: string; revisionId: string; ex
 export type RegisterDiscussion = (controller: DiscussionController | null) => void;
 const ignoreRegistration: RegisterDiscussion = () => {};
 
-export default function ReviewThreads({ detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, register = ignoreRegistration }: { detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null) => void; register?: RegisterDiscussion }) {
+export default function ReviewThreads({ detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, register = ignoreRegistration }: { detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null, wordPassage?: DocxPassageAnchor) => void; register?: RegisterDiscussion }) {
   const { isActive, unavailableObject } = useWorkspace();
   const [filter, setFilter] = useState<DiscussionFilter>('all'); const filterRef = useRef(filter); filterRef.current = filter;
   const [selected, setSelected] = useState<string | null>(null); const selectedRef = useRef(selected); selectedRef.current = selected;
@@ -107,7 +108,7 @@ export default function ReviewThreads({ detail, version, online, canEdit, canInt
     {!shown.length && <p className="muted no-comments">{threads.length ? 'No threads match this filter.' : 'No discussion threads yet. Start a discussion below or select a source passage.'}</p>}
   </div>;
 }
-function Thread({ thread, detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, collapsed, selected, onSelect, onToggle, presentation }: { collapsed: boolean; selected: boolean; onSelect: () => void; onToggle: () => void; presentation: ReactNode; thread: ReviewThread; detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null) => void }) {
+function Thread({ thread, detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, collapsed, selected, onSelect, onToggle, presentation }: { collapsed: boolean; selected: boolean; onSelect: () => void; onToggle: () => void; presentation: ReactNode; thread: ReviewThread; detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null, wordPassage?: DocxPassageAnchor) => void }) {
   const [reply, setReply] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const comments = detail.comments.filter(comment => (comment.threadId || comment.id) === thread.id);
   const root = comments.find(comment => comment.id === thread.rootCommentId) || comments[0];
@@ -131,8 +132,9 @@ function Thread({ thread, detail, version, online, canEdit, canInteract, mutate,
     else explanation = `The original quotation is not present verbatim in version ${version.number}. The passage may have changed; inspect the original before resolving.`;
   }
   return <article className={`review-thread thread-${thread.status}`} data-thread-id={thread.id} aria-current={selected ? "true" : undefined} tabIndex={-1}><header className="thread-heading"><h4>Thread on version {original?.number ?? 'unknown'}</h4><span className={`badge ${thread.status === 'resolved' ? 'badge-resolved' : 'badge-open'}`}>{thread.status === 'resolved' ? 'Resolved' : 'Open'}</span><span className="muted small">{comments.length} {comments.length === 1 ? 'comment' : 'comments'}</span><div className="thread-personal-actions"><button className="button" aria-pressed={selected} onClick={onSelect}>Select thread</button><button className="button" aria-expanded={!collapsed} onClick={onToggle}>{collapsed ? 'Expand thread' : 'Collapse thread'}</button></div></header>
-    <button className="text-button original-thread-location" onClick={() => openSource(root.versionId, root.filePath, root.line)}>View original version {original?.number ?? ''}{root.filePath ? ` · ${root.filePath}${root.line ? `:${root.line}` : ''}` : ''}</button>
+    <button className="text-button original-thread-location" onClick={() => openSource(root.versionId, root.filePath, root.line, root.docxAnchor)}>View original version {original?.number ?? ''}{root.docxAnchor ? ' · original Word passage' : root.filePath ? ` · ${root.filePath}${root.line ? `:${root.line}` : ''}` : ''}</button>
     {presentation}<div className="thread-content" hidden={collapsed}>
+    {root.docxAnchor && <div className="thread-anchor docx-thread-anchor"><h5>Original Word passage</h5><blockquote className="thread-quotation">{root.docxAnchor.quote}</blockquote><p role="status">{version.id === root.docxAnchor.versionId && version.contentHash === root.docxAnchor.contentHash ? `Original passage in Word version ${version.number}.` : `This passage stays with original Word version ${original?.number ?? 'unknown'}. It is not relocated into version ${version.number}.`}</p></div>}
     {root.anchor && <div className="thread-anchor"><blockquote className="thread-quotation">{root.anchor.quote}</blockquote><p className={`anchor-projection projection-${projection?.status}`} role="status">{explanation}</p>{projection?.start !== null && projection?.start !== undefined && source !== undefined && <small>Shown source: {root.anchor.filePath}, line {lineAt(source, projection.start)}</small>}</div>}
     {root.suggestion && root.anchor && <ThreadSuggestion root={root} thread={thread} detail={detail} online={online} canEdit={canEdit} mutate={mutate} saved={saved} applied={suggestionApplied} openSource={openSource}/>}
     {comments.map(comment => <Comment key={comment.id} comment={comment} versions={detail.versions}/>)}

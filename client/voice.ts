@@ -104,12 +104,12 @@ export function discussionThreadNarration(detail: Pick<RevisionDetail, 'comments
   const root = comments.find(comment => comment.id === thread.rootCommentId);
   if (!root) return 'The selected discussion thread has no loaded original comment.';
   const original = detail.versions.find(version => version.id === root.versionId && version.revisionId === root.revisionId);
-  const location = root.filePath ? `File ${discussionExcerpt(root.filePath, 160, 'Filename')}${root.line !== null ? `, line ${root.line}` : ', passage location'}.` : 'General discussion.';
+  const location = root.docxAnchor ? 'Original Word passage.' : root.filePath ? `File ${discussionExcerpt(root.filePath, 160, 'Filename')}${root.line !== null ? `, line ${root.line}` : ', passage location'}.` : 'General discussion.';
   const header = `Thread from original version ${original?.number ?? 'unavailable'}. ${location} ${thread.status === 'resolved' ? 'Resolved' : 'Open'}, ${comments.length} ${comments.length === 1 ? 'comment' : 'comments'}.`;
   if (collapsed) return `${header} Collapsed for you. Use read current thread to hear its content without expanding it.`;
   const replies = comments.filter(comment => comment.id !== root.id);
   const selected = [root, ...replies].slice(0, DISCUSSION_COMMENT_LIMIT);
-  const quotation = root.anchor ? ` Original passage: ${discussionExcerpt(root.anchor.quote, 280)}.` : '';
+  const quotation = root.docxAnchor ? ` Original Word passage: ${discussionExcerpt(root.docxAnchor.quote, 280)}.` : root.anchor ? ` Original passage: ${discussionExcerpt(root.anchor.quote, 280)}.` : '';
   const excerpts = selected.map((comment, index) => {
     const viewed = comment.viewedVersionId ? detail.versions.find(version => version.id === comment.viewedVersionId && version.revisionId === comment.revisionId) : undefined;
     const context = index === 0 ? 'Original comment' : viewed && viewed.id !== root.versionId ? `Reply while viewing version ${viewed.number}` : 'Reply';

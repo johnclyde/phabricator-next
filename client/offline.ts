@@ -422,6 +422,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const childParent = path === '/api/projects' && options?.method === 'POST' && options.body && typeof options.body === 'object' && 'parentId' in options.body && typeof options.body.parentId === 'string' ? options.body.parentId : null;
     const citationRequest = /^\/api\/revisions\/[DPL]\d+\/(?:citations|citation-evidence)(?:[/?]|$)/.test(path);
     const docxRequest = /^\/api\/revisions(?:\/[DPL]\d+)?\/docx(?:[/?]|$)/.test(path);
+    const docxDiscussionExport = options?.method === 'POST' && /^\/api\/revisions\/[DPL]\d+\/docx\/export-discussion$/.test(path);
     const pasteRequest = /^\/api\/pastes(?:[/?]|$)/.test(path);
     const wikiRequest = /^\/api\/(?:wiki(?:[/?]|$)|documents(?:[/?]|$))/.test(path);
     const repositoryRequest = !options && /^\/api\/repositories\/R\d+(?:[/?]|$)/.test(path);
@@ -472,7 +473,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const subscription = /^\/api\/tasks\/T\d+\/subscriptions$/.test(path) && options?.method === 'POST' ? options.body as { principalId?: unknown; action?: unknown } | null : null;
     const selfId = session.state.account?.id || `local:${session.state.workspaceId}`;
     const projectSelfOperation = projectMutation && (/\/(membership|silence)$/.test(path) || (path.endsWith('/watchers') && options?.body && typeof options.body === 'object' && 'principalId' in options.body && options.body.principalId === selfId));
-    const mutationAllowed = capabilities && (citationRequest ? capabilities.interact : bulkMove ? bulkTaskIds.length > 0 && bulkTaskIds.length === bulkMove.tasks?.length && bulkTaskIds.every(id => session.objectCapabilities.get(id)?.edit === true) : boardMove ? typeof boardMove.taskId === 'string' && session.objectCapabilities.get(boardMove.taskId)?.edit === true : projectSelfOperation ? true : /^\/api\/revisions\/[DPL]\d+\/threads\/[^/]+\/preference$/.test(path) ? true : subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
+    const mutationAllowed = capabilities && (docxDiscussionExport ? true : citationRequest ? capabilities.interact : bulkMove ? bulkTaskIds.length > 0 && bulkTaskIds.length === bulkMove.tasks?.length && bulkTaskIds.every(id => session.objectCapabilities.get(id)?.edit === true) : boardMove ? typeof boardMove.taskId === 'string' && session.objectCapabilities.get(boardMove.taskId)?.edit === true : projectSelfOperation ? true : /^\/api\/revisions\/[DPL]\d+\/threads\/[^/]+\/preference$/.test(path) ? true : subscription ? subscription.principalId === selfId ? true : subscription.action === 'subscribe' ? capabilities.interact || capabilities.edit : capabilities.edit : /\/(comments|reviews|replies)(?:[/?]|$)/.test(path) ? capabilities.interact : capabilities.edit);
     if (options && capabilities && !mutationAllowed) throw new RequestError('Permission to submit this change has been revoked. Export your unsaved draft to keep it.', 403, 'ACTION_FORBIDDEN');
     const assertObject = () => {
       assertSession(session);
@@ -484,7 +485,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     };
     const controller = new AbortController();
     session.controllers.add(controller);
-    if (taskRequest && !options) session.taskReadControllers.add(controller);
+    if (taskRequest && (!options || docxDiscussionExport)) session.taskReadControllers.add(controller);
     // A committed handoff may revoke this object's access before its receipt arrives.
     // Session invalidation still aborts it; object invalidation must allow the receipt.
     if (objectId && !ownershipMutation && !projectMutation && !boardMutation) session.objectControllers.set(controller, objectId);

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { analyzeLocally } from '../shared/review.ts';
@@ -13,8 +14,9 @@ import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
 import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, type MutationResponse, type Store } from './store.ts';
-import { inspectDocx, replaceDocx } from './docx-package.ts';
-import type { DocxFileIdentity } from '../shared/docx.ts';
+import { exportDocxDiscussion, inspectDocx, replaceDocx } from './docx-package.ts';
+import { DOCX_LIMITS, type DocxFileIdentity } from '../shared/docx.ts';
+import { docxDiscussionFilename, type DocxDiscussionExport } from '../shared/docx-discussion.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { choice, HttpError, integer, object } from './validation.ts';
 import { seedDemo } from './seed.ts';
@@ -39,7 +41,7 @@ export interface AppOptions {
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
-  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx };
+  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; exportDiscussion?: typeof exportDocxDiscussion };
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
@@ -156,6 +158,49 @@ export function createApp(options: AppOptions = {}): App {
   async function trackDocxWork<T>(promise: Promise<T>): Promise<T> {
     docxWork.add(promise);
     try { return await promise; } finally { docxWork.delete(promise); }
+  }
+
+  async function docxDiscussionRead(req: IncomingMessage, res: ServerResponse, context: AuthContext, id: string, url: URL): Promise<void> {
+    const access = new AccessLayer(store, auth, policies, context);
+    const authorize = () => { auth.revalidate(context, 'read'); access.require(id); };
+    store.read(authorize);
+    if (url.search) throw new HttpError(400, 'Word discussion exports do not accept query parameters.');
+    if (closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
+    const controller = new AbortController(); const abort = () => controller.abort();
+    const close = () => { if (!res.writableEnded) abort(); };
+    gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+    if (req.aborted || res.destroyed) abort();
+    await trackDocxWork((async () => {
+      let input: unknown;
+      let selected: ReturnType<Store['docxDiscussion']> | undefined;
+      const current = () => {
+        authorize();
+        if (!selected) return;
+        const latest = store.docxDiscussion(id, input);
+        if (!isDeepStrictEqual(latest.comments, selected.comments)) throw new HttpError(409, 'The selected discussions changed. Refresh them before exporting.', 'DOCX_DISCUSSION_CHANGED');
+      };
+      try {
+        input = await body(req);
+        selected = store.read(() => { authorize(); return store.docxDiscussion(id, input); });
+        if (controller.signal.aborted || closing) throw new HttpError(499, 'Word discussion export was canceled.', 'DOCX_CANCELED');
+        const result = await (options.docxProcessor?.exportDiscussion ?? exportDocxDiscussion)(selected.bytes, selected.comments, controller.signal);
+        store.read(() => {
+          current();
+          if (controller.signal.aborted || closing) throw new HttpError(499, 'Word discussion export was canceled.', 'DOCX_CANCELED');
+          if (!(result.bytes instanceof Uint8Array) || !result.bytes.length || result.bytes.length > DOCX_LIMITS.compressedBytes) throw new HttpError(503, 'Word discussion export is unavailable.', 'DOCX_UNAVAILABLE');
+          const output: DocxDiscussionExport = {
+            format: 'phabricator.docx.discussion-export.v1', revisionId: id, versionId: selected!.version.id,
+            versionNumber: selected!.version.number, contentHash: selected!.version.contentHash, sourceSha256: selected!.version.docx!.sha256,
+            accessEpoch: policies.epoch(), threads: selected!.input.threads, fileName: docxDiscussionFilename(id, selected!.version.number),
+            bytes: result.bytes.length, sha256: createHash('sha256').update(result.bytes).digest('hex'), dataBase64: Buffer.from(result.bytes).toString('base64'),
+          };
+          if (!res.destroyed) { res.setHeader('X-Access-Epoch', output.accessEpoch); send(res, 200, output); }
+        });
+      } catch (error) {
+        store.read(current);
+        throw error instanceof HttpError ? error : new HttpError(503, 'Word discussion export is unavailable.', 'DOCX_UNAVAILABLE');
+      } finally { gitReads.delete(controller); req.off('aborted', abort); res.off('close', close); }
+    })());
   }
 
   async function repositoryRead(req: IncomingMessage, res: ServerResponse, context: AuthContext, id: string, section: string | undefined, commitPath: string | undefined, url: URL): Promise<void> {
@@ -540,7 +585,9 @@ export function createApp(options: AppOptions = {}): App {
         res.setHeader('Set-Cookie', result.cookie);
         send(res, 200, result.session); return;
       }
-      const context = auth.authenticate(req, req.method === 'GET' || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      const docxDiscussionExport = req.method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/export-discussion$/.exec(path) : null;
+      const context = auth.authenticate(req, req.method === 'GET' || docxDiscussionExport || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      if (docxDiscussionExport) { await docxDiscussionRead(req, res, context, docxDiscussionExport[1]!, url); return; }
       if (req.method === 'POST' && path === '/api/logout') {
         if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
         object(await body(req), []);

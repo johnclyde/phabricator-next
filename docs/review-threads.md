@@ -24,6 +24,8 @@ Projection into another version is a pure, local calculation; it does not rewrit
 
 These are precise source-passage anchors, not semantic paragraph identities. Renamed files, rebases, edited wording and comments on removed diff-side text still need further mapping support. Legacy line-only comments retain their original location without fabricated passage anchors.
 
+Word revisions support separate exact main-story passage anchors with the package part, block, run range, offsets and original content hash. These anchors are never projected into another Word version. Replies, resolution, navigation and draft recovery use the same discussion model. An explicit [Word discussion export](docx.md#passage-discussion-and-word-comment-export) can add selected threads as classic comments in a separate DOCX without changing the original source or acceptance.
+
 ## Replies and resolution
 
 Messages are immutable. Each thread has its own optimistic version. A reply increments this version; resolving or reopening requires the version the caller actually saw, so a concurrent reply causes a conflict instead of silently closing unseen discussion. Successful retries with the same idempotency key do not add a second reply or event.

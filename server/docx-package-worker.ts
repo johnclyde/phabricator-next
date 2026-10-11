@@ -6,6 +6,7 @@ import { fromBufferPromise } from 'yauzl';
 import { ZipFile } from 'yazl';
 import { SaxesParser, type SaxesTagNS } from 'saxes';
 import { DOCX_LIMITS, type DocxBlock, type DocxProjection, type DocxReplacement, type DocxRun, type DocxTextRange } from '../shared/docx.ts';
+import { DOCX_DISCUSSION_LIMITS, type DocxPackageComment } from '../shared/docx-discussion.ts';
 
 const WORD = new Set(['http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'http://purl.oclc.org/ooxml/wordprocessingml/main']);
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -249,14 +250,189 @@ function encode(part: Part, text: string): Buffer { let bytes=Buffer.from(text,p
 const escape = (value: string) => value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');
 const validText = (value: string) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u.test(value) && !/[\uD800-\uDFFF]/u.test(value);
 const splitSurrogate = (text: string, offset: number) => offset>0&&offset<text.length&&/[\uD800-\uDBFF]/.test(text[offset-1]!)&&/[\uDC00-\uDFFF]/.test(text[offset]!);
-async function writeZip(entries: Entry[], name: string, replacement: Buffer): Promise<Uint8Array> {
+async function writeZipChanges(entries: Entry[], replacements: Map<string, Buffer>, additions: Entry[] = []): Promise<Uint8Array> {
   const zip=new ZipFile(), chunks:Buffer[]=[]; let count=0;
   const done=new Promise<Buffer>((resolve,reject)=>{zip.outputStream.on('data',(chunk:Buffer)=>{count+=chunk.length;if(count>DOCX_LIMITS.compressedBytes){(zip.outputStream as Readable).destroy();reject(new Error('Edited DOCX exceeds 16 MiB.'));}else chunks.push(chunk);});zip.outputStream.once('error',reject);zip.outputStream.once('end',()=>resolve(Buffer.concat(chunks,count)));zip.once('error',reject);});
-  for(const entry of entries){if(entry.directory)zip.addEmptyDirectory(entry.name,{mtime:new Date('2000-01-01T00:00:00Z'),mode:0o40755});else zip.addBuffer(entry.name===name?replacement:entry.bytes,entry.name,{mtime:new Date('2000-01-01T00:00:00Z'),mode:0o100644,compressionLevel:6});}zip.end();return done;
+  for(const entry of [...entries,...additions]){if(entry.directory)zip.addEmptyDirectory(entry.name,{mtime:new Date('2000-01-01T00:00:00Z'),mode:0o40755});else zip.addBuffer(replacements.get(entry.name)??entry.bytes,entry.name,{mtime:new Date('2000-01-01T00:00:00Z'),mode:0o100644,compressionLevel:6});}zip.end();return done;
+}
+async function writeZip(entries: Entry[], name: string, replacement: Buffer): Promise<Uint8Array> { return writeZipChanges(entries, new Map([[name, replacement]])); }
+
+const COMMENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml';
+const REL_TYPE = 'application/vnd.openxmlformats-package.relationships+xml';
+const escapeText = (value: string) => escape(value).replaceAll('\r', '&#13;');
+const escapeAttribute = (value: string) => escapeText(value).replaceAll('\n', '&#10;').replaceAll('\t', '&#9;');
+// ST_DecimalNumber is signed and unbounded. Normalize lexically instead of
+// rounding through Number or rejecting a valid large imported identifier.
+function commentId(value: string | undefined): string {
+  const normalized = value?.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '');
+  if (normalized === undefined || !/^[+-]?\d+$/.test(normalized)) return fail('DOCX contains an invalid comment identifier.');
+  const negative = normalized.startsWith('-'), magnitude = normalized.replace(/^[+-]/, '').replace(/^0+/, '') || '0';
+  return negative && magnitude !== '0' ? `-${magnitude}` : magnitude;
+}
+function contentType(parsed: Parsed, name: string): string | undefined {
+  const root = parsed.parts.get('[Content_Types].xml')!.root;
+  const overrides = root.children.filter(node => node.local === 'Override' && partName(attr(node, 'PartName', false)!.slice(1)) === partName(name));
+  if (overrides.length > 1) fail('DOCX contains aliased content type overrides.');
+  if (overrides.length) return attr(overrides[0]!, 'ContentType', false);
+  const fallback = root.children.find(node => node.local === 'Default' && attr(node, 'Extension', false)?.toLowerCase() === posix.extname(name).slice(1).toLowerCase());
+  return fallback ? attr(fallback, 'ContentType', false) : undefined;
+}
+function freshPrefix(texts: string[], seed: string): string {
+  let prefix = seed; while (texts.some(text => text.includes(`${prefix}:`) || text.includes(`xmlns:${prefix}`))) prefix += 'X'; return prefix;
+}
+function appendXml(part: Part, addition: string): string {
+  const opening = part.text.slice(part.root.start, part.root.openEnd);
+  const result = /\/\s*>$/.test(opening)
+    ? part.text.slice(0, part.root.start) + opening.replace(/\/\s*>$/, '>') + addition + `</${part.root.name}>` + part.text.slice(part.root.end)
+    : part.text.slice(0, part.root.closeStart) + addition + part.text.slice(part.root.closeStart);
+  if (Buffer.byteLength(result, part.encoding === 'utf8' ? 'utf8' : 'utf16le') + part.bom.length > DOCX_LIMITS.xmlBytes) fail('Exported DOCX XML exceeds its part limit.');
+  return result;
 }
 
-export async function processDocx(bytes: Uint8Array, replacement?: DocxReplacement, attribution?: {author:string;date:string}): Promise<{bytes:Uint8Array;projection:DocxProjection}> {
-  const parsed=build(await readZip(bytes)); if(!replacement)return {bytes,projection:parsed.projection};
+/** Validate classic linkage before adding anything. Point comments (reference
+ * only) and unused bodies are preserved; partial ranges and ambiguous IDs are
+ * rejected rather than silently repaired. */
+function classicComments(parsed: Parsed): { part: Part | undefined; ids: Set<string> } {
+  const main = parsed.projection.mainPart, links = relationships(parsed.parts, main).filter(rel => relKind(rel, 'comments'));
+  if (links.length > 1 || links.some(rel => rel.external)) fail('DOCX has invalid classic comments relationships.');
+  const mainRels = parsed.parts.get(posix.join(posix.dirname(main), '_rels', `${posix.basename(main)}.rels`));
+  if (mainRels && (contentType(parsed, mainRels.name) !== REL_TYPE || mainRels.root.text.trim() || mainRels.root.children.some(node => node.children.length || node.text.trim()))) fail('DOCX has malformed document relationships.');
+  const part = links.length ? parsed.parts.get(targetPart(main, links[0]!.target)) : undefined;
+  const ids = new Set<string>();
+  if (links.length && (!part || !isWord(part.root, 'comments') || part.root.text.trim() || contentType(parsed, part.name) !== COMMENT_TYPE)) fail('DOCX has an invalid classic comments part or content type.');
+  if (part) for (const node of part.root.children) {
+    if (!isWord(node, 'comment')) fail('Unsupported markup in the classic comments collection.');
+    const key = commentId(attr(node, 'id')); if (ids.has(key)) fail('DOCX contains duplicate or aliased comment identifiers.'); ids.add(key);
+  }
+  const anchors = new Map<string, { start?: Node; end?: Node; reference?: Node; part: string }>();
+  for (const source of parsed.parts.values()) {
+    if (source.name.endsWith('.rels')) {
+      const owner = source.name === '_rels/.rels' ? '' : source.name.replace(/(^|\/)\_rels\//, '$1').slice(0, -5);
+      if (owner !== main && relationships(parsed.parts, owner).some(rel => relKind(rel, 'comments'))) fail('Comments relationships outside the main document are unsupported for export.');
+    }
+    for (const node of source.nodes) {
+      if (!isWord(node) || !['commentRangeStart', 'commentRangeEnd', 'commentReference'].includes(node.local)) continue;
+      if (node.children.length || node.text.trim()) fail('DOCX contains malformed classic comment anchors.');
+      const key = commentId(attr(node, 'id')); if (!ids.has(key) || source === part) fail('DOCX contains a dangling or unsupported classic comment anchor.');
+      const row = anchors.get(key) ?? { part: source.name };
+      const kind = node.local === 'commentRangeStart' ? 'start' : node.local === 'commentRangeEnd' ? 'end' : 'reference';
+      if (row.part !== source.name || row[kind]) fail('DOCX contains ambiguous classic comment anchors.');
+      row[kind] = node; anchors.set(key, row);
+    }
+  }
+  for (const row of anchors.values()) {
+    if (!row.reference || Boolean(row.start) !== Boolean(row.end) || (row.start && row.end && (row.start.start >= row.end.start || row.end.start >= row.reference.start))) fail('DOCX contains an incomplete or out-of-order classic comment range.');
+  }
+  return { part, ids };
+}
+
+async function exportDiscussion(parsed: Parsed, input: DocxPackageComment[]): Promise<{ bytes: Uint8Array; projection: DocxProjection }> {
+  if (parsed.signed) fail('Signed DOCX packages cannot receive comments without invalidating their signatures.');
+  if (!Array.isArray(input) || !input.length || input.length > DOCX_DISCUSSION_LIMITS.threads) fail('Select between one and 64 DOCX discussion threads.');
+  const existing = classicComments(parsed), main = parsed.parts.get(parsed.projection.mainPart)!;
+  // Comment identifiers have their own namespace, but avoiding other numeric
+  // Word IDs too is inexpensive and keeps generated IDs unambiguous to tools.
+  for (const part of parsed.parts.values()) for (const node of part.nodes) {
+    const value = attr(node, 'id'); if (value !== undefined && /^[+-]?\d+$/.test(value)) existing.ids.add(commentId(value));
+  }
+  type Selected = { comment: DocxPackageComment; id: string; range: NonNullable<ReturnType<Parsed['ranges']['get']>> };
+  const selected: Selected[] = []; let total = 0, nextId = 1;
+  for (const comment of input) {
+    if (!comment || typeof comment.body !== 'string' || !comment.body.length || !validText(comment.body) || typeof comment.author !== 'string' || !comment.author.trim() || comment.author.length > 255 || !validText(comment.author)
+      || typeof comment.date !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(comment.date) || !Number.isFinite(Date.parse(comment.date))
+      || new Date(comment.date).toISOString() !== comment.date.replace(/(?<=:\d\d)Z$/, '.000Z')) fail('DOCX comments require valid text, author and UTC date metadata.');
+    total += comment.body.length; if (comment.body.length > DOCX_DISCUSSION_LIMITS.bodyLength || total > DOCX_DISCUSSION_LIMITS.bodyLength) fail('DOCX discussion text exceeds its export limit.');
+    const passage = comment.passage, range = passage && typeof passage.rangeId === 'string' ? parsed.ranges.get(passage.rangeId) : undefined;
+    if (!range || range.part !== main || !Number.isSafeInteger(passage.start) || !Number.isSafeInteger(passage.end) || typeof passage.quote !== 'string'
+      || passage.start < 0 || passage.end <= passage.start || passage.end > range.text.text.length || passage.quote.length > DOCX_DISCUSSION_LIMITS.quoteLength
+      || range.text.text.slice(passage.start, passage.end) !== passage.quote || splitSurrogate(range.text.text, passage.start) || splitSurrogate(range.text.text, passage.end)) fail('Choose an exact supported passage in the main DOCX document.');
+    while (existing.ids.has(String(nextId))) nextId++;
+    const key = String(nextId++); existing.ids.add(key); selected.push({ comment, id: key, range });
+  }
+  const prefix = freshPrefix([main.text, existing.part?.text ?? ''], 'docxComment'), uri = main.root.uri;
+  const groups = new Map<Node, Selected[]>();
+  for (const item of selected) { const group = groups.get(item.range.run) ?? []; group.push(item); groups.set(item.range.run, group); }
+  const patches: { start: number; end: number; text: string }[] = [];
+  for (const [run, group] of groups) {
+    const text = group[0]!.range.text, props = child(run, 'rPr'), propsRaw = props ? main.text.slice(props.start, props.end) : '';
+    const rawOpen = main.text.slice(run.start, run.openEnd), rawClose = main.text.slice(run.closeStart, run.end);
+    let textOpen = main.text.slice(text.start, text.openEnd);
+    for (const attribute of Object.values(text.attributes)) if (attribute.uri === XML && attribute.local === 'space') textOpen = textOpen.replace(new RegExp(`\\s+${attribute.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(?:"[^"]*"|'[^']*')`), '');
+    textOpen = textOpen.replace(/\s*\/?>$/, ' xml:space="preserve">');
+    const fragments: string[] = []; let length = 0;
+    const append = (fragment: string) => { length += Buffer.byteLength(fragment, main.encoding === 'utf8' ? 'utf8' : 'utf16le'); if (length > DOCX_LIMITS.xmlBytes) fail('DOCX passage fragmentation exceeds its XML limit.'); fragments.push(fragment); };
+    const fragment = (value: string) => `${rawOpen}${propsRaw}${textOpen}${escapeText(value)}</${text.name}>${rawClose}`;
+    const boundaries = [...new Set([0, text.text.length, ...group.flatMap(item => [item.comment.passage.start, item.comment.passage.end])])].sort((a, b) => a - b);
+    for (let index = 0; index < boundaries.length; index++) {
+      const offset = boundaries[index]!;
+      for (const item of group.filter(item => item.comment.passage.end === offset).reverse()) append(`<${prefix}:commentRangeEnd xmlns:${prefix}="${uri}" ${prefix}:id="${item.id}"/><${prefix}:r xmlns:${prefix}="${uri}"><${prefix}:commentReference ${prefix}:id="${item.id}"/></${prefix}:r>`);
+      for (const item of group.filter(item => item.comment.passage.start === offset)) append(`<${prefix}:commentRangeStart xmlns:${prefix}="${uri}" ${prefix}:id="${item.id}"/>`);
+      const end = boundaries[index + 1]; if (end !== undefined && end > offset) append(fragment(text.text.slice(offset, end)));
+    }
+    patches.push({ start: run.start, end: run.end, text: fragments.join('') });
+  }
+  let mainText = main.text;
+  for (const patch of patches.sort((a, b) => b.start - a.start)) {
+    mainText = mainText.slice(0, patch.start) + patch.text + mainText.slice(patch.end);
+    if (Buffer.byteLength(mainText, main.encoding === 'utf8' ? 'utf8' : 'utf16le') + main.bom.length > DOCX_LIMITS.xmlBytes) fail('Exported DOCX XML exceeds its part limit.');
+  }
+  const replacements = new Map<string, Buffer>([[main.name, encode(main, mainText)]]), additions: Entry[] = [];
+  const occupied = new Set(parsed.entries.map(entry => partName(entry.directory ? entry.name.slice(0, -1) : entry.name)));
+  const types = parsed.parts.get('[Content_Types].xml')!;
+  for (const node of types.root.children) if (node.local === 'Override') occupied.add(partName(attr(node, 'PartName', false)!.slice(1)));
+  let typesText = types.text;
+  const requireType = (name: string, type: string) => {
+    if (contentType(parsed, name) === type) return;
+    const override = types.root.children.find(node => node.local === 'Override' && partName(attr(node, 'PartName', false)!.slice(1)) === partName(name));
+    if (override) fail('DOCX comments require an unambiguous matching content type.');
+    const p = freshPrefix([typesText], 'docxType');
+    typesText = appendXml(xmlPart({ name: types.name, bytes: encode(types, typesText), directory: false }), `<${p}:Override xmlns:${p}="${CT}" PartName="/${escapeAttribute(name)}" ContentType="${type}"/>`);
+  };
+  let commentsName = existing.part?.name;
+  if (!commentsName) {
+    let suffix = 0; do { commentsName = posix.join(posix.dirname(main.name), `comments${suffix ? `-${suffix}` : ''}.xml`); suffix++; } while (occupied.has(partName(commentsName)));
+    occupied.add(partName(commentsName)); requireType(commentsName, COMMENT_TYPE);
+    const relsName = posix.join(posix.dirname(main.name), '_rels', `${posix.basename(main.name)}.rels`), rels = parsed.parts.get(relsName);
+    if (rels && contentType(parsed, relsName) !== REL_TYPE) fail('DOCX has invalid document relationship content types.');
+    const identifiers = new Set(relationships(parsed.parts, main.name).map(rel => rel.id)); let relationshipId = 'rIdPhabricatorComments'; while (identifiers.has(relationshipId)) relationshipId += 'X';
+    const rp = freshPrefix([rels?.text ?? ''], 'docxRelationship');
+    const type = OFFICE_REL[uri === 'http://purl.oclc.org/ooxml/wordprocessingml/main' ? 1 : 0] + 'comments';
+    const relationship = `<${rp}:Relationship xmlns:${rp}="${REL}" Id="${relationshipId}" Type="${type}" Target="${escapeAttribute(posix.relative(posix.dirname(main.name), commentsName))}"/>`;
+    if (rels) replacements.set(relsName, encode(rels, appendXml(rels, relationship)));
+    else {
+      if (occupied.has(partName(relsName))) fail('DOCX relationship part name is unavailable.');
+      requireType(relsName, REL_TYPE); additions.push({ name: relsName, directory: false, bytes: Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${REL}">${relationship}</Relationships>`) });
+    }
+  }
+  const bodyParts: string[] = []; let bodyBytes = 0;
+  const appendBody = (fragment: string) => { bodyBytes += Buffer.byteLength(fragment, existing.part?.encoding === 'utf16le' || existing.part?.encoding === 'utf16be' ? 'utf16le' : 'utf8'); if (bodyBytes > DOCX_LIMITS.xmlBytes) fail('Exported DOCX comments exceed their XML limit.'); bodyParts.push(fragment); };
+  for (const item of selected) {
+    appendBody(`<${prefix}:comment xmlns:${prefix}="${uri}" ${prefix}:id="${item.id}" ${prefix}:author="${escapeAttribute(item.comment.author)}" ${prefix}:date="${escapeAttribute(item.comment.date)}"><${prefix}:p><${prefix}:r>`);
+    const body = item.comment.body; let start = 0;
+    const text = (value: string) => { if (value) appendBody(`<${prefix}:t xml:space="preserve">${escapeText(value)}</${prefix}:t>`); };
+    for (const match of body.matchAll(/[\n\t]/g)) { text(body.slice(start, match.index)); appendBody(match[0] === '\n' ? `<${prefix}:br/>` : `<${prefix}:tab/>`); start = match.index + 1; }
+    text(body.slice(start)); appendBody(`</${prefix}:r></${prefix}:p></${prefix}:comment>`);
+  }
+  const bodies = bodyParts.join('');
+  if (existing.part) replacements.set(commentsName, encode(existing.part, appendXml(existing.part, bodies)));
+  else additions.push({ name: commentsName, directory: false, bytes: Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><${prefix}:comments xmlns:${prefix}="${uri}">${bodies}</${prefix}:comments>`) });
+  if (typesText !== types.text) replacements.set(types.name, encode(types, typesText));
+  const output = await writeZipChanges(parsed.entries, replacements, additions), checked = build(await readZip(output));
+  classicComments(checked);
+  const after = new Map(checked.entries.map(entry => [entry.name, entry.bytes]));
+  for (const entry of parsed.entries) if (!after.has(entry.name) || !replacements.has(entry.name) && !entry.bytes.equals(after.get(entry.name)!)) fail('DOCX preservation verification failed.');
+  if (checked.entries.length !== parsed.entries.length + additions.length || plainText(main.root) !== plainText(checked.parts.get(main.name)!.root)) fail('DOCX text preservation verification failed.');
+  const anchors = new Map(selected.map(item => [item.id, '']));
+  for (const block of checked.projection.blocks) for (const run of block.runs) for (const key of run.commentIds ?? []) if (anchors.has(key)) anchors.set(key, anchors.get(key)! + run.text);
+  for (const item of selected) {
+    const comment = checked.projection.comments.find(comment => comment.id === item.id);
+    if (anchors.get(item.id) !== item.comment.passage.quote || comment?.author !== item.comment.author || comment.date !== item.comment.date || comment.blocks.length !== 1 || comment.blocks[0]!.text !== item.comment.body) fail('DOCX comment linkage verification failed.');
+  }
+  return { bytes: output, projection: checked.projection };
+}
+
+export async function processDocx(bytes: Uint8Array, replacement?: DocxReplacement, attribution?: {author:string;date:string}, comments?: DocxPackageComment[]): Promise<{bytes:Uint8Array;projection:DocxProjection}> {
+  const parsed=build(await readZip(bytes)); if(comments!==undefined){if(replacement)fail('DOCX operations cannot be combined.');return exportDiscussion(parsed,comments);} if(!replacement)return {bytes,projection:parsed.projection};
   if(!replacement||typeof replacement.rangeId!=='string'||typeof replacement.quote!=='string'||typeof replacement.replacement!=='string'||!Number.isSafeInteger(replacement.start)||!Number.isSafeInteger(replacement.end))fail('Choose an exact editable DOCX text range.');
   const range=parsed.ranges.get(replacement.rangeId); if(!range)fail('That DOCX text range is unsupported or no longer matches the source.');
   const {part,run,text}=range!; const {start,end,quote}=replacement;

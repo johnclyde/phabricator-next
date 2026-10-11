@@ -8,6 +8,7 @@ import type { GitSourceProvenance } from './repositories';
 import type { FileRecord, RevisionAsset } from './files';
 import type { PasteRecord } from './pastes';
 import type { DocxSource } from './docx';
+import type { DocxPassageAnchor, DocxPassageInput } from './docx-discussion';
 import type { WikiHierarchy, WikiLocation, WikiMoveProvenance, WikiPublication, WikiLifecycleHistory, WikiLifecyclePins } from './wiki';
 export type { WikiPublication, WikiLifecyclePins, WikiDraftInput, WikiPublishInput, WikiDeleteInput, WikiLifecycleKind, WikiLifecycleSnapshot, WikiLifecycleTransaction, WikiLifecycleHistory, WikiLifecycleReceipt, WikiStatus, WikiLocation, WikiReference, WikiAncestor, WikiChildren, WikiHierarchy, WikiPathResult, WikiMoveInput, WikiMovePreview, WikiMoveReceipt, WikiMoveProvenance } from './wiki';
 export type { FileRecord, RevisionAsset } from './files';
@@ -48,7 +49,7 @@ export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: G
 export interface PassageAnchor { versionId: string; contentHash: string; filePath: string; start: number; end: number; quote: string; prefix: string; suffix: string }
 export interface PassageInput { start: number; end: number; quote: string }
 export interface SuggestedReplacement { replacement: string }
-export interface ReviewComment { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; filePath: string | null; line: number | null; body: string; author: string; createdAt: string; threadId?: string; anchor?: PassageAnchor; viewedVersionId?: string; suggestion?: SuggestedReplacement }
+export interface ReviewComment { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; filePath: string | null; line: number | null; body: string; author: string; createdAt: string; threadId?: string; anchor?: PassageAnchor; docxAnchor?: DocxPassageAnchor; viewedVersionId?: string; suggestion?: SuggestedReplacement }
 export interface ReviewThread { id: string; revisionId: string; rootCommentId: string; status: 'open' | 'resolved'; version: number; createdAt: string; updatedAt: string }
 export interface ReviewThreadEvent { attribution?: ActorAttribution; id: string; revisionId: string; threadId: string; action: 'resolved' | 'reopened'; versionId: string; threadVersion: number; actor: string; createdAt: string }
 export interface SuggestionApplication { attribution?: ActorAttribution; id: string; revisionId: string; commentId: string; threadId: string; fromVersionId: string; toVersionId: string; fromContentHash: string; toContentHash: string; threadVersion: number; actor: string; createdAt: string }
@@ -62,7 +63,7 @@ export interface RevisionDetail { revision: Revision; versions: RevisionVersion[
 export interface CreateRevisionInput { access?: NewObjectAccessInput; title: string; summary?: string; kind: RevisionKind; files: SourceFile[]; assets?: RevisionAsset[]; shareAssets?: boolean; expectedAccessEpoch?: number; repositoryId?: string | null; projectId?: string | null }
 export interface CreateVersionInput { files: SourceFile[]; assets?: RevisionAsset[]; message: string; expectedVersion: number; expectedVersionId?: string; expectedContentHash?: string; shareAssets?: boolean; expectedAccessEpoch?: number }
 export interface ReviewInput { provider: 'local' | 'openai' | 'ollama'; expectedVersion: number }
-export interface CreateCommentInput { body: string; versionId: string; filePath?: string | null; line?: number | null; passage?: PassageInput; suggestion?: SuggestedReplacement }
+export interface CreateCommentInput { body: string; versionId: string; filePath?: string | null; line?: number | null; passage?: PassageInput; docxPassage?: DocxPassageInput; suggestion?: SuggestedReplacement }
 export interface CreateReplyInput { body: string; viewedVersionId: string }
 export interface UpdateThreadInput { status: 'open' | 'resolved'; expectedThreadVersion: number; versionId: string }
 export interface ApplySuggestionInput { expectedVersion: number; expectedVersionId: string; expectedContentHash: string; expectedThreadVersion: number }

@@ -13,6 +13,7 @@ import type { PasteRecord } from '../shared/pastes.ts';
 import { CitationEvidenceStore, initializeCitationEvidence } from './citation-evidence.ts';
 import { sourceSnapshotCanonical, validateSourceSnapshot, validateDocxSource } from '../shared/source-snapshot.ts';
 import { DOCX_LIMITS, type DocxSource, type DocxProjection, type DocxFileIdentity, type DocxImportInput, type DocxReimportInput, type DocxReplaceInput, type DocxVersionPins } from '../shared/docx.ts';
+import { createDocxPassageAnchor, validDocxPassageAnchor, DOCX_DISCUSSION_LIMITS, type DocxDiscussionExportInput, type DocxPackageComment, type DocxPassageAnchor } from '../shared/docx-discussion.ts';
 import type { FileRecord, RevisionAsset } from '../shared/files.ts';
 import { createHash, randomUUID, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -1426,10 +1427,67 @@ export class Store {
     const revision = { ...detail.revision, status, updatedAt: new Date().toISOString() };
     this.save('revision', revision); this.event(id, status, `${status === 'closed' ? 'Manually closed' : `Set status to ${status.replaceAll('_', ' ')}`} at version ${revision.currentVersion}.`, attribution); return revision;
   }
+  /** A bounded read snapshot; callers must enforce current revision/source visibility. */
+  docxDiscussion(id: string, input: unknown): { input: DocxDiscussionExportInput; version: RevisionVersion; bytes: Uint8Array; comments: DocxPackageComment[] } {
+    const data = object(input, ['versionId', 'contentHash', 'expectedAccessEpoch', 'threads']);
+    const versionId = string(data.versionId, 'Version ID', 100);
+    const hash = string(data.contentHash, 'Content hash', 64);
+    if (!/^[a-f0-9]{64}$/.test(hash)) throw new HttpError(400, 'Choose an exact content hash.');
+    if (!Number.isSafeInteger(data.expectedAccessEpoch) || (data.expectedAccessEpoch as number) < 0) throw new HttpError(400, 'Choose a valid access epoch.');
+    if (!Array.isArray(data.threads) || !data.threads.length || data.threads.length > DOCX_DISCUSSION_LIMITS.threads) throw new HttpError(400, 'Select between 1 and 64 discussion threads.');
+    const threads = data.threads.map(value => {
+      const pin = object(value, ['threadId', 'expectedThreadVersion']);
+      return { threadId: string(pin.threadId, 'Thread ID', 100), expectedThreadVersion: integer(pin.expectedThreadVersion, 'expectedThreadVersion') };
+    });
+    if (new Set(threads.map(pin => pin.threadId)).size !== threads.length) throw new HttpError(400, 'Choose each discussion thread once.');
+    this.docxEpoch(data.expectedAccessEpoch as number);
+    const version = this.commentVersion(id, versionId);
+    if (!version.docx || version.contentHash !== hash) throw docxMismatch();
+    const bytes = this.docxBytes(id, versionId);
+    let bodyLength = 0;
+    const viewedVersions = new Set([versionId]);
+    const changed = () => new HttpError(409, 'The selected discussion changed or does not belong to this exact Word version.', 'DOCX_DISCUSSION_CHANGED');
+    const comments = threads.map(pin => {
+      const thread = this.thread(id, pin.threadId);
+      if (thread.version !== pin.expectedThreadVersion) throw changed();
+      const rootRow = this.database.prepare('SELECT data FROM comments WHERE revision_id=? AND id=?').get(id, thread.rootCommentId) as JsonRow | undefined;
+      const root = rootRow ? JSON.parse(rootRow.data) as ReviewComment : undefined;
+      if (!root || root.id !== thread.rootCommentId || root.threadId !== thread.id || root.versionId !== versionId || !root.docxAnchor || !validDocxPassageAnchor(root.docxAnchor, version)) throw changed();
+      const pieces = [`Application discussion ${thread.id}\nStatus: ${thread.status}\nOriginal version: ${versionId} (v${version.number})\nThis is a transcript of the selected application thread, not a native Word reply or resolved-state record.`];
+      bodyLength += pieces[0]!.length;
+      let count = 0;
+      const statement = this.database.prepare("SELECT data FROM comments WHERE revision_id=? AND (id=? OR json_extract(data,'$.threadId')=?) ORDER BY rowid");
+      for (const row of statement.iterate(id, root.id, thread.id) as Iterable<JsonRow>) {
+        const comment = JSON.parse(row.data) as ReviewComment;
+        if (comment.revisionId !== id || comment.versionId !== versionId || comment.threadId !== thread.id || !comment.docxAnchor
+          || !isDeepStrictEqual(comment.docxAnchor, root.docxAnchor) || (count === 0 && comment.id !== root.id)) throw changed();
+        const viewed = comment.viewedVersionId ?? versionId;
+        if (!viewedVersions.has(viewed)) {
+          if (typeof viewed !== 'string' || viewed.length > 100 || !this.database.prepare('SELECT 1 FROM versions WHERE revision_id=? AND id=?').get(id, viewed)) throw changed();
+          viewedVersions.add(viewed);
+        }
+        const piece = `\n\nMessage ${++count} (${comment.id})\nAuthor: ${JSON.stringify(comment.author)}\nPrincipal: ${comment.attribution?.principalId ?? 'unrecorded legacy author'}\nDate: ${comment.createdAt}\nViewed version: ${viewed}\n\n${comment.body}`;
+        bodyLength += piece.length;
+        if (bodyLength > DOCX_DISCUSSION_LIMITS.bodyLength) throw new HttpError(413, 'The complete selected discussions exceed the Word export text limit. Select fewer threads.', 'DOCX_DISCUSSION_LIMIT');
+        pieces.push(piece);
+      }
+      if (!count) throw changed();
+      return { passage: { rangeId: root.docxAnchor.rangeId, start: root.docxAnchor.start, end: root.docxAnchor.end, quote: root.docxAnchor.quote }, author: root.author, date: root.createdAt, body: pieces.join('') };
+    });
+    return { input: { versionId, contentHash: hash, expectedAccessEpoch: data.expectedAccessEpoch as number, threads }, version, bytes, comments };
+  }
   createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
     return this.discussionMutation(() => {
-      const data = object(input, ['body', 'versionId', 'filePath', 'line', 'passage', 'suggestion']);
+      const data = object(input, ['body', 'versionId', 'filePath', 'line', 'passage', 'suggestion', 'docxPassage']);
       const version = this.commentVersion(id, data.versionId);
+      let docxAnchor: DocxPassageAnchor | undefined;
+      if (data.docxPassage !== undefined) {
+        if (['filePath', 'line', 'passage', 'suggestion'].some(key => data[key] !== undefined)) throw new HttpError(400, 'A Word passage cannot be combined with a text-file anchor or suggestion.');
+        const passage = object(data.docxPassage, ['rangeId', 'start', 'end', 'quote']);
+        try { docxAnchor = createDocxPassageAnchor(version, passage as unknown as Parameters<typeof createDocxPassageAnchor>[1]); }
+        catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
+        this.docxBytes(id, version.id);
+      }
       const filePath = data.filePath === undefined || data.filePath === null ? null : string(data.filePath, 'File path', 240);
       const file = filePath ? version.files.find(item => item.path === filePath) : undefined;
       if (filePath && !file) throw new HttpError(400, 'Comment file does not exist in the selected version.');
@@ -1455,7 +1513,7 @@ export class Store {
         catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
       }
       const commentId = randomUUID();
-      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), ...(suggestion ? { suggestion } : {}), body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), ...(docxAnchor ? { docxAnchor } : {}), ...(suggestion ? { suggestion } : {}), body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       this.insertComment(comment);
       const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
       this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, id, commentId, JSON.stringify(thread));
@@ -1531,7 +1589,7 @@ export class Store {
       const row = this.database.prepare('SELECT data FROM comments WHERE revision_id = ? AND id = ?').get(id, thread.rootCommentId) as JsonRow | undefined;
       if (!row) throw new HttpError(404, 'Discussion thread was not found.', 'THREAD_UNAVAILABLE');
       const root = JSON.parse(row.data) as ReviewComment;
-      const comment: ReviewComment = { id: randomUUID(), threadId, revisionId: id, versionId: root.versionId, viewedVersionId: viewedVersion.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), body: string(data.body, 'Reply', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      const comment: ReviewComment = { id: randomUUID(), threadId, revisionId: id, versionId: root.versionId, viewedVersionId: viewedVersion.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), ...(root.docxAnchor ? { docxAnchor: root.docxAnchor } : {}), body: string(data.body, 'Reply', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       const updated = this.advanceThread(thread, comment.createdAt);
       this.insertComment(comment); this.saveThread(updated);
       this.event(id, 'replied', `Replied to a discussion while viewing version ${viewedVersion.number}.`, attribution);
