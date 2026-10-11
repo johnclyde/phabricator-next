@@ -2,17 +2,25 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PaperCLI } from './paper-builds';
 import { readRequestIntent } from './request-intent';
 import { isRevisionId, revisionDependencyInput, validRevisionDependencyReceipt, type RevisionDependencyPage, type RevisionDependencyHistory } from '../shared/revision-dependencies';
+import { canonicalRevisionStack, isRevisionStack, isRevisionStackId } from '../shared/revision-stack';
 
-const commands = new Set(['revision-dependencies', 'revision-dependency-history', 'edit-revision-dependencies']);
+const commands = new Set(['revision-stack', 'revision-dependencies', 'revision-dependency-history', 'edit-revision-dependencies']);
 const safeJson = (value: unknown) => JSON.stringify(value, null, 2).replace(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 export async function revisionDependenciesCommand({ command, args, options, optionNames, request }: PaperCLI): Promise<boolean> {
   if (!commands.has(command)) return false;
-  const editing = command === 'edit-revision-dependencies', history = command === 'revision-dependency-history';
-  const allowed = ['server', 'json', 'help', ...(editing ? ['intent', 'request-id'] : ['limit', 'relationship-version', ...(history ? ['before'] : ['direction', 'after'])])];
+  const editing = command === 'edit-revision-dependencies', history = command === 'revision-dependency-history', graph = command === 'revision-stack';
+  const allowed = ['server', 'json', 'help', ...(graph ? ['snapshot'] : editing ? ['intent', 'request-id'] : ['limit', 'relationship-version', ...(history ? ['before'] : ['direction', 'after'])])];
   if (optionNames.some(name => !allowed.includes(name)) || new Set(optionNames).size !== optionNames.length) throw new Error('Use unique supported options for this revision dependency command.');
   const id = args[0];
   if (args.length !== 1 || !isRevisionId(id)) throw new Error('Provide one revision ID such as D1, P2 or L3.');
   const root = `/api/revisions/${id}/dependencies`;
+  if (graph) {
+    const pin = options.snapshot;
+    if (pin !== undefined && !isRevisionStackId(pin)) throw new Error('--snapshot must be an exact stack SHA256.');
+    const stack = await request<unknown>(`${root}/graph${pin === undefined ? '' : `?expectedSnapshotId=${pin}`}`);
+    if (!isRevisionStack(stack, id) || (pin !== undefined && stack.snapshotId !== pin) || createHash('sha256').update(canonicalRevisionStack(stack)).digest('hex') !== stack.snapshotId) throw new Error('The revision stack could not be verified.');
+    console.log(safeJson(stack)); return true;
+  }
   if (editing) {
     if (typeof options.intent !== 'string' || !options.intent) throw new Error('Provide --intent REQUEST.json with the exact relationship and access versions.');
     const input = revisionDependencyInput(await readRequestIntent(options.intent, 'Revision dependency request'));

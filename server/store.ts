@@ -1,5 +1,6 @@
 import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
+import { RevisionStackStore } from './revision-stack.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
 import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
 import type { WikiConduitMethod, WikiConduitReceipt } from '../shared/wiki-conduit.ts';
@@ -157,6 +158,7 @@ export class Store {
   readonly pastes: PasteStore;
   readonly citationEvidence: CitationEvidenceStore;
   readonly revisionDependencies: RevisionDependencyStore;
+  readonly revisionStack: RevisionStackStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -415,6 +417,7 @@ export class Store {
       catch (error) { this.database.close(); throw error; }
     }
     this.revisionDependencies = new RevisionDependencyStore(this.database);
+    this.revisionStack = new RevisionStackStore(this.database);
     this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;

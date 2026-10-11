@@ -33,6 +33,43 @@ inaccessible intermediates; its error never includes a hidden path. Validation,
 conflicts and traversal limits reject the entire operation without partial edges
 or partial history.
 
+## Stack
+
+Open Stack in Related Revisions to see the complete visible connected graph,
+including siblings, branches and shared parents. Rows follow a deterministic
+child-before-parent order. Closed revisions stay visible. The advisory open-parent
+count includes distinct transitive parents, traverses closed intermediates and
+excludes the current revision. Accepted revisions remain open under this
+application's manual closure model; the count never gates acceptance or closure.
+
+Each row shows current status, title and the original author recorded on version
+one, or "Not recorded" for unattributed historical data. Selecting a row highlights
+its traces and lists exact parent and child links. Trace lanes scroll separately
+on narrow screens. Following a revision link preserves its selected source version;
+the graph always describes current relationships and metadata.
+
+One database read snapshot supplies the graph, current source-head identities,
+relationship versions, authors and access epoch. The browser and CLI verify a
+canonical SHA256 before using it. A changed visible node, edge, source-head identity
+or access epoch changes the snapshot. Stored source hashes identify immutable
+heads; reading Stack does not inspect or rehash manuscript contents. A snapshot
+hash grants no authority, and every server read checks current access.
+
+Graph traversal stops at inaccessible revisions. It returns no hidden IDs,
+placeholders, counts, or visible nodes reached only through hidden intermediates.
+Reads admit at most 1,000 visible nodes, 5,000 visible edges, 10,000 candidate
+visibility checks, 50,000 scanned incident-edge rows, and 2 MiB of canonical UTF-8
+data. Unsupported larger graphs fail explicitly without a partial graph. Cyclic
+or inconsistent stored data also fails rather than producing misleading traces.
+
+Visited verified stacks follow the same local/tab-memory cache policy as related
+revisions. Focus, reconnect, known metadata changes, relationship edits and access
+changes retire stale graphs and narration. Offline views label saved snapshots.
+If device storage is full, the current tab can retain its newer verified snapshot.
+"Read stack", "read current stack revision", "next stack revision" and "previous
+stack revision" share the touch cursor and use the existing on-device response
+voice. These commands navigate and read; they do not edit relationships or sources.
+
 ## Authority and offline work
 
 The edited revision requires current view and edit permission. Every explicitly
@@ -72,6 +109,10 @@ than substituting today's graph; read again for current relationships.
 - `GET /api/revisions/:id/dependencies/history` returns filtered immutable
   transactions, relationship version, access epoch and `nextBefore`. Optional
   `before`, `limit` and `expectedRelationshipVersion` use the same page limits.
+- `GET /api/revisions/:id/dependencies/graph` returns one complete authorized Stack
+  snapshot. Optional `expectedSnapshotId` requires an exact lowercase SHA256;
+  a changed snapshot returns 409 after current access checks. Oversized graphs
+  return 422. There is no partial paging and this read does not write storage.
 - `POST /api/revisions/:id/dependencies` accepts the exact intent below and
   returns an operation receipt. A stable `Idempotency-Key` is required for each
   change and its retries. Read and write token scopes, cookie CSRF checks
@@ -96,6 +137,8 @@ an unsupported larger traversal fails explicitly.
 ```sh
 npm run arc -- revision-dependencies P1 --direction parents --limit 50
 npm run arc -- revision-dependency-history P1 --limit 50
+npm run arc -- revision-stack P1
+npm run arc -- revision-stack P1 --snapshot EXACT_SHA256
 npm run arc -- edit-revision-dependencies P1 --intent change.json --request-id retained-request-id
 ```
 
@@ -103,7 +146,8 @@ The CLI reads a bounded regular UTF-8 JSON intent file without following a final
 symlink. It preserves supplied versions and never fetches a newer version to
 change the request. Its receipt check verifies the source revision, complete
 delta, operation identity and resulting relationship version. Retain the exact
-request file and ID when a response is uncertain. All three commands print JSON
+request file and ID when a response is uncertain. Stack reads also validate the
+complete graph structure and its digest before printing. All four commands print JSON
 with terminal control and direction-changing characters escaped.
 
 ## Storage and upstream relationship
@@ -122,7 +166,16 @@ define direction, inverse transactions and cycle prevention. The
 uses add/remove deltas and destination view checks. This implementation adds
 explicit concurrency pins and extends the relationship to papers and documents.
 
-Full upstream Stack visualization, summary-derived "Depends on" parsing,
+The pinned [Stack controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/controller/DifferentialRevisionViewController.php)
+loads the whole connected graph and counts open transitive parents. Its
+[object graph](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/graph/PhabricatorObjectGraph.php)
+retains closed nodes and traverses topology before filtering handles. This native
+Stack intentionally tightens privacy by stopping at hidden nodes, rather than
+showing hidden placeholders or bridges. Equal-order rows use lexical IDs for
+determinism. Original attribution does not implement upstream mutable author
+ownership, author profile handles or commandeering.
+
+Configurable accepted-as-closed behavior, summary-derived "Depends on" parsing,
 revision PHIDs and Conduit edge/edit/query interoperability, notifications,
 formal authors/reviewers, and working-copy/landing orchestration remain gaps.
 This dependency workflow does not establish full Differential parity.

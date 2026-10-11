@@ -49,6 +49,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- export P2 [--version 1]
   npm run arc -- revision-dependencies P2 --direction parents|children [--after ID] [--limit N] [--relationship-version N]
   npm run arc -- revision-dependency-history P2 [--before N] [--limit N] [--relationship-version N]
+  npm run arc -- revision-stack P2 [--snapshot SHA256]
   npm run arc -- edit-revision-dependencies P2 --intent REQUEST.json [--request-id KEY]
   npm run arc -- builds P2 [--before N] [--limit N] [--json]
   npm run arc -- compile P2 --version-id ID --content-hash SHA256 --entrypoint main.tex --toolchain-id SHA256 [--request-id KEY] [--json]
@@ -236,7 +237,7 @@ async function main() {
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
       'request-id': { type: 'string' },
       intent: { type: 'string' },
-      direction: { type: 'string' }, 'relationship-version': { type: 'string' },
+      direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
       entrypoint: { type: 'string' }, 'toolchain-id': { type: 'string' }, before: { type: 'string' },
       artifact: { type: 'string' }, output: { type: 'string' },

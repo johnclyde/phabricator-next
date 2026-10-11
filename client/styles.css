@@ -904,6 +904,34 @@
 .revision-dependency-selected p { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .revision-dependency-history { margin-top: 20px; }
 .revision-dependency-history summary { cursor: pointer; padding: 12px 0; font-weight: 600; }
+.revision-stack-disclosure { margin-top: 20px; border-top: 1px solid #dce5ed; }
+.revision-stack-disclosure > summary { cursor: pointer; padding: 14px 0; min-height: 44px; font-weight: 600; }
+.revision-stack { min-width: 0; }
+.revision-stack .file-actions { justify-content: space-between; }
+.revision-stack-count { padding: 12px; background: #edf3f7; border-left: 3px solid #5483a3; }
+.revision-stack-selection { border: 1px solid #c8d6e1; background: #f8fafc; padding: 12px; margin: 12px 0; }
+.revision-stack-selection h4 { margin: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.revision-stack-selection p { margin: 8px 0; }
+.revision-stack-adjacency { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.revision-stack-adjacency li { padding: 6px 0; }
+.revision-stack-adjacency a { display: inline-block; min-height: 32px; padding: 6px 0; }
+.revision-stack-board { display: grid; grid-template-columns: minmax(42px, 104px) minmax(0, 1fr); min-width: 0; }
+.revision-stack-traces { min-width: 0; overflow-x: auto; overflow-y: hidden; background: #f6f9fb; }
+.revision-stack-traces svg { display: block; max-width: none; }
+.revision-stack-rows { min-width: 0; list-style: none; padding: 0; margin: 0; }
+.revision-dependencies .revision-stack-rows > li { box-sizing: border-box; height: 132px; padding: 0; border: 0; }
+.revision-stack-node { width: 100%; height: 132px; box-sizing: border-box; padding: 12px; text-align: left; border: 1px solid #dce5ed; background: white; color: #283d4b; font: inherit; cursor: pointer; overflow: hidden; }
+.revision-stack-node[aria-pressed="true"] { background: #eaf3fa; box-shadow: inset 3px 0 #397ca7; }
+.revision-stack-seed .revision-stack-node { border-left: 3px solid #b57512; }
+.revision-stack-row-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 20px; }
+.revision-stack-row-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; font-size: 11px; }
+.revision-stack-author { display: block; color: #526d80; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media(max-width:600px) {
+  .revision-stack-board { grid-template-columns: minmax(42px, 78px) minmax(0, 1fr); }
+  .revision-stack-adjacency { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .revision-stack-adjacency a, .revision-stack-selection h4 > a { min-height: 44px; display: flex; align-items: center; }
+  .revision-stack .file-actions > .button { min-height: 44px; flex: 0 0 auto; }
+}
 .revision-dependency-history ol { margin: 0; padding-left: 20px; }
 @media (max-width: 700px) {
   .revision-dependency-lists { grid-template-columns: minmax(0, 1fr); gap: 12px; }

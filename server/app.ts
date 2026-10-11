@@ -639,6 +639,14 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          const stack = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies\/graph$/.exec(path);
+          if (stack) {
+            const id = stack[1]!; access.require(id);
+            if ([...url.searchParams.keys()].some(name => name !== 'expectedSnapshotId' || url.searchParams.getAll(name).length !== 1)) throw new HttpError(400, 'Invalid revision stack query.');
+            const pin = url.searchParams.get('expectedSnapshotId');
+            if (pin !== null && !/^[a-f0-9]{64}$/.test(pin)) throw new HttpError(400, 'Select an exact revision stack snapshot.');
+            send(res, 200, store.revisionStack.read(id, peer => access.canView(peer), policies.epoch(), pin ?? undefined)); return;
+          }
           const dependencies = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/dependencies(\/history)?$/.exec(path);
           if (dependencies) {
             const id = dependencies[1]!; access.require(id);

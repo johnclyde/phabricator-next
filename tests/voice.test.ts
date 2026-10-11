@@ -27,3 +27,11 @@ test('Paste navigation keeps PA distinct from manuscript P and never writes by v
   assert.deepEqual(parseCommand('open P12'), { type: 'openObject', id: 'P12' });
   for (const command of ['open PA0', 'open PA9007199254740992', 'create paste execute this', 'archive PA12', 'paste secret text', 'open PA12 and publish']) assert.equal(parseCommand(command).type, 'unknown');
 });
+
+test('stack voice commands read and navigate the visible graph without accepting or changing it', () => {
+  for (const command of ['Read the stack.', 'show stack', 'open revision stack']) assert.deepEqual(parseCommand(command), { type: 'stack' });
+  for (const command of ['next stack revision', 'read the next stack revision', 'go to next stack revision']) assert.deepEqual(parseCommand(command), { type: 'nextStackRevision' });
+  for (const command of ['previous stack revision', 'show prior stack revision']) assert.deepEqual(parseCommand(command), { type: 'previousStackRevision' });
+  for (const command of ['read stack revision', 'read selected stack revision', 'read the current stack revision']) assert.deepEqual(parseCommand(command), { type: 'currentStackRevision' });
+  for (const command of ['close stack', 'accept stack', 'land stack', 'next stack revision and approve it', 'add parent P1', 'remove stack']) assert.equal(parseCommand(command).type, 'unknown');
+});

@@ -6,16 +6,19 @@ import { useWorkspace } from './SessionGate';
 import { isNetworkError } from './offline';
 import { retainFileIntent } from './file-client';
 import { onSessionLocked } from './session';
+import RevisionStack from './RevisionStack';
+import type { RegisterStack } from './revision-stack';
 
 const title = (direction: RevisionDependencyDirection) => direction === 'parents' ? 'Parent Revisions' : 'Child Revisions';
 const message = (error: unknown) => error instanceof Error ? error.message : 'Related revisions could not be loaded.';
 function exportRecord(id: string, value: unknown, kind: string) { const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' })), link = document.createElement('a'); link.href = url; link.download = `${id}-relationships-${kind}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
 
-export default function RevisionDependencies({ id, state, online, canEdit, refreshWorkspace }: { id: string; state: AppState; online: boolean; canEdit: boolean; refreshWorkspace: () => Promise<void> }) {
+export default function RevisionDependencies({ id, state, online, canEdit, refreshWorkspace, registerStack }: { id: string; state: AppState; online: boolean; canEdit: boolean; refreshWorkspace: () => Promise<void>; registerStack?: RegisterStack }) {
   const client = useWorkspace(), cacheKey = `revision-dependencies:${id}`, draftKey = `revision-dependency-draft:${id}`, requestKey = `revision-dependency-request:${id}`;
   const [snapshot, setSnapshot] = useState<DependencySnapshot | null>(() => dependencySnapshot(client.readStored(cacheKey, null), id));
   const [draft, setDraft] = useState<DependencyDraft | null>(() => dependencyDraft(client.readStored(draftKey, null))), [pending, setPending] = useState<DependencyIntent | null>(() => dependencyIntent(client.readStored(requestKey, null), id));
   const [loading, setLoading] = useState(false), [paging, setPaging] = useState(''), [saving, setSaving] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [saved, setSaved] = useState(true), [draftSaved, setDraftSaved] = useState(!client.draftHasUnsavedMemory(draftKey)), [query, setQuery] = useState('');
+  const [stackOpen, setStackOpen] = useState(false);
   const mounted = useRef(true), generation = useRef(0), current = useRef(snapshot), latest = useRef(draft), loadRef = useRef<() => void>(() => {}), refreshRef = useRef(refreshWorkspace), stateRef = useRef(state);
   latest.current = draft; refreshRef.current = refreshWorkspace; stateRef.current = state;
   const show = (value: DependencySnapshot | null) => { current.current = value; setSnapshot(value); };
@@ -93,6 +96,7 @@ export default function RevisionDependencies({ id, state, online, canEdit, refre
       if (!validRevisionDependencyReceipt(result, id, intent.body)) throw new Error('The receipt does not match the original relationship change. Keep the request and retry it exactly.');
       client.removeStoredIfEqual(requestKey, intent); client.removeStoredIfEqual(draftKey, intent.draft);
       for (const peer of [id, ...intent.body.add, ...intent.body.remove]) client.removeStored(`revision-dependencies:${peer}`);
+      client.invalidateRevisionStacks();
       if (!active()) return;
       syncDrafts(); setNotice('Related revisions updated. Source versions and review acceptance are unchanged.');
       await load();
@@ -122,6 +126,7 @@ export default function RevisionDependencies({ id, state, online, canEdit, refre
       </section>}
       {pending && !client.draftIsHeld(requestKey) && <section className="revision-dependency-recovery" aria-label="Unconfirmed relationship change"><h3>Unconfirmed Relationship Change</h3><p>The change may already have completed. Retry uses the original request, selected IDs, and versions. Reconnecting never retries it.</p><p>{pending.body.direction === 'parents' ? 'Parents' : 'Children'} · add {pending.body.add.join(', ') || 'none'} · remove {pending.body.remove.join(', ') || 'none'}</p><div className="file-actions"><button className="button" disabled={!online || !canEdit || saving} onClick={() => void send(pending)}>Retry Exact Relationship Change</button><button className="button" onClick={() => exportRecord(id, pending, 'request')}>Export Relationship Request</button><button className="button" disabled={saving} onClick={() => { if (window.confirm('Forget this request? Any completed relationship change remains in history.')) { client.removeStoredIfEqual(requestKey, pending); syncDrafts(); } }}>Forget Relationship Request</button></div>{client.draftHasUnsavedMemory(requestKey) && <p className="banner warning">This request is only retained in this tab.</p>}</section>}
       {snapshot && <details className="revision-dependency-history"><summary>Relationship History</summary><ol>{snapshot.history.transactions.map(item => <li key={item.id}><strong>{item.actor}</strong> {item.change.action} {item.change.direction === 'parents' ? 'parent' : 'child'} <a href={`#${item.change.revisionId}`}>{item.change.revisionId}</a><small>{new Date(item.createdAt).toLocaleString()} · relationship version {item.relationshipVersion}</small></li>)}</ol>{!snapshot.history.transactions.length && <p className="small muted">No visible relationship history on this page.</p>}{snapshot.history.nextBefore !== null && <button className="button" disabled={!online || loading || Boolean(paging) || snapshot.history.transactions.length >= DEPENDENCY_DISPLAY_LIMIT} onClick={() => void more('history')}>Load Older Relationship History</button>}<p className="small muted">At most {DEPENDENCY_DISPLAY_LIMIT} relationships per direction and history entries are kept in this reading view. Hidden records are omitted.</p></details>}
+      <details className="revision-stack-disclosure" open={stackOpen} onToggle={event => setStackOpen(event.currentTarget.open)}><summary>Stack</summary><RevisionStack id={id} online={online} open={stackOpen} onOpen={() => setStackOpen(true)} register={registerStack}/></details>
     </div>
   </section>;
 }
