@@ -1045,3 +1045,22 @@
 .mention-picker-fields input, .mention-picker-fields select { width: 100%; min-height: 44px; min-width: 0; }
 .mention-picker-fields .button { min-height: 44px; }
 @media (max-width: 600px) { .mention-picker-fields { align-items: stretch; flex-direction: column; } .mention-picker-fields label { flex-basis: auto; } }
+
+/* Wiki section links retain the selected immutable version. */
+.wiki-contents { margin: 18px 24px 10px; padding: 0 12px 8px; border: 1px solid var(--border); border-radius: 3px; background: #f5f8fa; }
+.wiki-contents > summary { cursor: pointer; min-height: 44px; padding: 12px 0; font-weight: 600; color: #536c80; }
+.wiki-contents ol { list-style: none; margin: 0; padding: 0; }
+.wiki-contents li { min-width: 0; }
+.wiki-contents a[aria-current="location"] { font-weight: 650; color: #1e689d; }
+.wiki-contents a { display: block; min-height: 36px; padding: 8px 0; overflow-wrap: anywhere; }
+.remarkup-heading-row { display: flex; align-items: baseline; gap: 6px; margin: 14px 0 8px; min-width: 0; }
+.remarkup-heading-row > :is(h2,h3,h4,h5,h6) { margin: 0; min-width: 0; scroll-margin-top: 68px; }
+.remarkup-heading-link { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; font-size: 15px; color: #8297a8; }
+.remarkup-heading-row > :is(h2,h3,h4,h5,h6):focus { outline: 2px solid #57a8e2; outline-offset: 4px; }
+.wiki-section-unavailable { overflow-wrap: anywhere; }
+@media(max-width:760px) {
+ .wiki-contents { margin: 14px 17px 8px; }
+ .wiki-contents a, .remarkup-heading-link { min-height: 44px; }
+ .remarkup-heading-link { min-width: 44px; }
+ .remarkup-heading-row > :is(h2,h3,h4,h5,h6) { scroll-margin-top: 124px; }
+}

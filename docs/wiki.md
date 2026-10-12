@@ -374,8 +374,19 @@ notification transports remain open.
 F026 adds [core formatted reading](remarkup.md) for the selected immutable content
 version, with exact source and copying, bounded whole-document literal fallback,
 and unchanged publication, comparison, offline and access semantics. Prose does
-not resolve people or produce mention effects. Heading links, a table of contents
-and full wiki Remarkup remain gaps.
+not resolve people or produce mention effects.
+
+F027 adds a native Contents disclosure and per-heading share links. Links retain
+an exact document/content version, for example
+`#W42?version=7&section=introduction`; later publication does not change their
+target. The bounded outline follows historical heading-name rules, including
+duplicate suffixes and Unicode truncation, while using safe component-local DOM
+targets. Keyboard/touch navigation, Back/Forward, reload and authorized offline
+reads retain version selection. Missing sections and unavailable versions stay
+explicit; heading changes within an opening preserve its original inbox read
+boundary. See [section navigation](remarkup.md#wiki-section-navigation) for
+compatibility details and the intentional CRLF improvement. Explicit anchor
+syntax, larger-document outlines and full wiki Remarkup remain gaps.
 
 Full Phriction parity is not claimed. Upstream content/status import, full Conduit mappings,
 full Remarkup, mail, Herald, full-text indexing, and the

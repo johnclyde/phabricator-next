@@ -43,8 +43,55 @@ The portable formatting limit remains 20,000 UTF-16 code units. Valid wiki
 content may reach 500,000, while task descriptions and revision metadata may
 reach 100,000. Larger values remain fully readable and copyable as literal
 text, with an explicit fallback notice; nothing is truncated. Formatting
-larger prose, heading anchors/table of contents and full wiki Remarkup remain
-separate parity work. There is no schema change, source rewrite, or migration.
+larger prose and full wiki Remarkup remain separate parity work. F027 adds
+version-pinned wiki heading links and contents as described below. There is no schema change, source rewrite, or migration.
+
+## Wiki section navigation
+
+F027 adds a Contents disclosure and heading links to formatted wiki versions. The outline is
+derived locally from the bounded parser's headings and exact source spans; code
+blocks and literal fallback do not manufacture sections. The Contents control
+appears when at least two headings have usable anchors.
+
+Share links include the document identity, immutable content version and encoded
+section, for example `#W42?version=7&section=introduction`. They retain the
+current hosting path. Following a link selects that exact version and Document
+view; a later publication does not redirect it to newer content. Back/Forward,
+reload and authorized offline reading use the same selection. Unknown sections,
+unavailable versions and malformed links remain explicit instead of silently
+substituting published text. Leaving a section through version or tab controls
+retires its pending focus action. On a direct document route, an explicit version
+selection updates the URL without adding a history entry for each edit of the
+version field; reload retains that version, including an unpublished draft.
+Opening the bare `#W42` route still follows the published pointer. Manual version
+and tab selections within a path-based opening stay local until a section link
+creates the canonical version-pinned route.
+
+Authored local fragments resolve within the selected version. A matching local
+heading takes precedence; otherwise existing workspace route references remain
+application links. Heading targets use component-scoped DOM references and source
+positions, never selectors assembled from authored names. Keyboard focus and
+scrolling wait for the exact selected content and current access, and stop when
+that context is retired. Following sections within the same wiki opening
+preserves its original observed inbox read boundary.
+
+Anchor names follow the pinned upstream header rule: punctuation normalization,
+legacy 32-glyph truncation, trailing connector removal and document-wide duplicate
+suffixes. The input preserves upstream TOC serialization quirks: some inline
+formatting contributes tag names, and pre-resolution mention tokens contribute
+no anchor text. Readable labels and body text remain separate from that naming
+input; the serialized text is never inserted as HTML. Unicode lowercasing uses
+JavaScript's Unicode rules, which can differ from the archived PHP installation's
+mbstring or ASCII behavior. The historical limited combining-mark ranges are
+retained for truncation rather than substituting modern grapheme segmentation.
+Quoted headings separated by empty CRLF quote lines are recognized consistently
+with LF; this intentionally fixes an archived PHP edge case without changing
+stored source bytes.
+
+The source and outline introduce no server markup cache, migration or new
+persistence layer. Current access checks and existing snapshot lifetimes remain
+in force. Full Remarkup, explicit `{anchor #name}` declarations and formatted
+outlines for documents beyond the core parser's limit remain separate work.
 
 ## Supported reading
 
@@ -116,8 +163,9 @@ receipt validation continue to use the exact original body.
 ## Deliberate gaps
 
 This is not full Remarkup parity. Tables, math, media/macros, embeds, custom
-interpreters, syntax highlighting in comment code, heading anchors/TOCs,
-cross-object/wiki lookup, footnotes and upstream HTML interchange remain gaps.
+interpreters, syntax highlighting in comment code, heading navigation outside
+wiki readers, cross-object/wiki lookup, footnotes and upstream HTML interchange
+remain gaps.
 Unsupported features never invoke a fallback Markdown or HTML engine. Their
 source remains available; ordinary inline styles can still appear inside
 unrecognized prose syntax. Interpreter and embed forms remain inert. F026 adds
@@ -137,7 +185,8 @@ No PHP code or vendored runtime is executed or included in the application.
 - [Block rules](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/blockrule) and [inline rules](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/markuprule): syntax, precedence and explicit links.
 - [Semantic fixtures](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/remarkup/__tests__/remarkup): newline styles, list/header ambiguity, quotes, code, notes and URL boundaries.
 - [People mention rule](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/people/markup/PhabricatorMentionRemarkupRule.php): syntactic tokenization precedes styles even when a username does not resolve.
-- [Phriction content reader](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/storage/PhrictionContent.php) and [version selection](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/controller/PhrictionDocumentController.php): selected/published content and lifecycle notices. Upstream enables a table of contents, which remains a native gap.
+- [Phriction content reader](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/storage/PhrictionContent.php) and [version selection](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/controller/PhrictionDocumentController.php): selected/published content and lifecycle notices. Upstream enables a table of contents; F027 provides a bounded native counterpart with version-pinned links.
+- [Header anchors and contents](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/blockrule/PhutilRemarkupHeaderBlockRule.php) and [anchor normalization](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/markuprule/PhutilRemarkupAnchorRule.php): TOC-mode input, naming, duplicate suffixes and the two-heading contents threshold. The pinned read-only libphutil and Arcanist checkouts supply the legacy glyph truncation comparison.
 - Differential [Summary](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/customfield/DifferentialSummaryField.php) and [Test Plan](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/customfield/DifferentialTestPlanField.php), plus the [Maniphest description](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/controller/ManiphestTaskDetailController.php): core formatted prose fields.
 
 ## F025 verification
@@ -191,4 +240,36 @@ No PHP code or vendored runtime is executed or included in the application.
   build file matches the candidate. Schema 34, all 98 tables and all 91 existing
   rows, schema objects, rowids and foreign keys match the pre-update snapshot.
   Integrity checks and health/document response hashes pass. No migration or
+  historical rewrite was required.
+
+## F027 verification
+
+- `npm run check` and production builds for the root and `/mounted/` passed.
+  The complete `npm test` run passed 1,566 tests, with nine optional TeX
+  integration tests skipped and no failures.
+- Independent upstream fixtures cover TOC-mode serialization, pre-resolution
+  mention omission, duplicate suffixes, punctuation, Unicode and legacy glyph
+  truncation. Pure tests cover source spans, cyclic/deep/mismatched ASTs, bounded
+  scanner work, CRLF quoted headings, exact route encoding and malformed links.
+- New browser cases cover exact version links, publication changes, duplicate
+  names, local versus workspace fragments, keyboard/touch focus, manual version
+  and tab controls, Back/Forward, reload, cached/uncached offline versions,
+  malformed/missing targets, literal fallback, late reads and access revocation.
+  The notification case preserves the original path-opening horizon through
+  canonical section links and permits a new horizon only after leaving and
+  reopening. Generic prose and discussion remain outside heading navigation.
+- All 174 unique browser checks passed: 108 at the root and 66 at `/mounted/`,
+  across desktop and phone viewports. This includes 32 new section checks and
+  existing prose, Wiki lifecycle/hierarchy, notification, discussion and mention
+  regressions. Eight repeated checks additionally verify the strengthened guard
+  against external, AI and voice requests. Desktop, phone and tablet layouts
+  were visually inspected.
+- Fixture corrections preserve the exact assertions: word diffs reconstruct both
+  source strings from their insert/delete spans; direct API setup refreshes the
+  authorized inbox before measuring its opening horizon; publication tests verify
+  both version-pinned draft reload and the bare route's published selection.
+- The local preview serves the tested build; all ten installed files match the
+  candidate. Schema 34, all 98 tables, all 91 existing rows, schema objects,
+  rowids and foreign keys match the pre-update snapshot exactly. Integrity
+  checks and saved health/document response hashes pass. No migration or
   historical rewrite was required.

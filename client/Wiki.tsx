@@ -1,5 +1,6 @@
 import ObjectSubscriptions from './ObjectSubscriptions';
-import { RemarkupBody } from './Remarkup';
+import { RemarkupBody, type WikiRemarkupNavigation } from './Remarkup';
+import { wikiContentHref, type WikiLinkSelection } from '../shared/wiki-navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, GitCompareArrows, History, Pencil, RotateCcw, WifiOff } from 'lucide-react';
 import { diffLines, diffWordsWithSpace } from 'diff';
@@ -19,29 +20,44 @@ type WikiMutation = <T>(path: string, method: MutationMethod, body: unknown, lab
 type WikiTab = 'document' | 'compare' | 'history';
 function date(value: string): string { return new Date(value).toLocaleString(); }
 function author(version: WikiVersion): string { return version.author || 'Unknown (legacy snapshot)'; }
+interface WikiReadingSelection { routeKey: string; selected: number | null; section: string | null; error: string | null; tab: WikiTab; focus: number }
+function initialReading(navigation: WikiLinkSelection): WikiReadingSelection { return { routeKey: navigation.key, selected: navigation.version, section: navigation.section, error: navigation.error, tab: 'document', focus: 0 }; }
 
 /** Phriction's source history is immutable; viewing an old version never edits it. */
-export default function Wiki({ onOpened, id, currentVersion, publicationRevision, online, state, manageAccess, mutate, edit, create, refreshWorkspace }: {
+export default function Wiki({ onOpened, id, currentVersion, publicationRevision, navigation, online, state, manageAccess, mutate, edit, create, refreshWorkspace }: {
   onOpened: (id: string) => void;
   create: (path: string) => void;
   refreshWorkspace: () => Promise<void>;
   id: string;
   currentVersion?: number;
   publicationRevision?: number;
+  navigation?: WikiLinkSelection;
   online: boolean;
   state: AppState;
   manageAccess: () => void;
   mutate: WikiMutation;
   edit: (document: WikiDocument) => void;
 }) {
-  const { readStored, writeStored, request, durable, assertActive, unavailableObject, onTaskSnapshotChange, session, savedDraftRecords } = useWorkspace();
+  const { readStored, writeStored, request, durable, assertActive, isActive, unavailableObject, onTaskSnapshotChange, session, savedDraftRecords } = useWorkspace();
   const [detail, setDetail] = useState<WikiDetail | null>(() => readStored(`wiki:${id}`, null));
   const [moving, setMoving] = useState(false);
   const [editor, setEditor] = useState<WikiDetail | null>(null);
   const [operation, setOperation] = useState<{ kind: 'publish' | 'delete' | 'restore'; detail: WikiDetail; target: WikiVersion | null } | null>(null);
   const [lifecyclePaging, setLifecyclePaging] = useState(false);
-  const [tab, setTab] = useState<WikiTab>('document');
-  const [selected, setSelected] = useState<number | null>(null);
+  const routeNavigation = navigation ?? { version: null, section: null, error: null, key: `path:${id}` };
+  const [reading, setReading] = useState<WikiReadingSelection>(() => initialReading(routeNavigation));
+  const currentReading = reading.routeKey === routeNavigation.key ? reading : initialReading(routeNavigation);
+  if (reading !== currentReading) setReading(currentReading);
+  const readingRef = useRef(currentReading); readingRef.current = currentReading;
+  const { tab, selected, section, error: linkError } = currentReading;
+  const changeReading = (patch: Partial<Pick<WikiReadingSelection, 'tab' | 'selected'>>) => {
+    const next = { ...readingRef.current, ...patch, section: null, error: null, focus: readingRef.current.focus + 1 };
+    const href = next.selected !== null && Number.isSafeInteger(next.selected) && next.selected > 0 ? wikiContentHref(id, next.selected) : `#${id}`;
+    next.routeKey = navigation ? href.slice(1) : routeNavigation.key; readingRef.current = next; setReading(next);
+    if (navigation && window.location.hash !== href) { window.history.replaceState(window.history.state, '', href); window.dispatchEvent(new Event('hashchange')); }
+  };
+  const setTab = (tab: WikiTab) => changeReading({ tab });
+  const setSelected = (selected: number | null) => changeReading({ selected });
   const [compareWith, setCompareWith] = useState<number | null>(null);
   const [diffMode, setDiffMode] = useState<'words' | 'lines'>('words');
   const [versions, setVersions] = useState<Record<number, WikiVersion>>({});
@@ -137,13 +153,15 @@ export default function Wiki({ onOpened, id, currentVersion, publicationRevision
   const last = detail?.document.version ?? 1;
   const baseline = compareWith ?? (number !== published ? published : Math.max(first, number - 1));
   const valid = (value: number) => Number.isSafeInteger(value) && value >= first && value <= last;
-  const validNumber = valid(number), validBaseline = valid(baseline);
+  const validNumber = !linkError && valid(number), validBaseline = !linkError && valid(baseline);
   useEffect(() => {
     if (!detail || tab === 'history') return;
     if (validNumber) void loadVersion(number);
     if (tab === 'compare' && validBaseline) void loadVersion(baseline);
   }, [detail?.document.version, tab, number, baseline, validNumber, validBaseline, loadVersion, online]);
   const version = versions[number];
+  const contentContext = !linkError && validNumber && version ? `${id}:${version.id}` : null;
+  const contentContextRef = useRef(contentContext); contentContextRef.current = contentContext;
   const before = versions[baseline];
   const changes = useMemo(() => {
     if (tab !== 'compare' || !version || !before) return null;
@@ -173,6 +191,17 @@ export default function Wiki({ onOpened, id, currentVersion, publicationRevision
 
   const access = detail && state.accessEpoch >= (detail.accessEpoch ?? -1) ? state.access[id] : detail?.access;
   const active = !detail?.document.location || detail.document.location.status === 'active';
+  const sectionNavigation: WikiRemarkupNavigation = {
+    section, key: `${currentReading.routeKey}:${currentReading.focus}`, enabled: Boolean(contentContext && !loading && access?.capabilities.view),
+    href: anchor => { try { return wikiContentHref(id, number, anchor); } catch { return null; } },
+    isActive: () => Boolean(mounted.current && isActive() && !unavailableObject(id) && access?.capabilities.view && contentContext && contentContextRef.current === contentContext && readingRef.current === currentReading && readingRef.current.tab === 'document'),
+    navigate: anchor => {
+      if (!contentContext || contentContextRef.current !== contentContext || !isActive() || unavailableObject(id)) return;
+      let href: string; try { href = wikiContentHref(id, number, anchor); } catch { return; }
+      const next: WikiReadingSelection = { routeKey: href.slice(1), selected: number, section: anchor, error: null, tab: 'document', focus: readingRef.current.focus + 1 };
+      readingRef.current = next; setReading(next); if (window.location.hash !== href) { window.history.pushState(window.history.state, '', href); window.dispatchEvent(new Event('hashchange')); }
+    },
+  };
   const canEdit = Boolean(access?.capabilities.edit);
   const action = useWikiAction(id, online, async () => { await refreshWorkspace(); await load(); });
   useEffect(() => {
@@ -198,7 +227,7 @@ export default function Wiki({ onOpened, id, currentVersion, publicationRevision
 
   if (!detail) return <>{action.recovery}<section className="panel wiki-page"><div className="panel-heading"><h2><BookOpen size={17}/>Document history</h2><a href="#wiki">All documents</a></div><div className="wiki-status">{error ? <p role="alert">{error}</p> : <p>Loading document…</p>}<button className="button" disabled={loading} onClick={() => void load()}>Retry</button></div></section></>;
 
-  const unavailable = (value: number) => !valid(value) ? `Choose a version between ${first} and ${last}.` : versionErrors[value] || `Loading version ${value}…`;
+  const unavailable = (value: number) => linkError || (!valid(value) ? `Choose a version between ${first} and ${last}.` : versionErrors[value] || `Loading version ${value}…`);
   return <div className="wiki-page">
     <a className="back-link" href="#wiki"><ArrowLeft size={14}/>All documents</a>{detail.hierarchy && <WikiNavigation refreshWorkspace={refreshWorkspace} path={detail.document.location?.path || canonicalWikiPath(detail.document.slug)} hierarchy={detail.hierarchy} online={online} create={create}/>}
     <div className="page-heading wiki-page-heading"><div><h1><span className="object-id">{id}</span> {detail.document.title}</h1><p>{detail.document.slug} · Published version {published} · Latest content {detail.document.version}</p></div><div className="file-actions"><button className="button" disabled={!online || snapshot || loading || (!(canEdit && active) && !readStored(`wiki-request:${id}`, null))} onClick={() => setMoving(true)}>Move Document</button><button className="button primary" disabled={loading || !canEdit || !detail.head || !detail.document.publication} onClick={() => setEditor(detail)}><Pencil size={15}/>{active ? 'Edit Document' : 'Recreate Here'}</button>{active && <button className="button" disabled={!online || snapshot || loading || !canEdit || !detail.document.publication || action.busy || Boolean(action.pending)} onClick={() => setOperation({ kind: 'delete', detail, target: null })}>Delete Document</button>}</div></div>
@@ -211,6 +240,7 @@ export default function Wiki({ onOpened, id, currentVersion, publicationRevision
     {savedDraftRecords(`draft:document:${id}:`).length > 0 && <section className="panel card-body"><h2>Retained Source Drafts</h2><p>Unsaved drafts remain attached to this original document. They have not moved to the destination.</p>{savedDraftRecords(`draft:document:${id}:`).map(item => <button key={item.key} className="button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' })), link = document.createElement('a'); link.href = url; link.download = `${id}-retained-draft.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}>Export {item.key.split(':').at(-1)} Draft</button>)}</section>}
     {moving && <DraftAvailability draftKey={`wiki-move:${id}`}><WikiMoveDialog refreshWorkspace={refreshWorkspace} detail={detail} online={online} close={() => setMoving(false)} saved={async () => { await refreshWorkspace(); await load(); }}/></DraftAvailability>}
     <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/><ObjectSubscriptions id={id} state={state} online={online} refreshWorkspace={refreshWorkspace}/>
+    {linkError && <div className="banner error" role="alert"><span>{linkError}</span><button className="button" onClick={() => { setSelected(null); setTab('document'); }}>Published Version</button></div>}
     {snapshot && <div className="banner warning"><WifiOff size={16}/><span>{durable ? 'Saved document snapshot. Only versions opened on this device are available offline. Local drafts remain editable. Reconnect before saving or publishing.' : 'Connection interrupted. Loaded versions are kept only in this session. Local drafts remain editable. Reconnect before saving or publishing.'}</span></div>}
     {storageWarning && <div className="banner warning" role="status">{storageWarning}</div>}
     {error && <div className="banner error" role="alert"><span>{error}</span><button onClick={() => void load()} disabled={loading}>Reload document</button></div>}
@@ -230,7 +260,7 @@ export default function Wiki({ onOpened, id, currentVersion, publicationRevision
       </div>}
       {tab === 'document' && (version && validNumber ? <>
         <div className="wiki-version-heading"><div><span className={`badge ${number === published ? 'badge-accepted' : 'badge-draft'}`}>{number === published ? 'Published' : number > published ? 'Unpublished Draft' : 'Historical'} · Version {number}</span><h2>{version.title}</h2><p>{version.slug} · {author(version)} · {date(version.createdAt)}</p>{version.message && <p className="wiki-edit-summary">{version.message}</p>}{version.kind === 'legacy' && <p>This snapshot predates recorded authorship and full history.</p>}</div><div className="file-actions">{number !== published && <button className="button primary" disabled={!online || snapshot || action.busy || loading || !canEdit || !detail.document.publication || Boolean(action.pending)} onClick={() => setOperation({ kind: 'publish', detail, target: version })}>{number > published ? 'Publish Draft' : 'Publish Older Version'}</button>}{(number !== last || !active) && version.content.length > 0 && <button className="button" disabled={!online || snapshot || action.busy || loading || !canEdit || !detail.document.publication || Boolean(action.pending)} onClick={() => setOperation({ kind: 'restore', detail, target: version })}><RotateCcw size={15}/>Restore as new version</button>}</div></div>
-        {version.kind === 'delete' || version.kind === 'move_away' ? <p className="info-strip">This version is a {version.kind === 'delete' ? 'deleted-page' : 'moved-page'} marker. Choose another version to inspect its source.</p> : <RemarkupBody key={`${id}:${version.id}`} contextKey={`${id}:${version.id}`} body={version.content} sourceLabel={`Exact wiki version ${number} source`} fallbackNoun="document" contentClassName="wiki-content"/>}{number > published && <p className="info-strip">This saved draft is visible to everyone who can read the document.</p>}
+        {version.kind === 'delete' || version.kind === 'move_away' ? <p className="info-strip">This version is a {version.kind === 'delete' ? 'deleted-page' : 'moved-page'} marker. Choose another version to inspect its source.</p> : <RemarkupBody key={`${id}:${version.id}`} contextKey={`${id}:${version.id}`} body={version.content} wikiNavigation={sectionNavigation} sourceLabel={`Exact wiki version ${number} source`} fallbackNoun="document" contentClassName="wiki-content"/>}{number > published && <p className="info-strip">This saved draft is visible to everyone who can read the document.</p>}
       </> : <p className="wiki-status" role="status">{unavailable(number)}</p>)}
       {tab === 'compare' && (version && before && validNumber && validBaseline ? <div className="wiki-comparison">
         <div className="wiki-comparison-heading"><strong>Version {baseline} → Version {number}</strong><span>{before.title === version.title ? version.title : `${before.title} → ${version.title}`}</span>{before.slug !== version.slug && <span>Slug: {before.slug} → {version.slug}</span>}</div>

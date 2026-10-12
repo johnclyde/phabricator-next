@@ -1,8 +1,19 @@
-import { Fragment, createElement, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, createElement, useEffect, useMemo, useRef, useState, useId, type ReactNode } from 'react';
 import type { MentionProof } from '../shared/mentions';
 import { parseRemarkup, safeRemarkupHref, type RemarkupBlock, type RemarkupInline } from '../shared/remarkup';
 import { verifiedMentionProof } from './people-mentions';
 import { remarkupMentionParts } from './remarkup-rendering';
+import { remarkupOutline } from '../shared/remarkup-outline';
+import { isWorkspaceHashReference } from '../shared/wiki-navigation';
+
+export interface WikiRemarkupNavigation {
+  section: string | null;
+  key: string;
+  enabled: boolean;
+  href: (anchor: string) => string | null;
+  navigate: (anchor: string) => void;
+  isActive: () => boolean;
+}
 
 export interface RemarkupBodyProps {
   body: string;
@@ -12,11 +23,12 @@ export interface RemarkupBodyProps {
   className?: string;
   contentClassName?: string;
   contextKey?: string;
+  wikiNavigation?: WikiRemarkupNavigation;
 }
 
 /** Prose fields have no saved mention bindings and never resolve people. */
-export function RemarkupBody({ body, sourceLabel = 'Exact source', sourceSummary = 'Source text', fallbackNoun = 'text', className = '', contentClassName = '', contextKey }: RemarkupBodyProps) {
-  return <RemarkupReader body={body} sourceLabel={sourceLabel} sourceSummary={sourceSummary} fallbackNoun={fallbackNoun} outerClassName={`remarkup-body ${className}`.trim()} contentClassName={contentClassName} contextKey={contextKey}/>;
+export function RemarkupBody({ body, sourceLabel = 'Exact source', sourceSummary = 'Source text', fallbackNoun = 'text', className = '', contentClassName = '', contextKey, wikiNavigation }: RemarkupBodyProps) {
+  return <RemarkupReader body={body} sourceLabel={sourceLabel} sourceSummary={sourceSummary} fallbackNoun={fallbackNoun} outerClassName={`remarkup-body ${className}`.trim()} contentClassName={contentClassName} contextKey={contextKey} wikiNavigation={wikiNavigation}/>;
 }
 
 /** Preserve the discussion contract, including its immutable mention proof. */
@@ -48,7 +60,7 @@ export function LazyRemarkupBody({ summary = 'Description', disclosureClassName 
   }}><summary>{summary}</summary>{open && <RemarkupBody {...props}/>}</details>;
 }
 
-function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNoun, outerClassName, contentClassName, contextKey }: {
+function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNoun, outerClassName, contentClassName, contextKey, wikiNavigation }: {
   body: string;
   mentions?: MentionProof;
   sourceLabel: string;
@@ -57,8 +69,31 @@ function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNo
   outerClassName: string;
   contentClassName: string;
   contextKey?: string;
+  wikiNavigation?: WikiRemarkupNavigation;
 }) {
   const document = useMemo(() => parseRemarkup(body), [body]);
+  const outline = useMemo(() => wikiNavigation ? remarkupOutline(document, body) : null, [document, Boolean(wikiNavigation)]);
+  const sectionAnchors = useMemo(() => new Set(outline?.headings.map(heading => heading.anchor) ?? []), [outline]);
+  const headingsBySource = useMemo(() => new Map(outline?.headings.map(heading => [`${heading.start}:${heading.end}`, heading]) ?? []), [outline]);
+  const headingElements = useRef(new Map<string, HTMLElement>()), readerId = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+  const currentNavigation = useRef(wikiNavigation); currentNavigation.current = wikiNavigation;
+  const requestedSection = wikiNavigation?.section ? JSON.stringify([contextKey, wikiNavigation.key, wikiNavigation.section]) : null;
+  const sectionFocus = useRef<{ request: string | null; completed: boolean }>({ request: requestedSection, completed: false });
+  if (sectionFocus.current.request !== requestedSection) sectionFocus.current = { request: requestedSection, completed: false };
+  useEffect(() => {
+    if (!wikiNavigation?.enabled || !wikiNavigation.section || !outline || outline.fallback || sectionFocus.current.completed) return;
+    const target = headingElements.current.get(wikiNavigation.section);
+    if (currentNavigation.current !== wikiNavigation || !target?.isConnected || !wikiNavigation.isActive()) return;
+    sectionFocus.current.completed = true; target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'start' });
+  }, [wikiNavigation?.key, wikiNavigation?.section, wikiNavigation?.enabled, contextKey, outline]);
+  const localLink = (anchor: string, label: ReactNode, className?: string, accessibleLabel?: string): ReactNode => {
+    const href = wikiNavigation?.href(anchor);
+    if (!href) return label;
+    return <a href={href} className={className} aria-label={accessibleLabel} aria-current={wikiNavigation?.section === anchor ? 'location' : undefined} onClick={event => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); if (currentNavigation.current === wikiNavigation && wikiNavigation?.isActive()) wikiNavigation.navigate(anchor);
+    }}>{label}</a>;
+  };
   const [verified, setVerified] = useState<{ body: string; source: MentionProof; proof: MentionProof } | null>(null);
   const [copied, setCopied] = useState<{ body: string; contextKey: string | undefined; sourceLabel: string; message: string } | null>(null);
   const current = useRef({ body, contextKey, sourceLabel }), mounted = useRef(true), copyGeneration = useRef(0);
@@ -103,6 +138,11 @@ function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNo
       case 'code': return <code key={key}>{inline(node.children, false)}</code>;
       case 'link': {
         const href = safeRemarkupHref(node.href), label = inline(node.children, false);
+        if (wikiNavigation && href?.startsWith('#')) {
+          let fragment: string; try { fragment = decodeURIComponent(href.slice(1)); } catch { return <Fragment key={key}>{label}</Fragment>; }
+          if (!sectionAnchors.has(fragment) && isWorkspaceHashReference(href)) return <a key={key} href={href} rel="nofollow noopener noreferrer" referrerPolicy="no-referrer">{label}</a>;
+          return <Fragment key={key}>{localLink(fragment, label)}</Fragment>;
+        }
         return href ? <a key={key} href={href} rel="nofollow noopener noreferrer" referrerPolicy="no-referrer">{label}</a> : <Fragment key={key}>{label}</Fragment>;
       }
     }
@@ -111,7 +151,14 @@ function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNo
     const key = `${node.type}:${node.start}:${node.end}:${index}`;
     switch (node.type) {
       case 'paragraph': return <p key={key}>{inline(node.children)}</p>;
-      case 'heading': return createElement(`h${Math.max(2, Math.min(6, node.level))}`, { key }, inline(node.children));
+      case 'heading': {
+        const heading = headingsBySource.get(`${node.start}:${node.end}`);
+        if (!heading || !wikiNavigation) return createElement(`h${Math.max(2, Math.min(6, node.level))}`, { key }, inline(node.children));
+        return <div className="remarkup-heading-row" key={key}>{createElement(`h${Math.max(2, Math.min(6, node.level))}`, {
+          id: `wiki-heading-${readerId}-${heading.start}-${heading.end}`, tabIndex: -1, 'data-section': heading.anchor,
+          ref: (element: HTMLElement | null) => { if (element) headingElements.current.set(heading.anchor, element); else headingElements.current.delete(heading.anchor); },
+        }, inline(node.children))}{localLink(heading.anchor, '#', 'remarkup-heading-link', `Link to section: ${heading.label}`)}</div>;
+      }
       case 'code-block': return <div className="remarkup-code-block" key={key}>{node.language && <div className="remarkup-code-language">{node.language}</div>}<pre tabIndex={0} aria-label="Code block"><code>{inline(node.children, false)}</code></pre></div>;
       case 'quote': return <blockquote key={key}>{node.header && <div className="remarkup-quote-header">{inline(node.header)}</div>}{blocks(node.children)}</blockquote>;
       case 'list': {
@@ -123,5 +170,6 @@ function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNo
       case 'literal': return <div className="remarkup-literal" key={key}>{node.text}</div>;
     }
   });
-  return <div className={outerClassName}><div className={`remarkup-content ${contentClassName}`.trim()}>{blocks(document.blocks)}</div>{document.fallback && <div className="remarkup-fallback">This {fallbackNoun} is shown as plain text because its formatting exceeds the supported limit.</div>}<details className="remarkup-source"><summary>{sourceSummary}</summary><pre tabIndex={0} aria-label={sourceLabel}>{body}</pre><div className="remarkup-copy"><button className="button" type="button" onClick={() => void copy()}>Copy Source</button>{copyStatus && <span role="status">{copyStatus}</span>}</div></details></div>;
+  const missingSection = Boolean(wikiNavigation?.section && outline && !sectionAnchors.has(wikiNavigation.section!));
+  return <div className={outerClassName}>{wikiNavigation && outline?.fallback && !document.fallback && <p className="info-strip wiki-outline-unavailable" role="status">Heading links are unavailable for this document. Exact source remains available.</p>}{wikiNavigation && missingSection && <p className="info-strip wiki-section-unavailable" role="status">Section “{wikiNavigation.section}” is not available in this version. Read the document below or choose another section.</p>}{wikiNavigation && outline && outline.headings.length >= 2 && <details className="wiki-contents" open><summary>Contents</summary><nav aria-label="Document contents"><ol>{outline.headings.map(heading => <li key={heading.anchor} style={{ paddingInlineStart: `${Math.max(0, heading.level - 2) * 12}px` }}>{localLink(heading.anchor, heading.label)}</li>)}</ol></nav></details>}<div className={`remarkup-content ${contentClassName}`.trim()}>{blocks(document.blocks)}</div>{document.fallback && <div className="remarkup-fallback">This {fallbackNoun} is shown as plain text because its formatting exceeds the supported limit.</div>}<details className="remarkup-source"><summary>{sourceSummary}</summary><pre tabIndex={0} aria-label={sourceLabel}>{body}</pre><div className="remarkup-copy"><button className="button" type="button" onClick={() => void copy()}>Copy Source</button>{copyStatus && <span role="status">{copyStatus}</span>}</div></details></div>;
 }

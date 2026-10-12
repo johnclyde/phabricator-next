@@ -68,6 +68,16 @@ function linkCandidateWork(text: string): number {
   return work;
 }
 
+/** Reuse the parser's linear guard before another projection invokes the
+ * frozen mention scanner. A typed AST alone does not prove its source passed
+ * this guard; callers can accidentally pair it with a different body. */
+export function remarkupScanPreflight(body: string): RemarkupFallback | null {
+  if (typeof body !== 'string') throw new TypeError('Remarkup source must be text.');
+  if (body.length > REMARKUP_LIMITS.bodyLength) return 'length';
+  try { return body.length + linkCandidateWork(body) > REMARKUP_LIMITS.work ? 'work' : null; }
+  catch (error) { if (error instanceof Limit) return error.reason; throw error; }
+}
+
 class Parser {
   private work = 0;
   private count = 0;
@@ -291,7 +301,10 @@ class Parser {
         flush(); let end = cursor + 1; while (end < input.length && input[end]!.text.startsWith('>')) end++;
         const reply = text.startsWith('>>!'); const header = reply ? this.inline(this.trim(this.cut(line, 3)), depth + 1) : null;
         let child = input.slice(cursor + Number(reply), end).map(value => this.cut(value, 1));
-        if (child.every(value => !value.text || /^[ >\n]/.test(value.text))) child = child.map(value => value.text.startsWith(' ') ? this.cut(value, 1) : value);
+        // A bare quoted CRLF is an empty line just like LF. The historical
+        // first-character check overlooked CR and left every other line's
+        // common quote prefix in place, hiding headings in Windows documents.
+        if (child.every(value => !value.text || value.text === '\r\n' || /^[ >\n]/.test(value.text))) child = child.map(value => value.text.startsWith(' ') ? this.cut(value, 1) : value);
         while (child.length && whitespace.test(child[0]!.text)) child.shift();
         result.push(this.node({ type: 'quote', ...this.span(this.join(input.slice(cursor, end))), header, children: this.blocks(child, depth + 1) })); cursor = end; continue;
       }
