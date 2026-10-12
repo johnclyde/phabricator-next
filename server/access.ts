@@ -1,4 +1,7 @@
 import { isStoredMentionProof } from './mentions.ts';
+import type { ReviewDraftDiscovery, ReviewDraftInput, ReviewDraftOperationKind, ReviewDraftPreview, ReviewDraftSnapshot } from '../shared/review-drafts.ts';
+import { isReviewDraftId } from '../shared/review-drafts.ts';
+import { reviewDraftInputHash } from './review-drafts.ts';
 import type { AuthContext } from '../shared/auth.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { revisionDependencyInputHash } from './revision-dependencies.ts';
@@ -79,6 +82,25 @@ export class AccessLayer {
   revision(id: string): RevisionDetail {
     this.require(id);
     return this.redact({ ...this.store.detail(id), access: this.describe(id), accessEpoch: this.policies.epoch() });
+  }
+  reviewDrafts(id: string): ReviewDraftSnapshot { this.require(id); return this.store.reviewDrafts.snapshot(id, this.principal); }
+  reviewDraftPreview(id: string): ReviewDraftPreview { this.require(id); return this.store.reviewDrafts.preview(id, this.principal); }
+  discoverReviewDrafts(query: { after?: string; limit?: number }): ReviewDraftDiscovery {
+    return this.store.reviewDrafts.discover(this.principal, id => this.canView(id), query);
+  }
+  presentReviewDraft(id: string, kind: ReviewDraftOperationKind, entryId: string | null, input: ReviewDraftInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
+    this.require(id, kind === 'discard' ? 'view' : 'interact');
+    const invalid = (): never => { throw new HttpError(409, 'This saved private review receipt does not match the requested operation.', 'REVIEW_DRAFT_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.revisionId !== id || body.principalId !== this.principal || body.kind !== kind || !isReviewDraftId(body.operationId)) return invalid();
+    // Check scalar ownership before loading any private operation contents.
+    const owner = this.store.reviewDrafts.operationIdentity(body.operationId);
+    if (!owner || owner.revisionId !== id || owner.principalId !== this.principal) return invalid();
+    let operation;
+    try { operation = this.store.reviewDrafts.operation(body.operationId); } catch { return invalid(); }
+    if (operation.revisionId !== id || operation.principalId !== this.principal || operation.attribution.principalId !== this.principal || operation.kind !== kind || operation.entryId !== entryId
+      || operation.retryKeySha256 !== retryKeySha256 || operation.inputSha256 !== reviewDraftInputHash(kind, entryId, input) || !isDeepStrictEqual(operation.input, input) || !isDeepStrictEqual(operation.receipt, body)) return invalid();
+    return { status: 200, body: this.redact({ ...operation.receipt, accessEpoch: this.policies.epoch() }) };
   }
   notifications(query: { filter?: 'all' | 'unread' | 'read'; before?: string; limit?: number }): NotificationInbox {
     return this.store.notifications.list(this.principal, query, this.policies.epoch());

@@ -1191,3 +1191,25 @@
   .passage-range { flex-wrap: wrap; }
   .passage-range .button { min-height: 44px; white-space: normal; }
 }
+
+/* Private review staging keeps exact quotations and complete previews readable. */
+.private-review { margin-block: 18px; overflow: hidden; }
+.private-review > details > summary { padding: 14px 18px; min-height: 48px; cursor: pointer; font-weight: 650; }
+.private-review > details[open] > summary { border-bottom: 1px solid var(--border); }
+.private-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 12px; }
+.private-review-actions .button { white-space: normal; }
+.private-review-entry, .private-review-request, .private-review-preview, .private-review-orphan { border: 1px solid var(--border); border-radius: 4px; padding: 16px; margin-block: 16px; min-width: 0; }
+.private-review-entry h3, .private-review-preview h3 { margin-top: 0; }
+.private-review-body { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+.private-review-payload { min-width: 0; }
+.private-review-payload .small { overflow-wrap: anywhere; }
+.private-review-preview > article + article { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 18px; }
+.private-review-editor { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.private-review textarea { width: 100%; min-width: 0; }
+@media (max-width: 700px) {
+  .private-review-actions { align-items: stretch; }
+  .private-review-actions .button { min-height: 44px; flex: 1 1 150px; }
+  .private-review-entry, .private-review-request, .private-review-preview, .private-review-orphan { padding: 12px; }
+  .private-review > details > summary { min-height: 48px; }
+  .comment-form-footer > .button, .thread-reply .comment-form-footer > .button { min-height: 44px; }
+}

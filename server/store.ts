@@ -14,6 +14,8 @@ import { initializeRevisionSubscriptions, RevisionSubscriptionStore } from './re
 import { initializeRevisionProjects, RevisionProjectStore } from './revision-projects.ts';
 import { revisionProjectCreationInput } from '../shared/revision-projects.ts';
 import { initializeRevisionMetadata, RevisionMetadataStore } from './revision-metadata.ts';
+import { initializeReviewDrafts, ReviewDraftStore, type PreparedReviewDraft } from './review-drafts.ts';
+import type { ReviewDraftPayload } from '../shared/review-drafts.ts';
 import type { RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
 import { initializeWikiConduit, parseWikiConduitCreateInput, parseWikiConduitEditInput, wikiConduitEffectiveText, wikiConduitInputHash } from './wiki-conduit.ts';
@@ -200,6 +202,7 @@ export class Store {
   readonly revisionLifecycle: RevisionLifecycleStore;
   readonly revisionReviewers: RevisionReviewerStore;
   readonly revisionMetadata: RevisionMetadataStore;
+  readonly reviewDrafts: ReviewDraftStore;
   readonly revisionSubscriptions: RevisionSubscriptionStore;
   readonly revisionProjects: RevisionProjectStore;
   readonly notifications: NotificationStore;
@@ -219,7 +222,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 34) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 35) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -505,6 +508,10 @@ export class Store {
       try { this.transaction(() => this.database.exec('PRAGMA user_version = 34')); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 35) {
+      try { this.transaction(() => { initializeReviewDrafts(this.database); this.database.exec('PRAGMA user_version = 35'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.objectSubscriptions = new ObjectSubscriptionStore(this.database);
     this.taskNotifications = new TaskNotificationsStore(this.database);
     this.revisionProjects = new RevisionProjectStore(this.database);
@@ -543,6 +550,19 @@ export class Store {
       },
     });
     for (const domain of [this.revisionProjects, this.revisionMetadata, this.revisionAuthorship, this.revisionLifecycle, this.revisionReviewers, this.revisionSubscriptions, this.objectSubscriptions]) domain.connectNotifications(this.notifications.emit);
+    this.reviewDrafts = new ReviewDraftStore(this.database, {
+      head: id => this.revisionAuthorship.snapshot(id).head,
+      title: id => this.revisionMetadata.state(id).title,
+      threadVersion: (id, threadId) => this.thread(id, threadId).version,
+      validate: (id, payload) => this.validatePrivateReviewPayload(id, payload),
+      publish: (id, payload, actor) => payload.kind === 'reply'
+        ? this.createReply(id, payload.threadId, { body: payload.body, viewedVersionId: payload.viewedVersionId }, actor)
+        : this.createComment(id, this.privateReviewCommentInput(payload), actor),
+      batch: (work, requestSha256) => {
+        const previous = this.mentionRequestSha256; this.mentionRequestSha256 = requestSha256;
+        try { return this.notifications.batch(work); } finally { this.mentionRequestSha256 = previous; }
+      },
+    });
     this.revisionDependencies = new RevisionDependencyStore(this.database, id => this.revisionMetadata.state(id));
     this.revisionStack = new RevisionStackStore(this.database, id => this.revisionMetadata.state(id), this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
@@ -1801,8 +1821,23 @@ export class Store {
     });
     return { input: { versionId, contentHash: hash, expectedAccessEpoch: data.expectedAccessEpoch as number, threads }, version, bytes, comments };
   }
-  createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
-    return this.discussionMutation(() => {
+  private privateReviewCommentInput(payload: Exclude<ReviewDraftPayload, { kind: 'reply' }>): unknown {
+    return { body: payload.body, versionId: payload.versionId, ...(payload.kind === 'summary' ? {} : payload.docxPassage ? { docxPassage: payload.docxPassage } : { filePath: payload.filePath, line: payload.line, ...(payload.passage ? { passage: payload.passage } : {}), ...(payload.suggestion ? { suggestion: payload.suggestion } : {}) }) };
+  }
+  private validatePrivateReviewPayload(id: string, payload: ReviewDraftPayload): PreparedReviewDraft {
+    const version = this.commentVersion(id, payload.kind === 'reply' ? payload.viewedVersionId : payload.versionId);
+    if (version.contentHash !== (payload.kind === 'reply' ? payload.viewedContentHash : payload.contentHash)) throw new HttpError(409, 'The private draft source hash does not match its immutable version.', 'REVIEW_DRAFT_CHANGED');
+    if (payload.kind === 'reply') {
+      const thread = this.thread(id, payload.threadId);
+      const row = this.database.prepare('SELECT data FROM comments WHERE revision_id=? AND id=?').get(id, thread.rootCommentId) as JsonRow | undefined;
+      if (!row) throw new HttpError(404, 'Discussion thread was not found.', 'THREAD_UNAVAILABLE');
+      const root = JSON.parse(row.data) as ReviewComment, original = this.commentVersion(id, root.versionId);
+      return { sources: [{ versionId: version.id, contentHash: version.contentHash }, { versionId: original.id, contentHash: original.contentHash }], comment: { body: payload.body, threadId: thread.id, versionId: root.versionId, viewedVersionId: version.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), ...(root.docxAnchor ? { docxAnchor: root.docxAnchor } : {}) } };
+    }
+    const prepared = this.prepareComment(id, this.privateReviewCommentInput(payload));
+    return { sources: [{ versionId: version.id, contentHash: version.contentHash }], comment: { body: prepared.body, versionId: version.id, filePath: prepared.filePath, line: prepared.line, ...(prepared.anchor ? { anchor: prepared.anchor } : {}), ...(prepared.docxAnchor ? { docxAnchor: prepared.docxAnchor } : {}), ...(prepared.suggestion ? { suggestion: prepared.suggestion } : {}) } };
+  }
+  private prepareComment(id: string, input: unknown) {
       const data = object(input, ['body', 'versionId', 'filePath', 'line', 'passage', 'suggestion', 'docxPassage']);
       const version = this.commentVersion(id, data.versionId);
       let docxAnchor: DocxPassageAnchor | undefined;
@@ -1837,7 +1872,12 @@ export class Store {
         try { suggestion = validateSuggestion(anchor, { replacement: string(proposed.replacement, 'Suggested replacement', 20_000, true) }); }
         catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
       }
-      const commentId = randomUUID(), body = string(data.body, 'Comment', 20_000), mentions = this.commentMentions(id, body, attribution);
+      return { version, filePath, line, anchor, docxAnchor, suggestion, body: string(data.body, 'Comment', 20_000) };
+  }
+  createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
+    return this.discussionMutation(() => {
+      const { version, filePath, line, anchor, docxAnchor, suggestion, body } = this.prepareComment(id, input);
+      const commentId = randomUUID(), mentions = this.commentMentions(id, body, attribution);
       const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), ...(docxAnchor ? { docxAnchor } : {}), ...(suggestion ? { suggestion } : {}), body, ...(mentions ? { mentions } : {}), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       this.insertComment(comment);
       const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };

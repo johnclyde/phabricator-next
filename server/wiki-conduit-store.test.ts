@@ -132,7 +132,7 @@ test('receipt insertion failures roll back all content, publication, identity, a
 function schema22(path:string){const store=new Store({path});const page=make(store);store.draftDocument(page.id,{...pins(store,page.id),title:'Earlier draft',content:'Unpublished exact\r\n😀'},actor);store.database.exec("DROP TABLE wiki_conduit_receipts; CREATE VIEW legacy_conduit_versions AS SELECT id,data FROM wiki_versions; ALTER TABLE wiki_versions ADD COLUMN operator_note TEXT; PRAGMA user_version=22;");return store;}
 test('schema23 preserves every schema22 row and schema object and starts with an empty receipt ledger',()=>{
   const directory=mkdtempSync(join(tmpdir(),'wiki-conduit-migration-')),path=join(directory,'db.sqlite');let store=schema22(path);const before=snapshot(store.database);store.close();try{
-    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,34);assertRows(store.database,before);for(const schema of before.schema)assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql,schema.sql,String(schema.name));assert.equal(store.database.prepare('SELECT COUNT(*) AS count FROM wiki_conduit_receipts').get()!.count,0);assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(),[]);
+    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,35);assertRows(store.database,before);for(const schema of before.schema)assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql,schema.sql,String(schema.name));assert.equal(store.database.prepare('SELECT COUNT(*) AS count FROM wiki_conduit_receipts').get()!.count,0);assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(),[]);
     const receipt=store.editConduitDocument('W1',{slug:'/',content:'Published legacy edit'},actor);receiptRoundTrip(store,receipt);store.close();store=new Store({path});receiptRoundTrip(store,receipt);
   }finally{store.close();rmSync(directory,{recursive:true,force:true});}
 });
@@ -143,5 +143,5 @@ test('failed schema23 migration leaves schema22 exactly intact and retryable',()
     DatabaseSync.prototype.exec=function(sql:string){if(sql==='PRAGMA user_version = 23')throw new Error('injected schema23 failure');return exec.call(this,sql);};assert.throws(()=>new Store({path}),/injected schema23 failure/);
   }finally{DatabaseSync.prototype.exec=exec;}
   const db=new DatabaseSync(path);try{assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,22);assert.deepEqual(snapshot(db),before);}finally{db.close();}
-  const reopened=new Store({path});try{assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version,34);}finally{reopened.close();rmSync(directory,{recursive:true,force:true});}
+  const reopened=new Store({path});try{assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version,35);}finally{reopened.close();rmSync(directory,{recursive:true,force:true});}
 });

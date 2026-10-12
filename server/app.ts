@@ -39,6 +39,7 @@ import { revisionProjectInput } from '../shared/revision-projects.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { notificationReadInput } from '../shared/notifications.ts';
 import { taskMuteInput } from '../shared/task-notifications.ts';
+import { isReviewDraftId, reviewDraftSaveInput, reviewDraftDiscardInput, reviewDraftPublishInput, type ReviewDraftInput, type ReviewDraftOperationKind } from '../shared/review-drafts.ts';
 import { assertHostingRequest, hostingConfiguration, type HostedOrigin } from './hosting.ts';
 import { serveTranscriptionModel, transcriptionModelDirectory } from './transcription-model.ts';
 
@@ -312,6 +313,23 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const privateReview = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/review-drafts\/(publish|[^/]+)(\/discard)?$/.exec(path);
+    if (privateReview && (method === 'PUT' && !privateReview[3] && privateReview[2] !== 'publish' || method === 'POST' && (privateReview[3] || privateReview[2] === 'publish'))) {
+      const id = privateReview[1]!, kind: ReviewDraftOperationKind = privateReview[3] ? 'discard' : privateReview[2] === 'publish' ? 'publish' : 'save';
+      const entryId = kind === 'publish' ? null : privateReview[2]!;
+      const authorize = () => { auth.revalidate(context, 'write'); access.require(id, kind === 'discard' ? 'view' : 'interact'); };
+      store.read(authorize);
+      if (!rawKey) throw new HttpError(400, 'Private review draft changes require an Idempotency-Key.');
+      let data: ReviewDraftInput;
+      try {
+        if (entryId !== null && !isReviewDraftId(entryId)) throw new Error();
+        data = kind === 'save' ? reviewDraftSaveInput(input) : kind === 'discard' ? reviewDraftDiscardInput(input) : reviewDraftPublishInput(input);
+      } catch { throw new HttpError(400, 'Provide an exact private draft identity, content, versions and access pins.', 'REVIEW_DRAFT_INVALID_INPUT'); }
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex'), fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: kind === 'save' ? store.reviewDrafts.save(id, entryId!, data, actor, retryKeySha256) : kind === 'discard' ? store.reviewDrafts.discard(id, entryId!, data, actor, retryKeySha256) : store.reviewDrafts.publish(id, data, actor, retryKeySha256) }), authorize, response => access.presentReviewDraft(id, kind, entryId, data, response, retryKeySha256));
+    }
     const taskMute = method === 'POST' ? /^\/api\/tasks\/(T[1-9]\d{0,14})\/mute$/.exec(path) : null;
     if (taskMute) {
       const id = taskMute[1]!, authorize = () => { auth.revalidate(context, 'write'); access.require(id); };
@@ -834,6 +852,18 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          if (path === '/api/review-drafts') {
+            if ([...url.searchParams.keys()].some(key => !['after', 'limit'].includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Choose unique supported private draft discovery parameters.');
+            const after = url.searchParams.get('after'), limit = url.searchParams.get('limit');
+            if (after !== null && !/^[DPL][1-9]\d{0,14}$/.test(after) || limit !== null && (!/^[1-9]\d*$/.test(limit) || !Number.isSafeInteger(Number(limit)) || Number(limit) > 100)) throw new HttpError(400, 'Choose a valid private draft cursor and page limit.');
+            send(res, 200, access.discoverReviewDrafts({ ...(after === null ? {} : { after }), ...(limit === null ? {} : { limit: Number(limit) }) })); return;
+          }
+          const privateReview = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/review-drafts(?:\/(preview))?$/.exec(path);
+          if (privateReview) {
+            access.require(privateReview[1]!);
+            if (url.search) throw new HttpError(400, 'Private review reads do not accept query parameters.');
+            send(res, 200, privateReview[2] ? access.reviewDraftPreview(privateReview[1]!) : access.reviewDrafts(privateReview[1]!)); return;
+          }
           if (path === '/api/notifications' || path === '/api/notifications/count') {
             const count = path.endsWith('/count'), allowed = count ? [] : ['filter', 'before', 'limit'];
             if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Choose unique supported notification parameters.');

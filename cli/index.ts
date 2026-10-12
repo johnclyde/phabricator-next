@@ -29,6 +29,7 @@ import { revisionProjectsCommand } from './revision-projects';
 import { notificationsCommand } from './notifications';
 import { taskNotificationsCommand } from './task-notifications';
 import { revisionMetadataCommand } from './revision-metadata';
+import { reviewDraftsCommand } from './review-drafts';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
@@ -88,6 +89,12 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- revision-metadata P2
   npm run arc -- revision-metadata-history P2 [--before N] [--limit N] [--metadata-version N]
   npm run arc -- edit-revision-metadata P2 --intent REQUEST.json [--request-id KEY]
+  npm run arc -- review-drafts [--after P1] [--limit N]
+  npm run arc -- review-drafts P2
+  npm run arc -- preview-review-drafts P2
+  npm run arc -- save-review-draft P2 DRAFT_UUID --intent REQUEST.json|- [--request-id KEY]
+  npm run arc -- discard-review-draft P2 DRAFT_UUID --intent REQUEST.json|- [--request-id KEY]
+  npm run arc -- publish-review-drafts P2 --intent PREVIEW.json|- [--request-id KEY]
   npm run arc -- revision-author P2
   npm run arc -- revision-author-history P2 [--before N] [--limit N] [--author-version N]
   npm run arc -- edit-revision-author P2 --intent REQUEST.json [--request-id KEY]
@@ -342,6 +349,7 @@ async function main() {
   if (await notificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await taskNotificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await reviewDraftsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await wikiCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

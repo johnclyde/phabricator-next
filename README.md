@@ -44,6 +44,7 @@ The server intentionally binds to loopback. Password sign-in is available with `
 - [Revision details](docs/revision-metadata.md) supports titles, summaries and Test Plans across code, papers and Word, with immutable edit history, exact retries and mobile/offline drafts. Test Plans are required by default for new revisions; operators may make them optional. Metadata edits preserve source versions and review evidence.
 - [Revision following](docs/revision-subscriptions.md) separates explicit subscriptions from automatic author/reviewer following. Comment authors' automatic opt-in respects prior opt-outs; private mute preferences have their own history. Mobile controls, a Following filter, voice navigation and exact CLI retries share current access checks. Revision updates now reach the private [notification inbox](docs/notifications.md).
 - [People mentions](docs/mentions.md) in revision, task and Paste discussions capture the named person when saved. A touch-accessible picker preserves the existing draft and source anchor; resolved mentions restore following while respecting current access and private mute. Historical comments and exact retries never reinterpret names.
+- [Private review drafts](docs/review-drafts.md) keep multiple comments, replies, suggestions and a summary visible only to their owner until explicit complete-review publication. Exact source/thread/access pins, atomic publication and idempotent CLI recovery preserve the inspected content; pending drafts produce no shared discussion or notification effects.
 - [Core formatting](docs/remarkup.md) presents emphasis, quotes, lists, code, notes and safe links across discussions, wiki content, task descriptions and revision summaries/Test Plans. Exact source remains readable and copyable on mobile; formatting preserves captured discussion mentions and existing offline reads. Wiki history stays fixed to the selected version; Contents and heading share links preserve that version through publication changes, browser navigation and offline reopening. Task-list descriptions load their reader on expansion. Math, tables, embeds and full Remarkup compatibility remain planned.
 - [Notifications](docs/notifications.md) deliver revision, task, Wiki and Paste updates to current followers and tagged-project watchers, with private mute, current access checks, unread counts, mobile reading and voice filters. Read actions preserve their observed boundary and exact retry request; authorized cached pages support offline reading. [Task delivery and private mute](docs/task-notifications.md) cover owners, subscriptions, dependencies, merges and board moves. [Wiki and Paste following](docs/object-subscriptions.md) includes private mute and version-bound inbox causes. Email, push and delivery for other applications remain unfinished.
 - [Suggested edits](docs/suggested-edits.md) attach an exact replacement or deletion to a passage. Explicit application creates a new immutable version after checking current source, discussion and access; stale proposals cannot silently edit newer text.
@@ -91,6 +92,13 @@ npm run arc -- review P2 --provider local
 npm run arc -- list
 npm run arc -- show P2
 npm run arc -- export P2 --version 1
+
+# Stage private discussion entries, inspect the full saved review, then publish.
+npm run arc -- review-drafts
+npm run arc -- review-drafts P2
+npm run arc -- save-review-draft P2 DRAFT_UUID --intent entry.json --request-id save-1
+npm run --silent arc -- preview-review-drafts P2 > review-preview.json
+npm run arc -- publish-review-drafts P2 --intent review-preview.json --request-id publish-1
 
 # Compile an exact saved paper version using the configured isolated worker.
 npm run arc -- builds P2 --json
