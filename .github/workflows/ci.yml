@@ -61,6 +61,43 @@ jobs:
         env:
           APP_BASE_PATH: /workspace/
 
+  local-transcription:
+    name: Real browser transcription without network access
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      E2E_REAL_TRANSCRIPTION: '1'
+      APP_TRANSCRIPTION_MODEL_DIR: ${{ github.workspace }}/.data/transcription-model
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install dependencies
+        run: npm ci
+      - name: Stage digest-verified public model
+        run: npm run transcription:model -- --directory "$APP_TRANSCRIPTION_MODEL_DIR"
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Build
+        run: npm run build
+      - name: Verify real offline transcription on desktop and mobile
+        run: npm run test:e2e -- tests/transcription-real.spec.ts tests/transcription-session.spec.ts
+      - name: Build under a path prefix
+        run: npm run build
+        env:
+          APP_BASE_PATH: /workspace/
+      - name: Verify real offline transcription under a path prefix
+        run: npm run test:e2e -- tests/transcription-real.spec.ts tests/transcription-session.spec.ts
+        env:
+          APP_BASE_PATH: /workspace/
+
   paper-compiler:
     name: Real isolated paper compiler and PDF workflow
     runs-on: ubuntu-24.04

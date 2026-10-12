@@ -1149,3 +1149,24 @@
   .audio-inbox .audio-actions .button { flex: 1 1 145px; justify-content: center; }
   .audio-inbox input { min-height: 44px; font-size: 16px; }
 }
+
+/* Audio transcription keeps generated output separate from editable drafts. */
+.transcription-model { padding: 16px; }
+.transcription-model h2 { margin: 0 0 10px; }
+.audio-transcription { border-top: 1px solid var(--border); margin-top: 14px; }
+.audio-transcription > summary, .transcript-provenance > summary { min-height: 44px; display: list-item; align-content: center; cursor: pointer; padding: 10px 4px; }
+.transcript-editor { padding: 0 0 8px; min-width: 0; }
+.transcript-editor .field { margin-top: 14px; }
+.transcript-editor textarea { width: 100%; resize: vertical; min-height: 120px; max-height: 480px; line-height: 1.5; }
+.transcript-editor textarea[readonly] { background: var(--surface-alt, #f6f7f9); }
+.transcript-editor .audio-actions { margin: 10px 0; }
+.transcript-provenance { margin: 12px 0; }
+.transcript-provenance dl { margin: 8px 0; font-size: 12px; }
+.transcript-provenance dt { font-weight: 600; margin-top: 10px; }
+.transcript-provenance dd { margin: 2px 0 8px; overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .transcript-editor .button, .transcription-model .button { min-height: 44px; }
+  .transcript-editor .audio-actions, .transcription-model .audio-actions { flex-direction: column; align-items: stretch; }
+  .audio-inbox .transcript-editor .audio-actions .button, .audio-inbox .transcription-model .audio-actions .button { flex: 0 0 auto; }
+  .transcript-editor select { min-height: 44px; width: 100%; }
+}

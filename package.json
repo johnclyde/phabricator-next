@@ -23,7 +23,8 @@
     "check": "tsc --noEmit",
     "arc": "tsx cli/index.ts",
     "accounts": "node --env-file-if-exists=.env --import tsx scripts/accounts.ts",
-    "test:e2e": "node --import tsx scripts/test-e2e.ts"
+    "test:e2e": "node --import tsx scripts/test-e2e.ts",
+    "transcription:model": "node --import tsx scripts/prepare-transcription-model.ts"
   },
   "dependencies": {
     "diff": "^8.0.0",
@@ -38,6 +39,7 @@
     "yazl": "3.3.1"
   },
   "devDependencies": {
+    "@huggingface/transformers": "4.3.1",
     "@playwright/test": "^1.64.0",
     "@types/node": "^22.13.0",
     "@types/react": "^19.0.0",

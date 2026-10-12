@@ -5,6 +5,7 @@ import { createWorkspaceClient, type WorkspaceClient } from './offline';
 import { applicationPath, storageKey } from './mount';
 import { sessionAudioClipCount } from './audio-inbox';
 import { hasTemporaryAudio } from './audio-draft';
+import { hasTemporaryTranscripts } from './audio-transcript-drafts';
 import { activateSession, broadcastSessionChange, currentSession, lockSession, logoutPending, markLogoutPending, onSessionLocked, rememberedLocalSession, rememberMode, RequestError, sessionRequest } from './session';
 
 interface WorkspaceAccess extends WorkspaceClient { signOut: () => void }
@@ -90,7 +91,7 @@ export default function SessionGate({ children }: { children: ReactNode }) {
     const hide = () => { if (currentSession()?.state.mode === 'password') lockSession('Verify your session to reopen this workspace.'); };
     const unload = (event: BeforeUnloadEvent) => {
       const current = currentSession();
-      if (current && (createWorkspaceClient(current).draftRecords().length > 0 || sessionAudioClipCount(current) > 0 || hasTemporaryAudio(current))) { event.preventDefault(); event.returnValue = ''; }
+      if (current && (createWorkspaceClient(current).draftRecords().length > 0 || sessionAudioClipCount(current) > 0 || hasTemporaryAudio(current) || hasTemporaryTranscripts(current))) { event.preventDefault(); event.returnValue = ''; }
     };
     window.addEventListener('storage', storage); window.addEventListener('focus', resume);
     document.addEventListener('visibilitychange', resume); window.addEventListener('online', resume);
@@ -166,7 +167,7 @@ export default function SessionGate({ children }: { children: ReactNode }) {
 
   if (client?.session) return <WorkspaceContext.Provider key={client.session.generation} value={{ ...client, signOut }}>
     {children}
-    {confirmLogout && <dialog className="modal session-confirm" ref={confirmation} onCancel={event => { event.preventDefault(); setConfirmLogout(false); }}><div className="modal-heading"><h2>Sign out of this browser?</h2></div><div className="modal-body"><p>Signing out ends this session in every tab of this workspace and clears unsaved drafts in all of them. Export any drafts you need from each tab before continuing. Drafts and audio clips are kept only in memory. Download recordings separately from Audio before signing out; the draft export does not include audio.</p></div><div className="modal-footer"><button className="button" disabled={!client.draftRecords().length} onClick={() => exportDrafts(client)}>Export drafts from this tab</button><button className="button" onClick={() => setConfirmLogout(false)}>Cancel</button><button className="button danger" onClick={() => void logout()}><LogOut size={15}/>Sign out and clear drafts</button></div></dialog>}
+    {confirmLogout && <dialog className="modal session-confirm" ref={confirmation} onCancel={event => { event.preventDefault(); setConfirmLogout(false); }}><div className="modal-heading"><h2>Sign out of this browser?</h2></div><div className="modal-body"><p>Signing out ends this session in every tab of this workspace and clears unsaved drafts in all of them. Export any drafts you need from each tab before continuing. Drafts, audio clips and transcripts are kept only in memory. Download audio and transcripts separately from Audio before signing out; the draft JSON export does not include them.</p></div><div className="modal-footer"><button className="button" disabled={!client.draftRecords().length} onClick={() => exportDrafts(client)}>Export drafts from this tab</button><button className="button" onClick={() => setConfirmLogout(false)}>Cancel</button><button className="button danger" onClick={() => void logout()}><LogOut size={15}/>Sign out and clear drafts</button></div></dialog>}
   </WorkspaceContext.Provider>;
 
   return <main className="session-gate"><a className="session-brand" href="#home"><img src={applicationPath('/icon.svg')} alt=""/>Phabricator <span>NEXT</span></a><section className="session-card"><div className="session-emblem"><LockKeyhole size={25}/></div><h1>{busy ? 'Verifying workspace…' : session?.mode === 'password' && !pendingLogout.current ? 'Sign in to your workspace' : 'Workspace locked'}</h1><p>Your documents and review history are available after your session is verified.</p>{notice && <p className="session-notice" role="status">{notice}</p>}{error && <div className="banner error" role="alert">{error}</div>}

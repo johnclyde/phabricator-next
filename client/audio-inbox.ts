@@ -1,5 +1,7 @@
 import { applicationBase, storageKey } from './mount.ts';
 import { assertSession, sessionIsActive, SessionChangedError, type WorkspaceSession } from './session.ts';
+import { audioSha256, copyLocalTranscript, readAudioTranscriptBundle, updateAudioTranscripts, verifyTranscriptAudio, validLocalTranscript, type AudioTranscriptBundle, type AudioTranscriptDraft } from './audio-transcripts.ts';
+import type { LocalTranscript } from '../shared/local-transcription.ts';
 
 export const AUDIO_INBOX_LIMITS = Object.freeze({ maxDurationMs: 600_000, maxClipBytes: 25 * 1024 * 1024, maxClips: 100, maxTotalBytes: 200 * 1024 * 1024, maxTitleCodeUnits: 200 });
 export interface AudioClipMetadata { id: string; title: string; createdAt: string; mimeType: string; durationMs: number; bytes: number }
@@ -12,9 +14,9 @@ export class AudioInboxError extends Error {
 }
 const FORMAT = 'phabricator.audio.v1';
 const STORE = 'clips';
-interface StoredClip extends AudioClip { format: typeof FORMAT }
+interface StoredClip extends AudioClip { format: typeof FORMAT; transcripts?: unknown }
 export interface AudioInboxEntry { key: IDBValidKey; value: unknown }
-export interface AudioInboxMutation<T> { result: T; put?: { key: string; value: unknown }; deleteKey?: string }
+export interface AudioInboxMutation<T> { result: T; put?: { key: string; value: unknown }; update?: { key: string; value: unknown }; deleteKey?: string }
 /** Testable atomic storage boundary. The callback is synchronous; a promise resolves only after commit. */
 export interface AudioInboxStore {
   transaction<T>(mode: 'readonly' | 'readwrite', signal: AbortSignal, operation: (entries: readonly AudioInboxEntry[]) => AudioInboxMutation<T>): Promise<T>;
@@ -26,6 +28,9 @@ export interface AudioInbox {
   read(id: string): Promise<AudioClip | null>;
   save(clip: AudioClip): Promise<AudioClipMetadata>;
   delete(id: string): Promise<boolean>;
+  readTranscripts(id: string): Promise<AudioTranscriptBundle>;
+  saveTranscript(id: string, expectedVersion: number, result: LocalTranscript | null, draft: Pick<AudioTranscriptDraft, 'runId' | 'text'>): Promise<AudioTranscriptBundle>;
+  clearTranscripts(id: string, expectedVersion: number): Promise<AudioTranscriptBundle>;
   dispose(): void;
 }
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -132,8 +137,9 @@ function indexedStore(name: string, factory: IDBFactory | undefined): AudioInbox
             const row = cursor.result;
             if (row) { entries.push({ key: row.primaryKey, value: row.value }); if (entries.length > AUDIO_INBOX_LIMITS.maxClips) throw new AudioInboxError('limit', 'The audio inbox exceeds its 100-record inventory limit. Existing data was not changed.'); row.continue(); return; }
             outcome = operation(entries);
-            if (mode === 'readonly' && (outcome.put || outcome.deleteKey !== undefined)) throw new Error('Readonly audio operation attempted a write.');
+            if (mode === 'readonly' && (outcome.put || outcome.update || outcome.deleteKey !== undefined)) throw new Error('Readonly audio operation attempted a write.');
             if (outcome.put) store.add(outcome.put.value);
+            if (outcome.update) store.put(outcome.update.value);
             if (outcome.deleteKey !== undefined) store.delete(outcome.deleteKey);
           } catch (error) { failure = error; try { transaction.abort(); } catch { /* Completion handler reports a retired operation. */ } }
         };
@@ -165,6 +171,7 @@ function memoryStore(records: Map<string, StoredClip>): AudioInboxStore {
       const result = operation([...records].map(([key, value]) => ({ key, value })));
       if (closed || signal.aborted) throw new SessionChangedError();
       if (result.put) records.set(result.put.key, result.put.value as StoredClip);
+      if (result.update) records.set(result.update.key, structuredClone(result.update.value) as StoredClip);
       if (result.deleteKey !== undefined) records.delete(result.deleteKey);
       return result.result;
     }, close() { closed = true; },
@@ -189,6 +196,30 @@ export function createAudioInbox(session: WorkspaceSession, options: { basePath?
     try { const result = await store.transaction(mode, controller.signal, entries => { active(); if (controller.signal.aborted) throw new SessionChangedError(); return action(entries); }); active(); if (controller.signal.aborted) throw new SessionChangedError(); return result; }
     catch (error) { active(); throw storageError(error); }
     finally { pending.delete(controller); }
+  };
+  const transcriptAction = <T>(action: () => T): T => { try { return action(); } catch (error) { if (error instanceof AudioInboxError) throw error; throw new AudioInboxError('invalid_data', error instanceof Error ? error.message : 'The transcript operation failed.'); } };
+  const exactClip = (entries: readonly AudioInboxEntry[], id: string): StoredClip => {
+    if (!validId(id)) invalid('Choose a valid recording identity.');
+    const row = entries.find(entry => entry.key === id), clip = row && storedClip(row);
+    if (!clip) throw new AudioInboxError('invalid_data', 'The exact saved audio is unavailable. Save the audio before retaining a transcript.');
+    return clip;
+  };
+  const readTranscriptSnapshot = async (id: string) => {
+    const clip = await run('readonly', entries => ({ result: exactClip(entries, id) }));
+    const bundle = transcriptAction(() => readAudioTranscriptBundle(clip.transcripts, clip));
+    const sha256 = await audioSha256(clip); active();
+    transcriptAction(() => verifyTranscriptAudio(bundle, sha256));
+    return { clip, bundle, sha256 };
+  };
+  const currentTranscriptSnapshot = (entries: readonly AudioInboxEntry[], id: string, snapshot: Awaited<ReturnType<typeof readTranscriptSnapshot>>, expectedVersion: number) => {
+    const clip = exactClip(entries, id);
+    // Saved source rows are immutable through the inbox API. Recheck identity
+    // and CAS inside the update transaction after hashing the original Blob.
+    if (JSON.stringify(metadata(clip)) !== JSON.stringify(metadata(snapshot.clip))) throw new AudioInboxError('conflict', 'The original audio changed while preparing this transcript. Nothing was saved.');
+    const bundle = transcriptAction(() => readAudioTranscriptBundle(clip.transcripts, clip));
+    if (bundle.version !== expectedVersion || bundle.version !== snapshot.bundle.version) throw new AudioInboxError('conflict', 'The saved transcript changed in another view. Reload it before saving; your draft remains available to copy or download.');
+    transcriptAction(() => verifyTranscriptAudio(bundle, snapshot.sha256));
+    return { clip, bundle };
   };
   return {
     persistence,
@@ -220,6 +251,26 @@ export function createAudioInbox(session: WorkspaceSession, options: { basePath?
       if (!storedClip(row)) throw new AudioInboxError('invalid_data', 'The selected record is malformed or unsupported. It was not deleted automatically.');
       return { result: true, deleteKey: id };
     }),
+    readTranscripts: async id => (await readTranscriptSnapshot(id)).bundle,
+    saveTranscript: async (id, expectedVersion, result, draft) => {
+      active(); if (result && !validLocalTranscript(result)) throw new AudioInboxError('invalid_data', 'The model transcript is malformed or unsupported.');
+      const captured = result ? copyLocalTranscript(result) : null, capturedDraft = { runId: draft.runId, text: draft.text };
+      const snapshot = await readTranscriptSnapshot(id);
+      return run('readwrite', entries => {
+        const { clip, bundle } = currentTranscriptSnapshot(entries, id, snapshot, expectedVersion);
+        const next = transcriptAction(() => updateAudioTranscripts(bundle, clip, snapshot.sha256, expectedVersion, captured, capturedDraft));
+        return { result: next, update: { key: clip.id, value: { ...clip, transcripts: next } } };
+      });
+    },
+    clearTranscripts: async (id, expectedVersion) => {
+      const snapshot = await readTranscriptSnapshot(id);
+      return run('readwrite', entries => {
+        const { clip, bundle } = currentTranscriptSnapshot(entries, id, snapshot, expectedVersion);
+        if (bundle.version >= Number.MAX_SAFE_INTEGER) throw new AudioInboxError('limit', 'This transcript revision cannot be advanced safely.');
+        const next: AudioTranscriptBundle = { format: 'phabricator.audio-transcripts.v1', version: bundle.version + 1, runs: [], draft: null };
+        return { result: next, update: { key: clip.id, value: { ...clip, transcripts: next } } };
+      });
+    },
     dispose,
   };
 }

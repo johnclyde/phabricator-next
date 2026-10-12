@@ -17,9 +17,11 @@ const fixturePath = resolve('.data/e2e-repository-fixture.json');
 const findingFixturePath = resolve('.data/e2e-finding-fixture.json');
 const paperRunner = process.env.E2E_REAL_TEX === '1' ? texRunnerFromEnvironment() : null;
 if (process.env.E2E_REAL_TEX === '1' && !paperRunner) throw new Error('Real TeX browser verification requires a configured isolated compiler.');
+const transcriptionModelDirectory = process.env.E2E_REAL_TRANSCRIPTION === '1' ? process.env.APP_TRANSCRIPTION_MODEL_DIR : undefined;
+if (process.env.E2E_REAL_TRANSCRIPTION === '1' && !transcriptionModelDirectory) throw new Error('Real transcription verification requires a staged, pinned public model.');
 mkdirSync(resolve('.data'), { recursive: true });
 writeFileSync(fixturePath, JSON.stringify({ barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit, importNextCommit: gitFixture.importNextCommit, importEqualCommit: gitFixture.importEqualCommit, comparisonBase: comparisonFixture.base, comparisonTarget: comparisonFixture.target, blame: blameFixture }));
-const app = createApp({ paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+const app = createApp({ transcriptionModelDirectory, paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
 if (process.env.E2E_FINDING_FIXTURE === '1') {
   // Stored test evidence verifies presentation only. No adapter or model is run.
   const author = { principalId: `local:${app.auth.workspaceId}`, displayName: 'Test fixture', credentialId: null, requestId: 'finding-provenance-fixture' };
@@ -50,7 +52,7 @@ const passwordStore = createStore({ path: join(directory, 'password-workspace.sq
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });
 for (const account of authAccounts) await provisioner.createAccount(account);
 passwordStore.createRepository({ name: 'Fixture repository', description: 'Disposable committed source for browser verification.', remoteUrl: 'https://example.invalid/fixture.git', defaultBranch: 'main' });
-const passwordApp = createApp({ paperRunner, store: passwordStore, gitRepositories: { R1: gitFixture.barePath }, authMode: 'password', seed: false, port: 4312, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+const passwordApp = createApp({ transcriptionModelDirectory, paperRunner, store: passwordStore, gitRepositories: { R1: gitFixture.barePath }, authMode: 'password', seed: false, port: 4312, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
 app.server.listen(4311, '127.0.0.1');
 passwordApp.server.listen(4312, '127.0.0.1');
 let closing = false;

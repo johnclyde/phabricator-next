@@ -40,6 +40,7 @@ import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/re
 import { notificationReadInput } from '../shared/notifications.ts';
 import { taskMuteInput } from '../shared/task-notifications.ts';
 import { assertHostingRequest, hostingConfiguration, type HostedOrigin } from './hosting.ts';
+import { serveTranscriptionModel, transcriptionModelDirectory } from './transcription-model.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -51,6 +52,7 @@ export interface AppOptions {
   basePath?: string;
   authMode?: AuthMode;
   publicOrigin?: string;
+  transcriptionModelDirectory?: string;
   revisionLifecycle?: RevisionLifecycleConfig;
   revisionReviewers?: RevisionReviewerConfig;
   revisionMetadata?: RevisionMetadataConfig;
@@ -139,16 +141,17 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
       throw new HttpError(503, `Frontend mount does not match APP_BASE_PATH (${basePath}). Rebuild and start with the same APP_BASE_PATH.`);
     }
   }
-  const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+  const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
   res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
   res.setHeader('Cache-Control', pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
   res.statusCode = 200;
   if (req.method === 'HEAD') res.end(); else res.end(html ?? await readFile(file));
 }
 
 export function createApp(options: AppOptions = {}): App {
   const hosting = hostingConfiguration(options.publicOrigin, options.authMode ?? 'local');
+  const transcriptionDirectory = transcriptionModelDirectory(options.transcriptionModelDirectory);
   if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
   if (options.store && options.revisionLifecycle) throw new Error('Configure revisionLifecycle on the supplied Store, or let createApp create the Store.');
   if (options.store && options.revisionReviewers) throw new Error('Configure revisionReviewers on the supplied Store, or let createApp create the Store.');
@@ -753,6 +756,10 @@ export function createApp(options: AppOptions = {}): App {
         try { wikiPath = canonicalWikiPath(decodeURIComponent(path.slice(3))); } catch { throw new HttpError(400, 'Invalid wiki path.'); }
         const fragment = wikiPath === '/' ? '' : wikiPath.split('/').map(encodeURIComponent).join('/');
         res.writeHead(302, { Location: `${basePath}#wiki/${fragment}`, 'Cache-Control': 'no-store' }); res.end(); return;
+      }
+      if (path.startsWith('/transcription-model/')) {
+        if (url.search) throw new HttpError(400, 'Model asset URLs do not accept query parameters.');
+        await serveTranscriptionModel(req, res, path, transcriptionDirectory); return;
       }
       if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath); return; }
       if (path.startsWith('/api/phriction.')) {
