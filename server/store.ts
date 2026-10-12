@@ -29,6 +29,7 @@ import { migratePastes } from './pastes-migration.ts';
 import type { PasteRecord } from '../shared/pastes.ts';
 import { CitationEvidenceStore, initializeCitationEvidence } from './citation-evidence.ts';
 import { sourceSnapshotCanonical, validateSourceSnapshot, validateDocxSource } from '../shared/source-snapshot.ts';
+import { parseTranscriptEditInput, validateTranscriptEditTarget, applyTranscriptTextEdit, transcriptSourceEdit, type TranscriptEditInput, type TranscriptSourceEdit } from '../shared/transcript-edit.ts';
 import { DOCX_LIMITS, type DocxSource, type DocxProjection, type DocxFileIdentity, type DocxImportInput, type DocxReimportInput, type DocxReplaceInput, type DocxVersionPins } from '../shared/docx.ts';
 import { createDocxPassageAnchor, validDocxPassageAnchor, DOCX_DISCUSSION_LIMITS, type DocxDiscussionExportInput, type DocxPackageComment, type DocxPassageAnchor } from '../shared/docx-discussion.ts';
 import type { FileRecord, RevisionAsset } from '../shared/files.ts';
@@ -134,6 +135,20 @@ export function docxOperationHash(input: DocxImportInput | DocxReimportInput | D
 }
 export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] = [], docx?: DocxSource): string {
   return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets, docx)).digest('hex');
+}
+export function transcriptEditInput(input: unknown): TranscriptEditInput {
+  try { return parseTranscriptEditInput(input); }
+  catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid transcript edit.', 'TRANSCRIPT_EDIT_INVALID'); }
+}
+export function transcriptEditInputHash(input: TranscriptEditInput): string {
+  return createHash('sha256').update(JSON.stringify(transcriptEditInput(input))).digest('hex');
+}
+/** Only the literal replacement and server-authenticated attribution reach the Word engine. */
+export function transcriptDocxReplacement(input: TranscriptEditInput): DocxReplaceInput {
+  const data = transcriptEditInput(input);
+  if (data.target.kind !== 'docx') throw new HttpError(400, 'Choose a supported Word passage.', 'TRANSCRIPT_EDIT_INVALID');
+  const { kind: _kind, ...range } = data.target;
+  return parseDocxReplaceInput({ expectedVersion: data.expectedVersion, expectedVersionId: data.expectedVersionId, expectedContentHash: data.expectedContentHash, expectedAccessEpoch: data.expectedAccessEpoch, ...range, replacement: data.replacement, message: data.message });
 }
 
 function wikiPath(input: unknown): string {
@@ -1505,8 +1520,8 @@ export class Store {
     this.files.setAttachment(source.fileId, { objectId: id, mode: 'attach', expectedVersion: current?.version ?? 0 }, actor);
     this.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run();
   }
-  private saveDocxVersion(revision: Revision, source: DocxSource, bytes: Uint8Array, message: string, actor: ActorAttribution, operation: NonNullable<RevisionVersion['docxOperation']>): RevisionVersion {
-    const version: RevisionVersion = { id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: [], docx: source, docxOperation: operation, message, contentHash: contentHash([], [], source), createdAt: new Date().toISOString(), attribution: actor };
+  private saveDocxVersion(revision: Revision, source: DocxSource, bytes: Uint8Array, message: string, actor: ActorAttribution, operation: NonNullable<RevisionVersion['docxOperation']>, transcriptEdit?: TranscriptSourceEdit): RevisionVersion {
+    const version: RevisionVersion = { ...(transcriptEdit ? { transcriptEdit } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: [], docx: source, docxOperation: operation, message, contentHash: contentHash([], [], source), createdAt: new Date().toISOString(), attribution: actor };
     this.database.prepare('INSERT INTO versions(id,revision_id,number,data) VALUES(?,?,?,?)').run(version.id, revision.id, version.number, JSON.stringify(version));
     this.database.prepare('INSERT INTO revision_docx_packages(version_id,sha256,byte_size,data) VALUES(?,?,?,?)').run(version.id, source.sha256, source.bytes, bytes);
     if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); this.revisionReviewers.ensure(revision.id); }
@@ -1667,8 +1682,8 @@ export class Store {
       this.database.prepare("UPDATE policy_meta SET value = value + 1 WHERE name = 'epoch'").run();
     }
   }
-  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance, assets: RevisionAsset[] = []): RevisionVersion {
-    const version: RevisionVersion = { ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), ...(assets.length ? { assets } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source, assets), createdAt: new Date().toISOString() };
+  private saveVersion(revision: Revision, source: SourceFile[], message: string, attribution?: ActorAttribution, gitSource?: GitSourceProvenance, assets: RevisionAsset[] = [], transcriptEdit?: TranscriptSourceEdit): RevisionVersion {
+    const version: RevisionVersion = { ...(transcriptEdit ? { transcriptEdit } : {}), ...(attribution ? { attribution } : {}), ...(gitSource ? { gitSource } : {}), ...(assets.length ? { assets } : {}), id: randomUUID(), revisionId: revision.id, number: revision.currentVersion, files: source, message, contentHash: contentHash(source, assets), createdAt: new Date().toISOString() };
     this.database.prepare('INSERT INTO versions (id, revision_id, number, data) VALUES (?, ?, ?, ?)').run(version.id, revision.id, version.number, JSON.stringify(version));
     if (version.number === 1) { this.revisionAuthorship.ensure(revision.id); this.revisionLifecycle.ensure(revision.id, revision.status !== 'draft'); this.revisionReviewers.ensure(revision.id); }
     else this.revisionLifecycle.sourceUpdated(revision.id, attribution);
@@ -1678,6 +1693,45 @@ export class Store {
     const version = integer(expected, 'expectedVersion'); const detail = this.detail(id);
     if (detail.revision.currentVersion !== version) throw new HttpError(409, 'This revision changed. Reload before continuing.');
     return detail;
+  }
+  /** Fresh writes only; saved receipts remain bound to their original source after later changes. */
+  requireTranscriptEditVersion(id: string, input: TranscriptEditInput): RevisionVersion {
+    const data = transcriptEditInput(input);
+    if (data.revisionId !== id) throw new HttpError(400, 'The transcript edit names another revision.', 'TRANSCRIPT_EDIT_INVALID');
+    this.docxEpoch(data.expectedAccessEpoch);
+    const detail = this.requireVersion(id, data.expectedVersion), current = detail.versions.find(item => item.number === data.expectedVersion);
+    try {
+      if (!current || contentHash(current.files, current.assets, current.docx) !== current.contentHash) throw new Error('The original source cannot be verified.');
+      validateTranscriptEditTarget(current, data);
+    } catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'The selected source changed.', 'TRANSCRIPT_SOURCE_CHANGED'); }
+    if (createHash('sha256').update(data.replacement).digest('hex') !== data.origin.editedTextSha256) throw new HttpError(400, 'The replacement does not match the edited transcript digest.', 'TRANSCRIPT_EDIT_DIGEST_MISMATCH');
+    if (current.docx) { this.docxBytes(id, current.id); this.docxFile(current.docx.sourceFile, false); }
+    return current;
+  }
+  /** The HTTP input contains neither files nor Word projections; the server derives a new immutable version. */
+  createTranscriptEdit(id: string, input: TranscriptEditInput, attribution: ActorAttribution, editedWord?: { bytes: Uint8Array; projection: DocxProjection }): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = transcriptEditInput(input), current = this.requireTranscriptEditVersion(id, data), actor = this.docxActor(attribution);
+      const provenance = transcriptSourceEdit(data, transcriptEditInputHash(data));
+      let source: SourceFile[] | undefined, docx: DocxSource | undefined;
+      if (data.target.kind === 'docx') {
+        if (!editedWord || !current.docx) throw new HttpError(409, 'The prepared Word replacement is unavailable.', 'TRANSCRIPT_SOURCE_CHANGED');
+        docx = this.docxSource(editedWord.bytes, editedWord.projection, current.docx.fileName, current.docx.sourceFile);
+        if (docx.sha256 === current.docx.sha256) throw new HttpError(409, 'The prepared Word package did not change.', 'TRANSCRIPT_SOURCE_CHANGED');
+      } else {
+        if (editedWord) throw new HttpError(400, 'A text replacement cannot carry Word bytes.', 'TRANSCRIPT_EDIT_INVALID');
+        source = files(applyTranscriptTextEdit(current, data));
+        this.sourceAssets(source, current.assets ?? [], current.assets ?? []);
+      }
+      const revision = this.get<Revision>('revision', id);
+      if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
+      revision.currentVersion++; revision.updatedAt = new Date().toISOString(); this.save('revision', revision);
+      if (docx && editedWord) this.saveDocxVersion(revision, docx, editedWord.bytes, data.message, actor, { kind: 'replace', inputSha256: docxOperationHash(transcriptDocxReplacement(data)) }, provenance);
+      else this.saveVersion(revision, source!, data.message, actor, undefined, current.assets ?? [], provenance);
+      this.event(id, 'version_created', `Applied an explicit transcript replacement as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor);
+      this.notifyRevisionSource(id, 'source_updated', actor);
+      return this.detail(id);
+    });
   }
   createVersion(id: string, input: unknown, attribution?: ActorAttribution): RevisionDetail {
     return this.discussionMutation(() => {

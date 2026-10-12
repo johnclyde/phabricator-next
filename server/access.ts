@@ -21,6 +21,8 @@ import { notificationReadObjectId } from '../shared/notifications.ts';
 import type { TaskMuteInput, TaskMuteSnapshot, TaskMuteHistory } from '../shared/task-notifications.ts';
 import { parseRevisionDependencyInput } from './store.ts';
 import { createHash } from 'node:crypto';
+import { applyTranscriptTextEdit, transcriptSourceEdit, validateTranscriptEditTarget } from '../shared/transcript-edit.ts';
+import { contentHash, transcriptEditInput, transcriptEditInputHash, transcriptDocxReplacement } from './store.ts';
 import { parseCreatePasteInput, parseUpdatePasteInput, parsePasteCommentInput } from './pastes.ts';
 import type { ProjectChildPreview, ProjectDetail, ProjectHistory, ProjectKind, ProjectMembersPage, ProjectWatchersPage, ProjectPreferences } from '../shared/projects.ts';
 import { isValidProjectSlug, normalizeProjectSlug } from '../shared/projects.ts';
@@ -738,6 +740,10 @@ export class AccessLayer {
       if (data.shareSource) this.require(data.sourceFile.fileId, 'edit');
     }
     if (method === 'POST' && /^\/api\/revisions\/[DPL]\d+\/docx\/replace$/.test(path)) parseDocxReplaceInput(input);
+    if (method === 'POST' && /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path)) {
+      const data = transcriptEditInput(input);
+      if (data.revisionId !== target?.id) throw new HttpError(400, 'The transcript edit names another revision.', 'TRANSCRIPT_EDIT_INVALID');
+    }
     const citation = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/citation-evidence(?:\/([^/]+)\/retract)?$/.exec(path) : null;
     if (citation) {
       if (citation[2]) {
@@ -1114,6 +1120,34 @@ export class AccessLayer {
         || result.move?.inputSha256 !== wikiMoveInputHash(input) || destination.move?.inputSha256 !== wikiMoveInputHash(input)) return invalid();
       this.wikiReferenceAccess(expected.destination.id, true);
       return { status: response.status, body: { ...expected, accessEpoch: this.policies.epoch() } };
+    }
+    if (method === 'POST' && /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path)) {
+      const invalid = (): never => { throw new HttpError(409, 'This saved transcript edit does not match the original operation.', 'TRANSCRIPT_RECEIPT_MISMATCH'); };
+      const input = transcriptEditInput(mutationInput);
+      if (response.status !== 201 || !target || !body || !record(body.revision) || !Array.isArray(body.versions)) return invalid();
+      const detail = body as unknown as RevisionDetail, current = this.store.detail(target.id);
+      if (detail.revision.id !== target.id || input.revisionId !== target.id || detail.revision.currentVersion !== input.expectedVersion + 1) return invalid();
+      for (const version of detail.versions) {
+        const stored = current.versions.find(item => item.id === version.id);
+        if (!stored || !isDeepStrictEqual(version, stored)) return invalid();
+      }
+      const original = detail.versions.find(item => item.id === input.expectedVersionId), result = detail.versions.find(item => item.number === input.expectedVersion + 1);
+      if (!original || !result || result.id === original.id || result.attribution?.principalId !== this.principal || result.message !== input.message
+        || !isDeepStrictEqual(result.transcriptEdit, transcriptSourceEdit(input, transcriptEditInputHash(input)))
+        || createHash('sha256').update(input.replacement).digest('hex') !== input.origin.editedTextSha256) return invalid();
+      try {
+        validateTranscriptEditTarget(original, input);
+        if (contentHash(original.files, original.assets, original.docx) !== original.contentHash || contentHash(result.files, result.assets, result.docx) !== result.contentHash) return invalid();
+        if (input.target.kind === 'text') {
+          if (result.docx || result.gitSource || !isDeepStrictEqual(result.files, applyTranscriptTextEdit(original, input)) || !isDeepStrictEqual(result.assets ?? [], original.assets ?? [])) return invalid();
+        } else {
+          if (!original.docx || !result.docx || result.docx.sha256 === original.docx.sha256 || !isDeepStrictEqual(result.docx.sourceFile, original.docx.sourceFile)
+            || result.docxOperation?.kind !== 'replace' || result.docxOperation.inputSha256 !== docxOperationHash(transcriptDocxReplacement(input))) return invalid();
+          this.store.docxBytes(target.id, original.id); this.store.docxBytes(target.id, result.id);
+        }
+      } catch { return invalid(); }
+      // This is a client-reported origin, bound to an authenticated literal edit;
+      // it does not assert that the server performed or verified speech recognition.
     }
     if (method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path))) {
       const invalid = (): never => { throw new HttpError(409, 'This saved Word receipt does not match the original operation.', 'DOCX_RECEIPT_MISMATCH'); };

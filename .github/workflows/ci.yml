@@ -88,13 +88,13 @@ jobs:
       - name: Build
         run: npm run build
       - name: Verify real offline transcription on desktop and mobile
-        run: npm run test:e2e -- tests/transcription-real.spec.ts tests/transcription-session.spec.ts
+        run: npm run test:e2e -- tests/transcription-real.spec.ts tests/transcription-session.spec.ts tests/transcript-source-real.spec.ts
       - name: Build under a path prefix
         run: npm run build
         env:
           APP_BASE_PATH: /workspace/
       - name: Verify real offline transcription under a path prefix
-        run: npm run test:e2e -- tests/transcription-real.spec.ts tests/transcription-session.spec.ts
+        run: npm run test:e2e -- tests/transcription-real.spec.ts tests/transcription-session.spec.ts tests/transcript-source-real.spec.ts
         env:
           APP_BASE_PATH: /workspace/
 

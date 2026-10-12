@@ -1,6 +1,7 @@
 import type { ProjectSnapshot, RevisionDetail, ReviewThread } from '../shared/types';
 import { normalizeProjectSlug, projectDisplayName } from '../shared/projects';
 import { orderedDiscussionThreads } from '../shared/discussion-navigation';
+import type { TranscriptEditVoiceAction } from './transcript-edit-voice';
 import type { StackVoiceAction } from './revision-stack';
 
 export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'primarySlug' | 'aliases' | 'displayName'>, query: string): boolean {
@@ -12,7 +13,7 @@ export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' |
 export type FindingVoiceAction = 'findings' | 'currentFinding' | 'nextFinding' | 'previousFinding' | 'findingSource';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
-export type VoiceCommand = { type: 'notificationFilter'; filter: 'all' | 'unread' | 'read' } | { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: FindingVoiceAction } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'notificationFilter'; filter: 'all' | 'unread' | 'read' } | { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: FindingVoiceAction } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: TranscriptEditVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
@@ -45,6 +46,8 @@ export function parseCommand(input: string): VoiceCommand {
   if (search) return { type: 'search', query: search[1] };
   const task = original.match(/^(?:create|add|draft) (?:a )?task(?: called| titled)?\s+(.+)$/i);
   if (task) return { type: 'task', title: task[1] };
+  const transcriptEdit = text.match(/^(read|preview|confirm|cancel) transcript edit$/);
+  if (transcriptEdit) return { type: `${transcriptEdit[1]}TranscriptEdit` as TranscriptEditVoiceAction };
   if (/^(read|read the|read my|give me a|give me the) (summary|overview)$/.test(text)) return { type: 'summary' };
   if (/^(?:read|show|open) (?:the )?(?:revision )?stack$/.test(text)) return { type: 'stack' };
   if (/^read (?:(?:the )?(?:current|selected) |this )?stack revision$/.test(text)) return { type: 'currentStackRevision' };

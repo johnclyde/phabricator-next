@@ -1170,3 +1170,24 @@
   .audio-inbox .transcript-editor .audio-actions .button, .audio-inbox .transcription-model .audio-actions .button { flex: 0 0 auto; }
   .transcript-editor select { min-height: 44px; width: 100%; }
 }
+
+/* Exact local transcript replacements remain separate from manual source drafts. */
+.transcript-source-edit { scroll-margin-top: 76px; min-width: 0; }
+.transcript-source-edit .file-actions { flex-wrap: wrap; gap: 10px; }
+.transcript-source-edit .button, .transcript-picker .button { min-height: 44px; white-space: normal; }
+.transcript-source-edit .field input, .transcript-source-edit .field textarea, .transcript-picker select { min-width: 0; width: 100%; }
+.transcript-target-quote { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; border: 1px solid var(--border); padding: 12px; background: #fff; }
+.transcript-picker, .transcript-request { margin: 16px 0; padding: 14px; border: 1px solid var(--border); border-radius: 4px; }
+.transcript-source-provenance { background: #fff; border: 1px solid var(--border); margin-bottom: 16px; padding: 0 16px 12px; }
+.transcript-source-provenance summary { min-height: 44px; display: list-item; padding-top: 12px; cursor: pointer; }
+.transcript-source-provenance dl { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 3fr); gap: 8px 16px; }
+.transcript-source-provenance dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .transcript-source-edit { scroll-margin-top: 116px; }
+  .transcript-source-edit .file-actions, .transcript-source-edit .file-actions > h2 { width: 100%; }
+  .transcript-source-edit .file-actions .button, .transcript-picker .button { width: 100%; flex: 0 0 auto; }
+  .transcript-source-provenance dl { display: block; }
+  .transcript-source-provenance dd { margin: 4px 0 12px; }
+  .passage-range { flex-wrap: wrap; }
+  .passage-range .button { min-height: 44px; white-space: normal; }
+}

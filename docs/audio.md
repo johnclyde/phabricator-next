@@ -52,6 +52,10 @@ At five results, another save fails without silently evicting evidence. **Clear 
 
 Unsaved transcript results and edits survive ordinary hash navigation in the active session. They are cleared when leaving the browser page, reloading, signing out or locking, with an unload guard while unsaved text exists. Page-cache restoration reloads saved local transcripts; it cannot revive retired unsaved text. In password mode, page exit—including entry into the browser page cache—locks the session and clears saved audio and transcripts as well as unsaved text; returning requires verification and cannot restore that private memory. Password transcripts have the same memory-only lifetime as their audio and are excluded from the general draft JSON export. Export text separately before the session ends. Object URLs and clipboard completion feedback are retired with their originating clip/view/session.
 
+## Use a transcript in source
+
+[Transcript source edits](transcript-edits.md) let you choose an exact destination passage in a code revision, paper, prose draft or supported Word document, select an available local transcript draft, review the literal replacement and save a new version explicitly online. The workspace receives the reviewed replacement and compact client-reported provenance; the audio and full original model transcript stay local. This is separate from saving a transcript in Audio, which never changes source by itself.
+
 ## Operator setup
 
 The server never downloads model files on startup or in response to a transcription request. Stage the pinned public assets explicitly into a **fresh** directory, then configure the reusable server path:
@@ -84,4 +88,4 @@ A fresh production-only installation outside the repository passed with `npm ci 
 
 The dedicated public CI job stages the pinned model and runs the real-transcription tests at both mounts on desktop/mobile Chromium. Its configuration is present; a successful hosted CI run is a separate result. Physical iOS/Android devices, long-recording performance, native decoder peak memory and broader speech/codec accuracy remain unqualified.
 
-Not implemented: automatic or provider transcription, languages other than English, word timestamps, speaker labels, speech-to-source editing, uploaded audio import, waveform or trimming tools, resumable background capture, cross-device audio synchronization, durable authenticated audio retention, encrypted audio vaults, server uploads, provider integration and automatic retention policies. Raw audio stays private to the current browser retention mode until the user explicitly downloads it.
+Not implemented: automatic or provider transcription, languages other than English, word timestamps, speaker labels, full hands-free destination selection and dictation, uploaded audio import, waveform or trimming tools, resumable background capture, cross-device audio synchronization, durable authenticated audio retention, encrypted audio vaults, server uploads, provider integration and automatic retention policies. Raw audio stays private to the current browser retention mode until the user explicitly downloads it.

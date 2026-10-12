@@ -14,7 +14,7 @@ import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
-import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, type MutationResponse, type Store } from './store.ts';
+import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, transcriptEditInput, transcriptDocxReplacement, type MutationResponse, type Store } from './store.ts';
 import { exportDocxDiscussion, inspectDocx, replaceDocx } from './docx-package.ts';
 import { DOCX_LIMITS, type DocxFileIdentity } from '../shared/docx.ts';
 import { docxDiscussionFilename, type DocxDiscussionExport } from '../shared/docx-discussion.ts';
@@ -453,8 +453,10 @@ export function createApp(options: AppOptions = {}): App {
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
     const docxCreate = method === 'POST' && path === '/api/revisions/docx';
     const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace)$/.exec(path) : null;
-    if ((docxCreate || docxWrite) && closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
+    const transcriptEdit = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/transcript-edits$/.exec(path) : null;
+    if ((docxCreate || docxWrite || transcriptEdit) && closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
     if ((docxCreate || docxWrite) && !rawKey) throw new HttpError(400, 'Word document mutations require an Idempotency-Key.');
+    if (transcriptEdit && !rawKey) throw new HttpError(400, 'Transcript edits require an Idempotency-Key.');
     if (method === 'POST' && /^\/api\/documents\/W\d+\/(?:move|drafts|publish|delete)$/.test(path) && !rawKey) throw new HttpError(400, 'Wiki lifecycle operations require an Idempotency-Key.');
     const paper = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/paper-builds(?:\/([^/]+)\/(cancel|retry))?$/.exec(path) : null;
     if (paper && !rawKey) throw new HttpError(400, 'Paper build mutations require an Idempotency-Key.');
@@ -475,7 +477,7 @@ export function createApp(options: AppOptions = {}): App {
       if (versionImportRepository) access.require(versionImportRepository);
       if (paper?.[2]) paperBuilds.get(paper[1]!, paper[2], context);
       if ((importMatch || versionImportMatch) && signal?.aborted) throw new HttpError(499, 'Repository import was canceled.', 'GIT_ABORTED');
-      if ((docxCreate || docxWrite) && signal?.aborted) throw new HttpError(499, 'Word document processing was canceled.', 'DOCX_ABORTED');
+      if ((docxCreate || docxWrite || transcriptEdit) && signal?.aborted) throw new HttpError(499, 'Source processing was canceled.', 'DOCX_ABORTED');
     };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
     const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
@@ -485,7 +487,7 @@ export function createApp(options: AppOptions = {}): App {
     // Preserve legacy local retries, while every authenticated principal has a
     // separate durable replay namespace. Authorization always precedes replay.
     const key = rawKey && (context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`);
-    const fingerprint = createHash('sha256').update(JSON.stringify([method, path, dependencies ? parseRevisionDependencyInput(input) : input])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([method, path, dependencies ? parseRevisionDependencyInput(input) : transcriptEdit ? transcriptEditInput(input) : input])).digest('hex');
     if (key) {
       const replay = store.read(() => { authorize(); const saved = store.replay(key, fingerprint); return saved ? present(saved) : undefined; });
       if (replay) return replay;
@@ -504,6 +506,16 @@ export function createApp(options: AppOptions = {}): App {
       }
     }
     const execute = async (): Promise<MutationResponse> => {
+      if (transcriptEdit) {
+        const id = transcriptEdit[1]!, data = transcriptEditInput(input);
+        let edited: Awaited<ReturnType<typeof replaceDocx>> | undefined;
+        if (data.target.kind === 'docx') {
+          const original = store.read(() => { authorize(); const version = store.requireTranscriptEditVersion(id, data); return store.docxBytes(id, version.id); });
+          try { edited = await (options.docxProcessor?.replace ?? replaceDocx)(original, transcriptDocxReplacement(data), { author: attribution.displayName, date: new Date().toISOString() }, signal); }
+          catch (error) { store.read(authorize); throw error; }
+        }
+        return store.mutate(key, fingerprint, () => ({ status: 201, body: store.createTranscriptEdit(id, data, attribution, edited) }), authorize, present);
+      }
       if (docxCreate || docxWrite) {
         const selectedFile = (identity: DocxFileIdentity) => {
           const file = store.files.get(identity.fileId);
@@ -727,7 +739,7 @@ export function createApp(options: AppOptions = {}): App {
         throw new HttpError(404, 'Route not found.');
       }, authorize, present);
     };
-    const promise = docxCreate || docxWrite ? trackDocxWork(execute()) : execute();
+    const promise = docxCreate || docxWrite || transcriptEdit ? trackDocxWork(execute()) : execute();
     if (key) pending.set(key, { fingerprint, promise });
     try { return await promise; } finally { if (key) pending.delete(key); }
   }
@@ -1235,7 +1247,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path))) {
+      if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);

@@ -33,6 +33,8 @@ const notificationLifetimes = new WeakMap<WorkspaceSession, NotificationLifetime
 // Informational responses can advance the observed epoch without supplying the
 // workspace's visibility and capability snapshot needed by a subsequent write.
 const verifiedAuthorityEpochs = new WeakMap<WorkspaceSession, number>();
+interface TranscriptDraftRetention { baseline: string | null; latest: string; generation: number }
+const transcriptDraftRetentions = new WeakMap<WorkspaceSession, Map<string, TranscriptDraftRetention>>();
 function notificationLifetime(session: WorkspaceSession | null): NotificationLifetime | null {
   if (!session) return null;
   let lifetime = notificationLifetimes.get(session);
@@ -85,10 +87,10 @@ function queuedObject(item: PendingMutation): string | null {
   if (item.path === '/api/projects' && typeof body?.parentId === 'string') return body.parentId;
   return body?.access && typeof body.access.spaceId === 'string' ? body.access.spaceId : 'S1';
 }
-function objectFromKey(key: string): string | null { return /^(?:object-subscriptions|object-subscription-draft|object-subscription-request|task-mute|task-mute-draft|task-mute-request|revision-projects|revision-project-draft|revision-project-request|revision-subscriptions|revision-subscription-draft|revision-subscription-request|revision-metadata|revision-metadata-draft|revision-metadata-request|revision-reviewers|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle|revision-lifecycle-draft|revision-lifecycle-request|revision-authorship|revision-author-draft|revision-author-request|revision-stack|revision-dependencies|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|docx-draft|docx-request|docx-selection|docx-comparison|paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|review-findings|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
-function isDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function objectFromKey(key: string): string | null { return /^(?:object-subscriptions|object-subscription-draft|object-subscription-request|task-mute|task-mute-draft|task-mute-request|revision-projects|revision-project-draft|revision-project-request|revision-subscriptions|revision-subscription-draft|revision-subscription-request|revision-metadata|revision-metadata-draft|revision-metadata-request|revision-reviewers|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle|revision-lifecycle-draft|revision-lifecycle-request|revision-authorship|revision-author-draft|revision-author-request|revision-stack|revision-dependencies|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|docx-selection|docx-comparison|paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|review-findings|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
+function isDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 // Personal presentation choices retain quota-failed memory, but are purged on view loss rather than treated as content drafts.
-function isRetainedDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || key.startsWith('draft:document:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || key.startsWith('draft:document:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -151,7 +153,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     }
     if (/^revision-project-(?:draft|request):/.test(key) || key.startsWith('repository-import:') || key.startsWith('draft:revision:')) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects && !session.visibleObjects.has(id))) || Boolean(target && !key.startsWith('repository-import:') && session?.objectCapabilities.get(target)?.edit === false); }
     if (/^revision-dependency-(?:draft|request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.edit === false); }
-    if (/^docx-(?:draft|request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.edit === false); }
+    if (/^(?:docx|transcript-edit)-(?:draft|request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.edit === false); }
     if (key.startsWith('paste-create:')) { const space = objectFromKey(key); return Boolean(space && (session?.unavailableObjects.has(space) || (session?.visibleObjects && !session.visibleObjects.has(space)))); }
     if (key.startsWith('citation-draft:')) { const ids = draftObjects(key, value), target = objectFromKey(key); return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id))) || Boolean(target && session?.objectCapabilities.get(target)?.interact === false); }
     if (key.startsWith('revision-git-import:')) {
@@ -173,7 +175,13 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     try { for (let i = 0; i < localStorage.length; i++) { const key = localStorage.key(i); if (key?.startsWith(contentKey(''))) entries.push([key.slice(contentKey('').length), localStorage.getItem(key) || 'null']); } } catch { /* Unavailable storage stays unreadable. */ }
     // Keep failed task writes separately from durable bytes: another tab may
     // have saved a different draft, and both copies must remain recoverable.
-    for (const [key, value] of session.memory) if (isRetainedDraftKey(key)) entries.push([key, value]);
+    for (const [key, value] of session.memory) if (isRetainedDraftKey(key)) {
+      // Successful transcript saves keep a tab-local shadow so a later save in
+      // another tab cannot displace the editor's exact bytes on navigation.
+      // Equal physical copies need only one recovery entry.
+      if (key.startsWith('transcript-edit-draft:') && key.endsWith(':unsaved-memory') && entries.some(([savedKey, saved]) => savedKey === key.slice(0, -':unsaved-memory'.length) && saved === value)) continue;
+      entries.push([key, value]);
+    }
     return entries;
   };
   const rawRead = (key: string): string | null => { if (durable && isRetainedDraftKey(key)) { const retained = session?.memory.get(`${key}:unsaved-memory`) || session?.memory.get(key); if (retained) return retained; } try { return durable ? localStorage.getItem(contentKey(key)) : session?.memory.get(key) || null; } catch { return null; } };
@@ -201,6 +209,13 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (key.startsWith('revision-stack:')) return [...new Set([...(primary ? [primary] : []), ...(isRevisionStack(value, primary || '') ? value.nodes.map(node => node.id) : [])])];
     if (key.startsWith('revision-dependencies:')) { const snapshot = dependencySnapshot(value, primary || ''); return [...new Set([...(primary ? [primary] : []), ...(snapshot ? [...snapshot.parents.revisions.map(item => item.id), ...snapshot.children.revisions.map(item => item.id), ...snapshot.history.transactions.map(item => item.change.revisionId)] : [])])]; }
     if (/^wiki-(?:move|request|edit|action|action-request):/.test(key) || key.startsWith('draft:document:')) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { authorityIds?: string[]; wikiAuthority?: WikiAuthority; spaceId?: string } | null; return [...new Set([...(primary ? [primary] : []), ...(draft?.authorityIds || draft?.wikiAuthority?.ancestorIds || []), ...(key.startsWith('draft:document:new') && draft?.spaceId ? [draft.spaceId] : [])])]; } catch { return primary ? [primary] : []; } }
+    if (/^transcript-edit-(?:draft|request):/.test(key)) {
+      try {
+        const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { sourceFile?: { fileId?: unknown }; draft?: { sourceFile?: { fileId?: unknown } } } | null;
+        const file = draft?.sourceFile?.fileId ?? draft?.draft?.sourceFile?.fileId;
+        return [...new Set([...(primary ? [primary] : []), ...(primary && session?.revisionRepositories.get(primary) ? [session.revisionRepositories.get(primary)!] : []), ...(primary ? session?.revisionFiles.get(primary) || [] : []), ...(typeof file === 'string' && /^F\d+$/.test(file) ? [file] : [])])];
+      } catch { return primary ? [primary] : []; }
+    }
     if (/^docx-(?:draft|request):/.test(key)) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { sourceFile?: { fileId?: unknown }; projectIds?: string[]; body?: { sourceFile?: { fileId?: unknown }; projectIds?: string[] } } | null; const file = draft?.sourceFile?.fileId ?? draft?.body?.sourceFile?.fileId; return [...(primary ? [primary] : []), ...(typeof file === 'string' && /^F\d+$/.test(file) ? [file] : []), ...selectedProjects(draft?.body || draft)]; } catch { return primary ? [primary] : []; } }
     if (key.startsWith('citation-draft:')) { try { const draft = (value ?? JSON.parse(rawRead(key) || 'null')) as { source?: { fileId?: unknown }; body?: { source?: { fileId?: unknown } } } | null; const source = draft?.source?.fileId ?? draft?.body?.source?.fileId; return [...(primary ? [primary] : []), ...(typeof source === 'string' && /^F\d+$/.test(source) ? [source] : [])]; } catch { return primary ? [primary] : []; } }
     if (key.startsWith('revision-git-import:')) {
@@ -430,6 +445,49 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (typeof navigator !== 'undefined' && navigator.locks) return navigator.locks.request(contentKey(`presentation-write:${key}`), commit);
     return commit();
   };
+  const draftHasUnsavedMemory = (key: string): boolean => {
+    const shadow = durable ? session?.memory.get(`${key}:unsaved-memory`) : undefined;
+    if (shadow === undefined) return false;
+    if (key.startsWith('transcript-edit-draft:')) try { return localStorage.getItem(contentKey(key)) !== shadow; } catch { return true; }
+    return true;
+  };
+  /** Retain immediately, then compare-and-swap only this editor's durable baseline. */
+  const retainTranscriptEditDraft = async (key: string, value: unknown, expectedPrevious: unknown): Promise<'saved' | 'memory' | 'unavailable'> => {
+    if (!/^transcript-edit-draft:[DPL][1-9]\d{0,14}:[A-Za-z0-9_-]+$/.test(key)) return 'unavailable';
+    syncDurableQuarantine();
+    const allowed = () => {
+      try { assertSession(session); } catch { return false; }
+      return !hasDraftHold(key) && !blockedDraft(key, value) && !draftObjects(key, value).some(id => session!.unavailableObjects.has(id));
+    };
+    if (!allowed() || !session) return 'unavailable';
+    const json = JSON.stringify(value), expected = expectedPrevious === null ? null : JSON.stringify(expectedPrevious);
+    if (typeof json !== 'string' || (expected !== null && typeof expected !== 'string')) return 'unavailable';
+    if (!durable) return writeStored(key, value) ? 'saved' : 'unavailable';
+    let states = transcriptDraftRetentions.get(session);
+    if (!states) { states = new Map(); transcriptDraftRetentions.set(session, states); const owner = session; session.cleanupCallbacks.add(() => { states!.clear(); transcriptDraftRetentions.delete(owner); }); }
+    const shadowKey = `${key}:unsaved-memory`, previousShadow = session.memory.get(shadowKey);
+    let state = states.get(key);
+    if (!state || previousShadow !== state.latest) { state = { baseline: expected, latest: json, generation: 0 }; states.set(key, state); }
+    else if (expected !== state.latest && json !== state.latest) return 'unavailable';
+    state.latest = json; const generation = ++state.generation;
+    session.memory.set(shadowKey, json);
+    const commit = () => {
+      syncDurableQuarantine();
+      if (!allowed() || states!.get(key) !== state || session.memory.get(shadowKey) !== json) return 'unavailable' as const;
+      if (state.generation !== generation) return 'memory' as const;
+      try {
+        const current = localStorage.getItem(contentKey(key));
+        if (current !== state.baseline && current !== json) return 'memory' as const;
+        localStorage.setItem(contentKey(key), json); state.baseline = json;
+        return 'saved' as const;
+      } catch { return 'memory' as const; }
+    };
+    // No lock support means a recoverable tab-local draft, never an unsafe
+    // check-then-write that might overwrite a different tab's durable draft.
+    if (typeof navigator === 'undefined' || !navigator.locks) return 'memory';
+    try { return await navigator.locks.request(contentKey(`transcript-draft:${key}`), commit); }
+    catch { return allowed() && session.memory.get(shadowKey) === json ? 'memory' : 'unavailable'; }
+  };
   const clearDiscussionChoice = async (key: string, expected: unknown, stillCurrent: () => boolean = () => true): Promise<boolean> => {
     if (!/^discussion-choice:[DPL]\d+:[^:]+$/.test(key)) return false;
     const commit = () => { if (!stillCurrent() || !sessionIsActive(session) || unavailableObject(objectFromKey(key)!)) return false; return removeStoredIfEqual(key, expected); };
@@ -444,6 +502,54 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (!sessionIsActive(session) || hasDraftHold(key)) return false;
     return rawRemoveMatching(key, expected);
+  };
+  /** Coordinate transcript cleanup with the same locks used to retain each family. */
+  const removeTranscriptEditStoredIfEqual = async (key: string, expected: unknown, isCurrent: () => boolean = () => true): Promise<boolean> => {
+    const draft = /^transcript-edit-draft:[DPL][1-9]\d{0,14}:[A-Za-z0-9_-]+$/.test(key);
+    if (!draft && !/^transcript-edit-request:[DPL][1-9]\d{0,14}$/.test(key)) return false;
+    syncDurableQuarantine();
+    const allowed = () => {
+      try { assertSession(session); if (!isCurrent()) return false; } catch { return false; }
+      return !hasDraftHold(key) && !blockedDraft(key, expected) && !draftObjects(key, expected).some(id => session!.unavailableObjects.has(id));
+    };
+    if (!allowed() || !session) return false;
+    const json = JSON.stringify(expected);
+    if (typeof json !== 'string') return false;
+    if (!durable) {
+      const saved = session.memory.get(key);
+      if (saved !== undefined && saved !== json) return false;
+      session.memory.delete(key); return true;
+    }
+    // Retire matching queued draft writes before awaiting a lock, but retain
+    // their recovery bytes until cleanup commits. Losing access or navigating
+    // while waiting must not erase a quota-only draft or uncertain request.
+    const shadowKey = `${key}:unsaved-memory`, states = transcriptDraftRetentions.get(session);
+    if (draft && states?.get(key)?.latest === json) states.delete(key);
+    const remainingState = states?.get(key), memory = session.memory.get(key), shadow = session.memory.get(shadowKey);
+    const unchangedMemory = () => session.memory.get(key) === memory && session.memory.get(shadowKey) === shadow
+      && (memory === undefined || memory === json) && (shadow === undefined || shadow === json)
+      && (!draft || transcriptDraftRetentions.get(session)?.get(key) === remainingState);
+    const removeMemory = () => {
+      if (memory === json) session.memory.delete(key);
+      if (shadow === json) session.memory.delete(shadowKey);
+    };
+    const commit = (canRemoveDurable: boolean) => {
+      syncDurableQuarantine();
+      if (!allowed() || !unchangedMemory()) return false;
+      try {
+        const saved = localStorage.getItem(contentKey(key));
+        if (saved === json) {
+          if (!canRemoveDurable) return false;
+          localStorage.removeItem(contentKey(key));
+        } else if (saved !== null && memory !== json && shadow !== json) return false;
+        removeMemory(); return true;
+      } catch { return false; }
+    };
+    // Without locks, a memory-only copy can still be discarded, but durable
+    // bytes never undergo an unsafe cross-tab compare-and-delete.
+    if (typeof navigator === 'undefined' || !navigator.locks) return commit(false);
+    try { return await navigator.locks.request(contentKey(`${draft ? 'transcript-draft' : 'file-intent'}:${key}`), () => commit(true)); }
+    catch { return false; }
   };
   const unavailableObject = (id: string) => session?.unavailableObjects.has(id) ?? false;
   const onAccessChange = (listener: (ids: string[]) => void) => {
@@ -756,10 +862,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const draftRecords = (): { key: string; value: unknown }[] => {
     if (!sessionIsActive(session)) return [];
     const submitted = submittedBulkMoves().map(value => ({ key: `submitted-bulk:${value.requestId}`, value }));
-    if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory')).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
+    if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory') && (!key.startsWith('transcript-edit-draft:') || draftHasUnsavedMemory(key.slice(0, -':unsaved-memory'.length)))).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
-      return /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
+      return /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
     return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };
@@ -770,7 +876,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
   const onRevisionStackChange = (listener: () => void) => { stacks?.listeners.add(listener); return () => { stacks?.listeners.delete(listener); }; };
-  return { session, durable, invalidateNotifications: () => invalidateNotifications(), notificationGeneration: () => notifications?.generation ?? -1, onNotificationChange: (listener: () => void) => { notifications?.listeners.add(listener); return () => { notifications?.listeners.delete(listener); }; }, acknowledgeRevisionAuthorIntent, invalidateRevisionStacks: () => invalidateRevisionStacks(), onRevisionStackChange, revisionStackGeneration: () => stacks?.generation ?? -1, retireUnavailableObject: (id: string) => { assertSession(session); invalidateObjects([id]); }, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory: (key: string) => Boolean(durable && session?.memory.has(`${key}:unsaved-memory`)), quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, writeDiscussionChoice, clearDiscussionChoice, removeStored, removeStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  return { session, durable, invalidateNotifications: () => invalidateNotifications(), notificationGeneration: () => notifications?.generation ?? -1, onNotificationChange: (listener: () => void) => { notifications?.listeners.add(listener); return () => { notifications?.listeners.delete(listener); }; }, acknowledgeRevisionAuthorIntent, invalidateRevisionStacks: () => invalidateRevisionStacks(), onRevisionStackChange, revisionStackGeneration: () => stacks?.generation ?? -1, retireUnavailableObject: (id: string) => { assertSession(session); invalidateObjects([id]); }, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory, retainTranscriptEditDraft, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, writeDiscussionChoice, clearDiscussionChoice, removeStored, removeStoredIfEqual, removeTranscriptEditStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.
