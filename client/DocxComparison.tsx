@@ -16,6 +16,8 @@ export default function DocxComparison({ detail, readerVersion, online, canView,
   const [stored, setStored] = useState<unknown>(() => client.readStored(key, null));
   const [warning, setWarning] = useState(''), [retired, setRetired] = useState(false);
   const selectionGeneration = useRef(0);
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { heading.current?.focus({ preventScroll: true }); heading.current?.closest('section')?.scrollIntoView({ block: 'start' }); }, []);
   const selection = isDocxComparisonSelection(stored, id) ? stored : null;
   const initial = () => defaultDocxComparison(detail, readerVersion ? docxVersionIdentity(readerVersion) : null);
   const change = (next: DocxComparisonSelection, cancelSpeech = true) => {
@@ -59,32 +61,34 @@ export default function DocxComparison({ detail, readerVersion, online, canView,
   } : null;
   const changeFromRenderer = (next: ComparisonSelection) => { if (isDocxComparisonSelection(next, id) && available()) change(next, false); };
   return <section className="panel docx-comparison" aria-label="Word text comparison">
-    <div className="panel-heading"><h2>Compare Word Versions</h2><button className="button" onClick={() => { retireSpeech(); close(); }}>Close Word comparison</button></div>
-    <p className="info-strip">Compare projected text from exact immutable Word versions. The document reader and its passage discussions remain on {readerVersion ? `Version ${readerVersion.number}` : 'the selected reader version'}. Projected comparison lines cannot receive comments.</p>
+    <div className="panel-heading"><h2 ref={heading} tabIndex={-1}>Compare Word Versions</h2><button className="button" onClick={() => { retireSpeech(); close(); }}>Close Word comparison</button></div>
     {!online && <p className="info-strip">Offline comparison of saved, authorized versions. This pair remains fixed until you choose different versions.</p>}
     {warning && <p className="banner warning" role="status">{warning}</p>}
     {unavailable ? <p className="banner warning" role="status">Word comparison access or source context changed. Close this comparison and reload the document before choosing versions again.</p> : <>
-      {selection && <>
-        <div className="comparison-toolbar docx-comparison-picker">
+      {selection && <div className="comparison-toolbar docx-comparison-picker docx-comparison-controls">
           <label>Base Word version<select aria-label="Base Word version" value={selection.base?.id || ''} onChange={event => choose('base', event.target.value)}><option value="">Empty base</option>{selection.base && !versions.some(item => item.id === selection.base?.id) && <option value={selection.base.id}>Unavailable selected version</option>}{versions.map(item => <option key={item.id} value={item.id}>Version {item.number}</option>)}</select></label>
-          <button className="button" disabled={!selection.base || !base || !target} onClick={() => change({ ...selection, base: selection.target, target: selection.base! })}>Swap Word versions</button>
           <label>Word version to compare<select aria-label="Word version to compare" value={selection.target.id} onChange={event => choose('target', event.target.value)}>{!versions.some(item => item.id === selection.target.id) && <option value={selection.target.id}>Unavailable selected version</option>}{versions.map(item => <option key={item.id} value={item.id}>Version {item.number}</option>)}</select></label>
-        </div>
-        <div className="file-toolbar docx-comparison-picker">
+
           <label>Scope<select aria-label="Word comparison scope" value={selection.filePath} onChange={event => change({ ...selection, filePath: event.target.value as DocxComparisonScopeId })}>{!scopes.includes(selection.filePath) && <option value={selection.filePath}>Unavailable selected scope</option>}{scopes.map(scope => <option key={scope} value={scope}>{DOCX_COMPARISON_SCOPE_LABELS[scope]}</option>)}</select></label>
           <label>Compare text<select aria-label="Word comparison mode" value={selection.mode} onChange={event => change({ ...selection, mode: event.target.value as 'words' | 'lines' })}><option value="words">Words</option><option value="lines">Lines</option></select></label>
-        </div>
-        {valid && <div className="comparison-file-navigation"><button className="button" disabled={valid.scopes.indexOf(selection.filePath) <= 0} onClick={() => change({ ...selection, filePath: valid.scopes[valid.scopes.indexOf(selection.filePath) - 1]! })}>Previous Word scope</button><span role="status">Scope {valid.scopes.indexOf(selection.filePath) + 1} of {valid.scopes.length}</span><button className="button" disabled={valid.scopes.indexOf(selection.filePath) >= valid.scopes.length - 1} onClick={() => change({ ...selection, filePath: valid.scopes[valid.scopes.indexOf(selection.filePath) + 1]! })}>Next Word scope</button></div>}
-        <div className="comparison-navigation-options"><label className="checkbox"><input type="checkbox" checked={Boolean(selection.skipSpaceTabOnly)} onChange={event => change({ ...selection, skipSpaceTabOnly: event.target.checked })}/>Skip space/tab-only changes</label><small>All literal projected text stays visible. Keyboard: j/k for changes; Shift+J/K for Word scopes. Voice: read changes, next change, next file (next Word scope).</small></div>
-      </>}
-      <div className="docx-comparison-actions"><button className="button" disabled={!readerVersion?.docx} onClick={() => { const next = initial(); if (next) change(next); }}>Compare selected reader version</button>{valid && <button className="button" onClick={() => { if (available()) { retireSpeech(); readVersion(valid.target.id); } }}>Read compared Word version</button>}</div>
-      {!selection || !valid ? <p className="banner warning" role="status">{resolved && 'error' in resolved ? resolved.error : stored === null ? 'The selected immutable Word reader version is unavailable for comparison. Choose a Word reader version explicitly.' : 'Saved Word comparison selection is invalid. Compare the selected reader version explicitly to replace it.'}</p> : <>
-        <div className="docx-comparison-coverage">
+      </div>}
+      {(!selection || !valid) && <p className="banner warning" role="status">{resolved && 'error' in resolved ? resolved.error : stored === null ? 'The selected immutable Word reader version is unavailable for comparison. Choose a Word reader version explicitly.' : 'Saved Word comparison selection is invalid. Compare the selected reader version explicitly to replace it.'} Open Word comparison options to reset the pair.</p>}
+      <details className="docx-comparison-options"><summary>Word comparison options</summary>
+        <p className="info-strip">The document reader and its passage discussions remain on {readerVersion ? `Version ${readerVersion.number}` : 'the selected reader version'}. Projected comparison lines cannot receive comments.</p>
+        {selection && <>
+          {valid && <div className="comparison-file-navigation"><button className="button" disabled={valid.scopes.indexOf(selection.filePath) <= 0} onClick={() => change({ ...selection, filePath: valid.scopes[valid.scopes.indexOf(selection.filePath) - 1]! })}>Previous Word scope</button><span role="status">Scope {valid.scopes.indexOf(selection.filePath) + 1} of {valid.scopes.length}</span><button className="button" disabled={valid.scopes.indexOf(selection.filePath) >= valid.scopes.length - 1} onClick={() => change({ ...selection, filePath: valid.scopes[valid.scopes.indexOf(selection.filePath) + 1]! })}>Next Word scope</button></div>}
+          <div className="comparison-navigation-options"><label className="checkbox"><input type="checkbox" checked={Boolean(selection.skipSpaceTabOnly)} onChange={event => change({ ...selection, skipSpaceTabOnly: event.target.checked })}/>Skip space/tab-only changes</label><small>All literal projected text stays visible. Keyboard: j/k for changes; Shift+J/K for Word scopes. Voice: read changes, next change, next file (next Word scope).</small></div>
+        </>}
+        <div className="docx-comparison-actions">{selection && <button className="button docx-comparison-swap" disabled={!selection.base || !base || !target} onClick={() => change({ ...selection, base: selection.target, target: selection.base! })}>Swap Word versions</button>}<button className="button" disabled={!readerVersion?.docx} onClick={() => { const next = initial(); if (next) change(next); }}>Compare selected reader version</button>{valid && <button className="button" onClick={() => { if (available()) { retireSpeech(); readVersion(valid.target.id); } }}>Read compared Word version</button>}</div>
+        {valid && <div className="docx-comparison-coverage">
           <p>Deleted and move-from runs represented in the saved reading copy are excluded. This view does not cover all Word tracked changes or formatting. Synthetic note markers keep references visible.</p>
           {[...(valid.base && valid.before ? [{ version: valid.base, projection: valid.before }] : []), { version: valid.target, projection: valid.after }].map(({ version, projection }, index) => <details key={`${index}:${version.id}`}><summary>Projection limits · {index === 0 && valid.base ? 'Base' : 'Target'} Version {version.number}</summary><ul>{projection.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>)}
           <p>{!valid.base ? 'Empty base; the target Word package is pinned below.' : valid.samePackage ? 'Same Word package SHA-256 digest.' : 'Different Word package SHA-256 digests.'} Equal projected text does not establish package equality, formatting equality, or fully accepted Word text.</p>
           <details><summary>Exact Word version identities</summary>{[...(valid.base ? [{ label: 'Base', version: valid.base }] : []), { label: 'Target', version: valid.target }].map(({ label, version }) => <p key={label}>{label} Version {version.number}<br/>Snapshot <code>{version.contentHash}</code><br/>Word package SHA-256 <code>{version.docx!.sha256}</code></p>)}</details>
-        </div>
+        </div>}
+      </details>
+      {selection && valid && <>
+        <p className="docx-comparison-limitation">Text redline only; formatting and some tracked changes are omitted. {valid.base && (valid.samePackage ? 'Same Word file.' : 'Word files differ, even if their displayed text matches.')}</p>
         <Comparison key={word!.identity(selection)} revisionId={id} base={valid.base} target={valid.target} selection={selection} register={register} change={changeFromRenderer} word={word!} canComment={false} onLine={() => {}} selectedLine={null}/>
       </>}
     </>}

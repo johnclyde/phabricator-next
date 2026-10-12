@@ -39,18 +39,28 @@ export function ComparisonPicker({ detail, selection, change, current }: { detai
     if (nextTarget) { const union = comparisonPaths(nextBase, nextTarget); if (!union.includes(next.filePath)) next.filePath = union[0] || ''; }
     choose(next);
   };
-  return <>
+  return <div className="comparison-picker">
     <div className="comparison-toolbar">
       <label>Compare<select aria-label="Base version" value={base?.number ?? (selection.base ? 'unavailable' : 0)} onChange={event => pick('base', Number(event.target.value))}><option value={0}>Empty base</option>{selection.base && !base && <option value="unavailable">Unavailable selected version</option>}{detail.versions.map(item => <option key={item.id} value={item.number}>Version {item.number}</option>)}</select></label>
-      <button type="button" className="button" disabled={!base || !target} onClick={() => choose({ ...selection, base: selection.target, target: selection.base! })}>Swap versions</button>
       <label>With<select aria-label="Version to inspect" value={target?.number ?? 'unavailable'} onChange={event => pick('target', Number(event.target.value))}>{!target && <option value="unavailable">Unavailable selected version</option>}{detail.versions.map(item => <option key={item.id} value={item.number}>Version {item.number}{item.number === detail.revision.currentVersion ? ' · current' : ''}</option>)}</select></label>
-      <button type="button" className="text-button" onClick={() => { window.dispatchEvent(new Event('comparison-navigation')); current(); }}>Show current version</button>
       <div className="segmented"><button className={selection.view === 'changes' ? 'selected' : ''} onClick={() => choose({ ...selection, view: 'changes' })}>Changes</button><button className={selection.view === 'source' ? 'selected' : ''} onClick={() => choose({ ...selection, view: 'source' })}>Source</button>{detail.revision.kind === 'paper' && <button className={selection.view === 'structure' ? 'selected' : ''} onClick={() => choose({ ...selection, view: 'structure' })}>Structure</button>}</div>
     </div>
-    <div className="comparison-file-navigation"><button className="button" disabled={fileIndex <= 0} onClick={() => choose({ ...selection, filePath: paths[fileIndex - 1]! })}>Previous file</button><span role="status">{fileIndex < 0 ? 'Selected file unavailable' : `File ${fileIndex + 1} of ${paths.length}`}</span><button className="button" disabled={fileIndex < 0 || fileIndex >= paths.length - 1} onClick={() => choose({ ...selection, filePath: paths[fileIndex + 1]! })}>Next file</button></div>
-    <div className="file-toolbar"><label>File<select aria-label="Source file" value={selection.filePath} onChange={event => choose({ ...selection, filePath: event.target.value })}>{!paths.includes(selection.filePath) && <option value={selection.filePath}>Unavailable selected file</option>}{paths.map(path => <option key={path}>{path}</option>)}</select></label><label>Compare text<select aria-label="Comparison mode" value={selection.mode} onChange={event => choose({ ...selection, mode: event.target.value as ComparisonSelection['mode'] })}><option value="words">Words</option><option value="lines">Lines</option></select></label><span className="content-hash" title={selection.target.contentHash}>Target snapshot {selection.target.contentHash.slice(0, 10)}</span></div>
-    <div className="comparison-navigation-options"><label className="checkbox"><input type="checkbox" checked={Boolean(selection.skipSpaceTabOnly)} onChange={event => choose({ ...selection, skipSpaceTabOnly: event.target.checked })}/>Skip space/tab-only changes</label><small>Only passage navigation and narration skip these changes. All literal text stays visible. Keyboard: j/k for changes; Shift+J/K for files.</small></div>
-  </>;
+    <div className="comparison-file-controls">
+      <div className="file-toolbar"><label>File<select aria-label="Source file" value={selection.filePath} onChange={event => choose({ ...selection, filePath: event.target.value })}>{!paths.includes(selection.filePath) && <option value={selection.filePath}>Unavailable selected file</option>}{paths.map(path => <option key={path}>{path}</option>)}</select></label></div>
+
+    </div>
+    <details className="comparison-options">
+      <summary>Comparison options</summary>
+      <div className="comparison-file-navigation"><button className="button" disabled={fileIndex <= 0} onClick={() => choose({ ...selection, filePath: paths[fileIndex - 1]! })}>Previous file</button><span role="status">{fileIndex < 0 ? 'Selected file unavailable' : `File ${fileIndex + 1} of ${paths.length}`}</span><button className="button" disabled={fileIndex < 0 || fileIndex >= paths.length - 1} onClick={() => choose({ ...selection, filePath: paths[fileIndex + 1]! })}>Next file</button></div>
+      <div className="comparison-options-controls">
+        <label>Compare text<select aria-label="Comparison mode" value={selection.mode} onChange={event => choose({ ...selection, mode: event.target.value as ComparisonSelection['mode'] })}><option value="words">Words</option><option value="lines">Lines</option></select></label>
+        <button type="button" className="button" disabled={!base || !target} onClick={() => choose({ ...selection, base: selection.target, target: selection.base! })}>Swap versions</button>
+        <button type="button" className="text-button" onClick={() => { window.dispatchEvent(new Event('comparison-navigation')); current(); }}>Show current version</button>
+        <span className="content-hash" title={selection.target.contentHash}>Target snapshot {selection.target.contentHash.slice(0, 10)}</span>
+      </div>
+      <div className="comparison-navigation-options"><label className="checkbox"><input type="checkbox" checked={Boolean(selection.skipSpaceTabOnly)} onChange={event => choose({ ...selection, skipSpaceTabOnly: event.target.checked })}/>Skip space/tab-only changes</label><small>Only passage navigation and narration skip these changes. All literal text stays visible. Keyboard: j/k for changes; Shift+J/K for files.</small></div>
+    </details>
+  </div>;
 }
 function downloadSource(file: SourceFile, side: string) {
   const url = URL.createObjectURL(new Blob([file.content], { type: 'text/plain;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = `${side}-${file.path.split('/').pop() || 'source.txt'}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -108,7 +118,7 @@ export default function Comparison({ revisionId, base, target, selection, regist
       if (!isActive() || unavailableObject(revisionId) || (wordAvailable.current && !wordAvailable.current())) return;
       if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229 || event.altKey || event.ctrlKey || event.metaKey) return;
       const element = event.target instanceof Element ? event.target : null;
-      if (element?.closest('input, textarea, select, button, a, form, object, embed, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="slider"]')) return;
+      if (element?.closest('input, textarea, select, button, summary, a, form, object, embed, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="slider"]')) return;
       if (document.querySelector('dialog[open], [role="dialog"]:not([aria-hidden="true"]):not([hidden]), [aria-modal="true"]:not([aria-hidden="true"]):not([hidden])')) return;
       const key = event.key.toLowerCase(); if (key !== 'j' && key !== 'k') return;
       if (window.getSelection()?.toString()) return;

@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import type { AppState, RevisionDetail } from '../shared/types';
+import { openComparisonOptions } from './comparison-ui';
 async function api<T>(request: APIRequestContext, baseURL: string, path: string, body?: unknown): Promise<T> {
   const url = new URL(`api${path}`, baseURL).href; const response = body === undefined ? await request.get(url) : await request.post(url, { data: body });
   expect(response.ok(), await response.text()).toBe(true); return response.json() as Promise<T>;
@@ -13,7 +14,7 @@ async function bodyKey(page: Page, key: string) { await page.locator('body').cli
 async function command(page: Page, value: string) { await page.getByLabel('Workspace command', { exact: true }).fill(value); await page.getByRole('button', { name: 'Run', exact: true }).click(); }
 
 test('file controls and keyboard traverse the exact union, filter navigation only and preserve same-target drafts', async ({ page, request, baseURL }, info) => {
-  await fixture(page, request, baseURL!); await page.getByLabel('Comparison mode', { exact: true }).selectOption('lines');
+  await fixture(page, request, baseURL!); await openComparisonOptions(page); await page.getByLabel('Comparison mode', { exact: true }).selectOption('lines');
   const progress = page.locator('.passage-navigation'); const file = page.getByLabel('Source file', { exact: true });
   await expect(page.locator('.comparison-file-navigation')).toContainText('File 1 of 5');
   await expect(page.getByRole('button', { name: 'Previous file', exact: true })).toBeDisabled();
@@ -43,6 +44,7 @@ test('file controls and keyboard traverse the exact union, filter navigation onl
   await expect(page.getByLabel('Base version', { exact: true })).toHaveValue('1'); await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
   await page.reload(); await expect(file).toHaveValue('removed.md'); await expect(page.getByLabel('Skip space/tab-only changes', { exact: true })).toBeChecked();
   await expect(page.getByLabel('Comparison mode', { exact: true })).toHaveValue('lines');
+  await openComparisonOptions(page);
   await page.getByRole('button', { name: 'Previous file', exact: true }).evaluate(element => element.scrollIntoView({ block: 'center' }));
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   if (info.project.name === 'mobile') expect((await page.getByRole('button', { name: 'Previous file', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
@@ -51,6 +53,11 @@ test('file controls and keyboard traverse the exact union, filter navigation onl
 
 test('comparison keyboard ignores typing, controls, dialogs, composition and modified or repeated keys', async ({ page, request, baseURL }) => {
   await fixture(page, request, baseURL!); const file = page.getByLabel('Source file', { exact: true });
+  const options = page.locator('.comparison-options'), summary = options.locator(':scope > summary'), progress = page.locator('.passage-navigation');
+  await expect(options).toHaveJSProperty('open', false); await expect(progress).toContainText('Change 1 of 3');
+  await summary.focus(); await summary.press('j'); await summary.press('Shift+J'); await summary.press('k'); await summary.press('Shift+K');
+  await expect(file).toHaveValue('first.md'); await expect(progress).toContainText('Change 1 of 3'); await expect(options).toHaveJSProperty('open', false);
+  await summary.press('Enter'); await expect(options).toHaveJSProperty('open', true); await expect(page.getByLabel('Comparison mode', { exact: true })).toBeVisible();
   const comment = page.getByRole('textbox', { name: 'Review comment', exact: true }); await comment.fill('j'); await comment.press('Shift+J'); await expect(file).toHaveValue('first.md');
   await page.evaluate(() => {
     const editable = document.createElement('div'); editable.contentEditable = 'true'; document.body.append(editable); editable.focus(); editable.dispatchEvent(new KeyboardEvent('keydown', { key: 'J', shiftKey: true, bubbles: true })); editable.remove();
@@ -94,6 +101,7 @@ test('voice file navigation keeps its new utterance while manual changes and acc
   await expect(page.getByRole('button', { name: 'Start Hands-free Listening', exact: true })).toBeVisible(); await expect(page.getByLabel('Source file', { exact: true })).toHaveValue('first.md');
   await page.getByRole('button', { name: 'Start Hands-free Listening', exact: true }).click();
   await page.getByLabel('Speak responses (on-device only)', { exact: true }).check();
+  await openComparisonOptions(page);
   await page.getByLabel('Skip space/tab-only changes', { exact: true }).check(); await expect.poll(active).toBe('');
   await command(page, 'read changes'); await expect(page.locator('.command-feedback')).toContainText('space/tab-only passage');
   await page.getByRole('button', { name: 'Next file', exact: true }).click(); await expect.poll(active).toBe('');

@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import type { RevisionDetail, SourceFile } from '../shared/types';
+import { openComparisonOptions } from './comparison-ui';
 async function api<T>(request: APIRequestContext, baseURL: string, path: string, body?: unknown): Promise<T> {
   const url = new URL(`api${path}`, baseURL).href;
   const response = body === undefined ? await request.get(url) : await request.post(url, { data: body });
@@ -11,6 +12,35 @@ async function create(request: APIRequestContext, baseURL: string, files: Source
 async function add(request: APIRequestContext, baseURL: string, id: string, expectedVersion: number, files: SourceFile[]) { await api(request, baseURL, `/revisions/${id}/versions`, { files, expectedVersion, message: `Version ${expectedVersion + 1}` }); }
 async function open(page: Page, id: string) { await page.goto(`./#${id}`); await expect(page.getByLabel('Version to inspect', { exact: true })).toBeVisible(); }
 async function command(page: Page, text: string) { await page.getByLabel('Workspace command', { exact: true }).fill(text); await page.getByRole('button', { name: 'Run', exact: true }).click(); }
+
+test('the selected literal diff leads the page while advanced comparison controls start closed', async ({ page, request, baseURL }, info) => {
+  const detail = await create(request, baseURL!, [{ path: 'motion.md', content: 'Original evidence stands.\n' }, { path: 'appendix.md', content: 'Unchanged appendix.\n' }]);
+  await add(request, baseURL!, detail.revision.id, 1, [{ path: 'motion.md', content: 'Revised evidence stands.\n' }, { path: 'appendix.md', content: 'Unchanged appendix.\n' }]);
+  await open(page, detail.revision.id);
+  const picker = page.locator('.comparison-picker'), options = picker.locator('.comparison-options'), diff = page.getByLabel('Selected file comparison', { exact: true });
+  await expect(options).toHaveJSProperty('open', false);
+  await expect(page.getByLabel('Comparison mode', { exact: true })).toBeHidden();
+  await expect(page.getByLabel('Skip space/tab-only changes', { exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Swap versions', exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Next file', exact: true })).toBeHidden();
+  for (const label of ['Base version', 'Version to inspect', 'Source file']) await expect(page.getByLabel(label, { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Changes', exact: true })).toBeVisible(); await expect(page.getByRole('button', { name: 'Source', exact: true })).toBeVisible();
+  await expect(diff.locator('del')).toContainText('Original'); await expect(diff.locator('ins')).toContainText('Revised');
+  expect(await diff.evaluate(node => { const metadata = document.querySelector('.revision-metadata'); return Boolean(metadata && node.compareDocumentPosition(metadata) & Node.DOCUMENT_POSITION_FOLLOWING); })).toBe(true);
+  expect((await diff.boundingBox())!.y).toBeLessThan((await page.locator('.revision-metadata').boundingBox())!.y);
+  expect((await diff.boundingBox())!.y).toBeLessThan((await page.locator('.access-summary').boundingBox())!.y);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  if (info.project.name === 'mobile') {
+    expect((await diff.boundingBox())!.y).toBeLessThan((await page.locator('.revision-layout > .right-column').boundingBox())!.y);
+    expect((await picker.boundingBox())!.height).toBeLessThanOrEqual(350);
+    for (const label of ['Base version', 'Version to inspect', 'Source file']) expect((await page.getByLabel(label, { exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    for (const name of ['Changes', 'Source']) expect((await page.getByRole('button', { name, exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect((await options.locator('summary').boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  }
+  await page.locator('.revision-comparison-panel').evaluate(element => element.scrollIntoView({ block: 'start' })); await expect(diff).toBeInViewport(); await page.screenshot({ path: info.outputPath('reading-first-comparison.png') });
+  await openComparisonOptions(page); await expect(page.getByLabel('Comparison mode', { exact: true })).toBeVisible();
+  await options.locator('summary').click(); await expect(options).toHaveJSProperty('open', false); await expect(diff.locator('ins')).toContainText('Revised');
+});
 
 test('arbitrary comparisons retain exact pair and file across refresh and offline reload, including removed and empty files', async ({ page, request, baseURL, context }, info) => {
   const files1 = [{ path: 'motion.md', content: 'First short claim.\nSecond old claim.\n' }, { path: 'removed.txt', content: 'Keep the removed evidence.\n' }, { path: 'empty.txt', content: '' }];
@@ -25,6 +55,7 @@ test('arbitrary comparisons retain exact pair and file across refresh and offlin
   await expect(page.getByRole('button', { name: /^Comment on line/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Changes', exact: true }).click();
   await page.getByLabel('Source file', { exact: true }).selectOption('added.txt'); await expect(page.locator('.prose-content')).toHaveText('Empty file added.');
+  await openComparisonOptions(page);
   await page.getByRole('button', { name: 'Swap versions', exact: true }).click();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
   await expect(page.getByLabel('Base version', { exact: true })).toHaveValue('2');
@@ -51,6 +82,7 @@ test('arbitrary comparisons retain exact pair and file across refresh and offlin
   await expect(page.getByLabel('Version to inspect', { exact: true }).locator('option[value="4"]')).toHaveCount(1);
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
   await expect(page.getByLabel('Base version', { exact: true })).toHaveValue('2');
+  await openComparisonOptions(page);
   await page.getByRole('button', { name: 'Show current version', exact: true }).click();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('4');
   await page.getByLabel('Base version', { exact: true }).selectOption('1');
@@ -103,12 +135,14 @@ test('missing or mismatched stored identities are explicit and large comparisons
   const download = page.waitForEvent('download'); await page.getByRole('button', { name: 'Download target source', exact: true }).click(); expect((await download).suggestedFilename()).toBe('v1-large.md');
   await page.evaluate(id => { const key = Object.keys(localStorage).find(key => key.endsWith(`:revision-comparison:${id}`))!; const selection = JSON.parse(localStorage.getItem(key)!); selection.target.contentHash = 'mismatched'; localStorage.setItem(key, JSON.stringify(selection)); }, detail.revision.id);
   await page.reload(); await expect(page.getByText('A selected immutable version is unavailable', { exact: false })).toBeVisible(); await expect(page.locator('.exact-comparison')).toHaveCount(0);
+  await openComparisonOptions(page);
   await page.getByRole('button', { name: 'Show current version', exact: true }).click(); await expect(page.getByRole('heading', { name: 'Comparison too large to render safely' })).toBeVisible();
   await page.getByRole('button', { name: 'Source', exact: true }).click(); await expect(page.getByText('This target source exceeds the inline display limit.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: /^Comment on line/ })).toHaveCount(0);
   await add(request, baseURL!, detail.revision.id, 1, [{ path: 'large.md', content: 'Small authorized target.\n' }]);
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await expect(page.getByLabel('Version to inspect', { exact: true }).locator('option[value="2"]')).toHaveCount(1);
+  await openComparisonOptions(page);
   await page.getByRole('button', { name: 'Show current version', exact: true }).click(); await page.getByRole('button', { name: 'Source', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Comparison too large to render safely' })).toBeVisible();
   await expect(page.getByLabel('Source passage text', { exact: true })).toHaveText('Small authorized target.\n');
@@ -163,6 +197,7 @@ test('saving a new version preserves the initiating source view, mode and select
   const detail = await create(request, baseURL!, [{ path: 'first.md', content: 'First file.' }, { path: 'selected.md', content: 'Keep this selected source.' }]);
   await open(page, detail.revision.id);
   await page.getByLabel('Source file', { exact: true }).selectOption('selected.md');
+  await openComparisonOptions(page);
   await page.getByLabel('Comparison mode', { exact: true }).selectOption('lines');
   await page.getByRole('button', { name: 'Source', exact: true }).click();
   await page.getByRole('button', { name: 'Edit & add version', exact: true }).click();

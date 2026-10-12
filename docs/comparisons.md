@@ -2,6 +2,14 @@
 
 These D102 comparison controls serve code revisions, papers and prose drafts. The comparison is a reading view over two immutable source snapshots. It does not change a document, record review evidence, accept a revision or invoke a model.
 
+## Reading first
+
+The comparison precedes revision management panels. Version selectors, view tabs, file selection and change navigation remain visible. **Comparison options**, closed initially, contains Words/Lines, Swap, Show Current, the target snapshot and the space/tab navigation preference. Opening or closing it changes no source or saved selection. Keyboard shortcuts ignore a focused disclosure summary, just as they ignore other controls.
+
+Word uses the same reading order and a separate **Word comparison options** disclosure. Its version pair, scope and Words/Lines controls remain visible, along with a concise text-only limitation and whether the original Word packages differ. Full projection limits, package identities, scope navigation and reader/reset actions remain available inside the disclosure. Unavailable-source, access, offline and storage warnings remain visible. This presentation does not add paragraph alignment or rendered document comparison.
+
+D102b verification passed type checking, both production builds and the full suite (1,894 total: 1,885 passed, nine optional TeX integrations skipped). The final builds passed 96 desktop/mobile browser checks across root and mounted paths, covering layout, exact pairs, drafts, narration, offline reopening, source revocation, password-session retirement and existing PDF source navigation. Four real-compiler browser cases were skipped because no isolated compiler was configured. Preview data and schema were preserved exactly. Browser mobile emulation does not qualify physical iOS/Android devices.
+
 ## Selecting what to inspect
 
 The initial view compares the current version with its immediate predecessor, or an empty base for the first version. It resolves that choice once. Thereafter the selection records the revision ID, both exact version IDs and content hashes, the file path, literal comparison mode and source/comparison view. Background refreshes and newly arriving versions do not silently replace the selected pair. Show Current is an explicit return to the latest pair.

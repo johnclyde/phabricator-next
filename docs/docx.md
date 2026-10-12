@@ -33,6 +33,8 @@ to the Word package; a selected discussion export is an explicit operation.
 
 ## Comparing Word versions
 
+The text comparison comes before revision management. The exact version pair, scope and Words/Lines controls remain visible; **Word comparison options** contains secondary navigation, reader actions and full projection/package details. A text-only limitation and package-equality notice remain visible with the redline, even when options are closed. Reader and discussion versions remain independent of the comparison pair.
+
 Choose **Compare Word Versions** to inspect text changes between two immutable
 packages. The first comparison starts from the selected reader version and its
 predecessor; a saved comparison reopens its exact pair. Choose any forward,

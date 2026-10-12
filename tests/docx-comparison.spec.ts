@@ -8,6 +8,7 @@ import type { FileDetail, FileRecord } from '../shared/files';
 import { normalizeBasePath } from '../shared/mount';
 import { notificationInput } from '../shared/notifications';
 import { authAccounts } from './auth-fixture';
+import { openComparisonOptions } from './comparison-ui';
 
 type Call = <T>(path: string, body?: unknown) => Promise<T>;
 interface FixtureApi { call: Call; package: (id: string, version: RevisionVersion) => Promise<Buffer> }
@@ -179,6 +180,7 @@ test('Word redlines compare real exact versions forward, reverse and equal witho
   await expect(panel(page)).toContainText('new wording');
   await expect(page.getByLabel('Document version').locator('option:checked')).toContainText('Version 4');
   await expect(page.getByRole('heading', { name: 'Workspace Discussion · Version 4', exact: true })).toBeVisible();
+  await openComparisonOptions(page, true);
   await page.getByRole('button', { name: 'Swap Word versions', exact: true }).click(); await expectPair(page, 2, 1);
   await expect.poll(() => changedText(page)).toEqual({ removed: 'revised', added: 'original' });
   await choosePair(page, 2, 2); await expect.poll(() => changedText(page)).toEqual({ removed: '', added: '' });
@@ -187,7 +189,7 @@ test('Word redlines compare real exact versions forward, reverse and equal witho
   await expect(panel(page)).toContainText(/packages differ|different.*package|package.*differ/i);
   await expect(panel(page)).toContainText(/projection|projected/i);
   await expect(panel(page).getByRole('button', { name: /^Comment on line/ })).toHaveCount(0);
-  await choosePair(page, 2, 1); await page.getByRole('button', { name: 'Read compared Word version', exact: true }).click();
+  await choosePair(page, 2, 1); await openComparisonOptions(page, true); await page.getByRole('button', { name: 'Read compared Word version', exact: true }).click();
   await expect(panel(page)).toHaveCount(0);
   await expect(page.getByLabel('Document version')).toHaveValue(data.v1.id);
   await expect(page.getByLabel('Word document text')).toContainText('The original result is clear.');
@@ -197,6 +199,61 @@ test('Word redlines compare real exact versions forward, reverse and equal witho
   const after = await data.api.call<RevisionDetail>(`/revisions/${data.id}`);
   expect(after.versions).toEqual(four.versions); expect(after.comments).toEqual(four.comments); expect(after.reviews).toEqual(four.reviews);
   expect(after.versions.every(version => version.files.length === 0)).toBe(true);
+  onlyReadMarks(writes, data.id);
+});
+
+test('Word redlines put readable changes before advanced options without changing exact selection', async ({ page, request, baseURL }, info) => {
+  const data = await fixture(localApi(request, baseURL!));
+  const writes: Request[] = []; page.on('request', row => { if (row.method() !== 'GET') writes.push(row); });
+  await page.goto(`./#${data.id}`); await openComparison(page);
+  await expect(panel(page).getByRole('heading', { name: 'Compare Word Versions', exact: true })).toBeFocused();
+  await choosePair(page, 1, 3);
+  const comparison = panel(page), options = comparison.locator('.docx-comparison-options'), summary = options.locator(':scope > summary');
+  const redline = comparison.getByLabel('Selected Word scope comparison', { exact: true }), navigation = comparison.locator('.passage-navigation');
+  await expect(options).toHaveJSProperty('open', false);
+  await expect(comparison.getByRole('button', { name: 'Read compared Word version', exact: true })).toBeHidden();
+  await expect(redline).toBeVisible();
+  await expect.poll(() => changedText(page)).toEqual({ removed: 'originalUnchanged', added: 'revisedUpdated' });
+  await expect(navigation).toContainText('Change 1 of 2');
+  const limitation = comparison.locator('.docx-comparison-limitation');
+  await expect(limitation).toBeVisible();
+  await expect(limitation).toContainText('formatting and some tracked changes are omitted');
+  await expect(limitation).toContainText('Word files differ, even if their displayed text matches.');
+  await expectPair(page, 1, 3);
+  for (const control of [
+    page.getByLabel('Base Word version', { exact: true }), page.getByLabel('Word version to compare', { exact: true }),
+    page.getByLabel('Word comparison scope', { exact: true }), page.getByLabel('Word comparison mode', { exact: true }),
+    comparison.getByRole('button', { name: 'Close Word comparison', exact: true }),
+    comparison.getByRole('button', { name: 'Next change', exact: true }), summary,
+  ]) {
+    await expect(control).toBeVisible(); const box = await control.boundingBox();
+    expect(box).not.toBeNull(); if (info.project.name === 'mobile') expect(box!.height).toBeGreaterThanOrEqual(44);
+  }
+  const top = (await comparison.boundingBox())!.y, textTop = (await redline.boundingBox())!.y;
+  if (info.project.name === 'mobile') expect(textTop - top).toBeLessThanOrEqual(550);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await comparison.evaluate(element => element.scrollIntoView({ block: 'start' }));
+  await expect(redline).toBeInViewport();
+  await page.screenshot({ path: info.outputPath('word-reading-first-viewport.png') });
+
+  const savedSelection = () => page.evaluate(id => {
+    const key = Object.keys(localStorage).find(key => key.endsWith(`:docx-comparison:${id}`));
+    return key ? localStorage.getItem(key) : null;
+  }, data.id);
+  const before = await savedSelection(); expect(before).toBeTruthy();
+  await summary.focus(); await summary.press('j');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(summary).toBeFocused(); await expect(navigation).toContainText('Change 1 of 2');
+  await expect(options).toHaveJSProperty('open', false);
+  await summary.press('Enter'); await expect(options).toHaveJSProperty('open', true);
+  await expectPair(page, 1, 3); expect(await savedSelection()).toBe(before);
+  await expect(page.getByLabel('Word comparison scope', { exact: true })).toHaveValue('document');
+  await expect(page.getByLabel('Word comparison mode', { exact: true })).toHaveValue('words');
+  await expect(comparison.getByRole('button', { name: 'Read compared Word version', exact: true })).toBeVisible();
+  await expect(comparison.getByLabel('Skip space/tab-only changes', { exact: true })).toBeVisible();
+  await expect.poll(() => changedText(page)).toEqual({ removed: 'originalUnchanged', added: 'revisedUpdated' });
+  const after = await data.api.call<RevisionDetail>(`/revisions/${data.id}`);
+  expect(after.versions).toEqual(data.detail.versions); expect(after.comments).toEqual(data.detail.comments); expect(after.reviews).toEqual(data.detail.reviews);
   onlyReadMarks(writes, data.id);
 });
 
@@ -304,7 +361,7 @@ test('local Word pairs survive a new head and offline reopening while invalid st
   await page.reload(); await openComparison(page);
   await expect(panel(page)).toContainText(/unavailable|does not match|mismatch/i);
   await expect(panel(page).locator('ins, del')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Compare selected reader version', exact: true }).click();
+  await openComparisonOptions(page, true); await page.getByRole('button', { name: 'Compare selected reader version', exact: true }).click();
   await expectPair(page, 2, 3);
 });
 

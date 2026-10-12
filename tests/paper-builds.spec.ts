@@ -6,6 +6,7 @@ import type { PaperBuild, PaperBuildInput, PaperBuildPage, PaperSyncTeX } from '
 import type { ObjectAccess } from '../shared/policy';
 import { normalizeBasePath } from '../shared/mount';
 import { authAccounts } from './auth-fixture';
+import { openComparisonOptions } from './comparison-ui';
 
 const toolchain = { engine: 'UI fixture engine', image: 'fixture@sha256:' + 'a'.repeat(64), bundle: 'b'.repeat(64) }, toolchainId = 'c'.repeat(64);
 async function api<T>(request: APIRequestContext, baseURL: string, path: string, body?: unknown): Promise<T> { const response = body === undefined ? await request.get(new URL(`api${path}`, baseURL).href) : await request.post(new URL(`api${path}`, baseURL).href, { data: body }); expect(response.ok(), await response.text()).toBe(true); return response.json() as Promise<T>; }
@@ -41,7 +42,7 @@ test('lost compile responses retain immutable source and compiler pins across re
   await open(page, id); const panel = page.locator('.paper-builds'); await panel.getByLabel('TeX entrypoint').selectOption('chapter.tex');
   await panel.getByRole('button', { name: 'Compile Version 1', exact: true }).click(); await expect(panel.getByRole('alert')).toContainText('outcome is unknown');
   await api(request, baseURL!, `/revisions/${id}/versions`, { expectedVersion: 1, message: 'A later source version', files: [{ path: 'main.tex', content: 'Later source must not replace the submitted compilation.' }] });
-  await page.reload(); await expect(page.getByLabel('Version to inspect').getByRole('option', { name: 'Version 2 · current', exact: true })).toHaveCount(1); await page.getByRole('button', { name: 'Show current version', exact: true }).click(); await expect(panel.getByRole('button', { name: 'Compile Version 2', exact: true })).toBeVisible();
+  await page.reload(); await expect(page.getByLabel('Version to inspect').getByRole('option', { name: 'Version 2 · current', exact: true })).toHaveCount(1); await openComparisonOptions(page); await page.getByRole('button', { name: 'Show current version', exact: true }).click(); await expect(panel.getByRole('button', { name: 'Compile Version 2', exact: true })).toBeVisible();
   await context.setOffline(true); await expect(panel.getByRole('button', { name: 'Retry Exact Compile Request' })).toBeDisabled(); await context.setOffline(false); await expect(panel.getByRole('button', { name: 'Retry Exact Compile Request' })).toBeEnabled(); expect(sent).toHaveLength(1);
   await panel.getByRole('button', { name: 'Retry Exact Compile Request' }).click(); await expect(panel.getByRole('region', { name: 'Unconfirmed paper build requests' })).toHaveCount(0);
   expect(sent).toHaveLength(2); expect(sent[1]).toEqual(sent[0]); expect(sent[0]!.input).toEqual({ versionId: detail.versions[0]!.id, contentHash: detail.versions[0]!.contentHash, entrypoint: 'chapter.tex', toolchainId }); expect(sent[0]!.key).toBeTruthy();
