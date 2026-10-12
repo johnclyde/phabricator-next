@@ -10,6 +10,7 @@ export interface ComparisonVoiceSnapshot {
   result: FileComparison;
   passageIndex: number;
   skipSpaceTabOnly?: boolean;
+  word?: { scopeLabel: string; basePackageSha256: string | null; targetPackageSha256: string };
 }
 
 export const COMPARISON_SPEECH_LIMIT = 2_200;
@@ -68,21 +69,23 @@ function passage(result: ReadyComparison, index: number, position: number, count
 export function comparisonNarration(snapshot: ComparisonVoiceSnapshot, scope: 'all' | 'current' = 'all'): string {
   if (snapshot.filePath !== snapshot.result.filePath || !/^[DPL][1-9]\d*$/.test(snapshot.revisionId)
     || !Number.isSafeInteger(snapshot.target.number) || snapshot.target.number < 1
-    || (snapshot.base !== null && (!Number.isSafeInteger(snapshot.base.number) || snapshot.base.number < 1))) {
+    || (snapshot.base !== null && (!Number.isSafeInteger(snapshot.base.number) || snapshot.base.number < 1))
+    || (snapshot.word && (!['document', 'footnotes', 'endnotes'].includes(snapshot.filePath) || !snapshot.word.scopeLabel || !/^[a-f0-9]{64}$/.test(snapshot.word.targetPackageSha256) || (snapshot.base === null ? snapshot.word.basePackageSha256 !== null : !/^[a-f0-9]{64}$/.test(snapshot.word.basePackageSha256 || ''))))) {
     return 'The selected comparison is unavailable. Choose the versions and file again.';
   }
   const filename = clip(snapshot.filePath, 160);
-  const header = `${snapshot.revisionId}, ${snapshot.base ? `version ${snapshot.base.number}` : 'empty base'} to version ${snapshot.target.number}, file ${filename.text}${filename.shortened ? ' (filename shortened)' : ''}. `;
+  const versions = `${snapshot.revisionId}, ${snapshot.base ? `version ${snapshot.base.number}` : 'empty base'} to version ${snapshot.target.number}`;
+  const header = snapshot.word ? `${versions}, Word projected text, ${clip(snapshot.word.scopeLabel, 160).text}. ` : `${versions}, file ${filename.text}${filename.shortened ? ' (filename shortened)' : ''}. `;
   const result = snapshot.result;
   const filtered = snapshot.skipSpaceTabOnly === true;
   const filterNotice = filtered ? 'Space and tab-only changes are skipped for navigation. All literal changes remain visible. ' : '';
   let body: string;
   if (result.status === 'too_large') {
-    body = 'This file exceeds the comparison limit. No changes were summarized. Read or download the selected source versions.';
+    body = snapshot.word ? 'This projected scope exceeds the comparison limit. No changes were summarized. Read the selected projected text or download the exact Word packages.' : 'This file exceeds the comparison limit. No changes were summarized. Read or download the selected source versions.';
   } else if (!result.passages.length) {
-    body = result.fileChange === 'added' ? 'Empty file added.' : result.fileChange === 'removed' ? 'Empty file deleted.' : 'No text changes in this file.';
+    body = snapshot.word ? result.fileChange === 'added' ? 'Empty projected scope added.' : result.fileChange === 'removed' ? 'Empty projected scope removed.' : 'No projected text changes in this scope. This does not establish Word package equality.' : result.fileChange === 'added' ? 'Empty file added.' : result.fileChange === 'removed' ? 'Empty file deleted.' : 'No text changes in this file.';
   } else {
-    const fileChange = result.fileChange === 'added' ? 'File added. ' : result.fileChange === 'removed' ? 'File deleted. ' : '';
+    const fileChange = result.fileChange === 'added' ? snapshot.word ? 'Projected scope added. ' : 'File added. ' : result.fileChange === 'removed' ? snapshot.word ? 'Projected scope removed. ' : 'File deleted. ' : '';
     const navigation = comparisonPassages(result, filtered);
     const position = navigation.indexes.indexOf(snapshot.passageIndex);
     const counts = filtered ? `Navigating ${navigation.indexes.length} of ${result.passages.length} changed ${result.passages.length === 1 ? 'passage' : 'passages'}. ${navigation.skipped} space/tab-only ${navigation.skipped === 1 ? 'passage' : 'passages'} skipped. ` : '';
@@ -93,12 +96,12 @@ export function comparisonNarration(snapshot: ComparisonVoiceSnapshot, scope: 'a
         ? passage(result, snapshot.passageIndex, position, navigation.indexes.length, filtered) : 'Select a changed passage first.');
     } else {
       body = fileChange + (filtered ? counts : `${result.passages.length} changed ${result.passages.length === 1 ? 'passage' : 'passages'}. `)
-        + (navigation.indexes.length > PASSAGE_LIMIT ? `Reading the first ${PASSAGE_LIMIT}. Use next change to continue through the selected file. ` : '')
+        + (navigation.indexes.length > PASSAGE_LIMIT ? `Reading the first ${PASSAGE_LIMIT}. Use next change to continue through the selected ${snapshot.word ? 'Word scope' : 'file'}. ` : '')
         + navigation.indexes.slice(0, PASSAGE_LIMIT).map((index, ordinal) => passage(result, index, ordinal, navigation.indexes.length, filtered)).join(' ');
     }
   }
   const notice = ' … Reading stopped at the speech length limit. Use read current change to hear one passage.';
-  const narration = header + filterNotice + body;
+  const narration = header + filterNotice + body + (snapshot.word ? ' This stored projection has limited tracked-change coverage; it is not fully accepted Word text.' : '');
   const bounded = clip(narration, COMPARISON_SPEECH_LIMIT - Array.from(notice).length);
   return bounded.shortened ? bounded.text + notice : narration;
 }

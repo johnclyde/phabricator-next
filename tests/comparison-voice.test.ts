@@ -111,3 +111,31 @@ test('filtered narration retains line-ending and non-ASCII whitespace changes an
   assert.match(huge, /exceeds the comparison limit/);
   assert.doesNotMatch(huge, /0 of|No changed passages remain/);
 });
+
+test('Word narration names exact projected scope and retains package identity limits', () => {
+  const word = { scopeLabel: 'Footnotes', basePackageSha256: 'a'.repeat(64), targetPackageSha256: 'b'.repeat(64) };
+  const selected = { ...snapshot('[Footnote ID: footnote:2]\nOld claim', '[Footnote ID: footnote:2]\nNew claim', 'footnotes'), word };
+  const spoken = comparisonNarration(selected);
+  assert.match(spoken, /^L3, version 1 to version 3, Word projected text, Footnotes\./);
+  assert.match(spoken, /Removed text: Old.*Added text: New/s);
+  assert.match(spoken, /limited tracked-change coverage; it is not fully accepted Word text/);
+  assert.doesNotMatch(spoken, /file footnotes|packages match|package identical/);
+  const equal = comparisonNarration({ ...snapshot('same', 'same', 'footnotes'), word });
+  assert.match(equal, /No projected text changes in this scope\. This does not establish Word package equality/);
+  assert.doesNotMatch(equal, /No text changes in this file/);
+  assert.equal(comparisonNarration({ ...selected, word: { ...word, targetPackageSha256: 'wrong' } }), 'The selected comparison is unavailable. Choose the versions and file again.');
+  assert.equal(comparisonNarration({ ...selected, filePath: 'motion.md' }), 'The selected comparison is unavailable. Choose the versions and file again.');
+});
+
+test('Word narration distinguishes absent scopes and bounded failures without projected source leaks', () => {
+  const word = { scopeLabel: 'Endnotes', basePackageSha256: 'a'.repeat(64), targetPackageSha256: 'b'.repeat(64) };
+  assert.match(comparisonNarration({ ...snapshot(null, '', 'endnotes'), word }), /Empty projected scope added/);
+  assert.match(comparisonNarration({ ...snapshot('', null, 'endnotes'), word }), /Empty projected scope removed/);
+  assert.match(comparisonNarration({ ...snapshot('Old note', null, 'endnotes'), word }), /Projected scope removed\..*Removed text: Old note/s);
+  const tooLarge = comparisonNarration({ ...snapshot('confidential'.repeat(20_000), 'new', 'endnotes'), word });
+  assert.match(tooLarge, /projected scope exceeds the comparison limit/);
+  assert.doesNotMatch(tooLarge, /confidential|No projected text changes/);
+  const bounded = comparisonNarration({ ...snapshot('\u2003\n'.repeat(100), '\u00a0\r'.repeat(100), 'endnotes'), word });
+  assert.ok(Array.from(bounded).length <= COMPARISON_SPEECH_LIMIT);
+  assert.match(bounded, /speech length limit/);
+});

@@ -31,6 +31,59 @@ retains the earlier source and discussion. Application discussion is separate
 from imported Word comments. Editing never implicitly adds those discussions
 to the Word package; a selected discussion export is an explicit operation.
 
+## Comparing Word versions
+
+Choose **Compare Word Versions** to inspect text changes between two immutable
+packages. The first comparison starts from the selected reader version and its
+predecessor; a saved comparison reopens its exact pair. Choose any forward,
+reverse or equal pair, or an empty base. New document versions do not move the
+chosen pair. **Read compared Word version** explicitly changes the reader and
+its discussion context; comparison controls alone leave them on their original
+version.
+
+The main document, footnotes and endnotes are separate scopes. Word and line
+differences retain literal whitespace. The optional space/tab-only navigation
+filter skips those passages without hiding their text. Touch buttons, `j`/`k`
+and read-only voice commands share the current change cursor; `Shift+J`/`Shift+K`
+and next/previous-file commands move between Word scopes. Narration identifies
+the selected versions and scope; its context also pins the package hashes.
+Changing that context, closing
+the comparison, or losing source/session access cancels it.
+
+This compares the **stored text projection**, not Word's complete accepted or
+final document. It traverses the full stored blocks and runs, excluding runs
+marked deleted or move-from and retaining ordinary, inserted and move-to runs.
+It never uses the reader's visible slice or `block.text`, which includes deleted
+text. Projection v1 does not fully represent revisions around whole paragraphs
+or rows, paragraph-mark revisions, fields, objects, formatting or pagination.
+Imported comment bodies are outside these scopes. Existing parser warnings
+remain available alongside the comparison.
+
+One LF separates stored blocks; two LFs separate notes. Note-ID headers and
+note-reference markers are synthetic and explicitly disclosed. IDs and stored
+order are compared literally; this does not infer note renumbering, semantic
+matching, paragraph moves or table structure. Comparison offsets and line
+numbers refer to this synthetic text and cannot create passage comments or
+edits. Original DOCX packages, source hashes, discussion anchors and acceptance
+evidence remain unchanged. Equal projected text does not establish equal
+packages; the UI reports package digest equality separately.
+
+The portable projection adapter bounds total traversal to 8,000 blocks, 40,000
+runs, 4,000 notes, 200 warnings, two million source UTF-16 code units, and two
+million metadata code units. Metadata strings are individually limited to 4,000
+code units. Combined output across the scopes is limited to 200,000 code units.
+Malformed, unsupported or oversized projections produce no partial comparison;
+the existing [bounded comparison limits](comparisons.md) apply afterward.
+
+Saved choices contain only immutable version IDs, content hashes, package hashes
+and presentation preferences. Missing or mismatched pins show an unavailable
+state rather than selecting a newer version. Local mode can reopen cached,
+authorized source offline; password mode keeps it in the verified session's
+memory. Historical source File access remains a condition of viewing every
+derived version. Losing that access clears the saved comparison as well as
+the source cache. Comparison is read-only: it never queues a mutation, invokes
+AI, accepts imported changes or exports a new package.
+
 ## Passage discussion and Word comment export
 
 Choose **Discuss passage** in the main document to discuss a supported
@@ -234,6 +287,27 @@ rather than recording evidence for an empty text snapshot. They need explicit
 projection scope and coverage before being enabled. Broader Word/LibreOffice
 interoperability fixtures and independent schema validation remain required for
 full interchange parity.
+
+## D105c verification
+
+The comparison core is exercised with real DOCX import and tracked-edit
+fixtures, exact run/Unicode/whitespace reconstruction, note identities,
+projection and diff bounds, arbitrary immutable pairs and invalid pins.
+Client tests cover source-free persistence, historical File revocation,
+unrelated draft preservation and password-session retirement. Narration tests
+cover Word scope labels, absent scopes, bounds and limited projection coverage.
+
+`npm run check`, `npm test` and root/subpath production builds pass. The full
+suite has 1,604 tests: 1,595 pass and nine optional TeX integration cases skip
+without their isolated compiler configuration. Browser verification covers 128
+cases across desktop/mobile and root/subpath hosting: 28 new Word comparisons
+and 100 existing comparison, navigation, Word editing/discussion and voice
+regressions. An existing comment test exposed a read-after-click assertion
+race; after waiting for its visible saved thread, the unchanged exact-anchor
+assertion passed on all four configurations. Representative layouts were
+inspected on both viewports and hosting paths. Installing the tested preview
+preserved schema 34, every existing record and its row identity, foreign keys,
+and the prior health/document responses; served asset digests match the build.
 
 The package model follows [ECMA-376](https://ecma-international.org/publications-and-standards/standards/ecma-376/)
 and Microsoft's descriptions of [WordprocessingML structure](https://learn.microsoft.com/en-us/office/open-xml/word/structure-of-a-wordprocessingml-document),

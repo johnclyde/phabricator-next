@@ -1064,3 +1064,27 @@
  .remarkup-heading-link { min-width: 44px; }
  .remarkup-heading-row > :is(h2,h3,h4,h5,h6) { scroll-margin-top: 124px; }
 }
+
+/* Immutable Word projected-text comparisons share literal diff navigation. */
+.docx-comparison { min-width: 0; scroll-margin-top: 100px; }
+.docx-comparison > .panel-heading { flex-wrap: wrap; }
+.docx-comparison > .panel-heading h2 { white-space: normal; }
+.docx-comparison-picker { display: flex; flex-wrap: wrap; gap: 12px; }
+.docx-comparison-picker label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.docx-comparison-picker select { max-width: 100%; }
+.docx-comparison-actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.docx-comparison-coverage { padding: 14px 18px; background: #fff8e5; border-bottom: 1px solid #e8d9ae; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.docx-comparison-coverage > details + details, .docx-comparison-coverage > p, .docx-comparison-coverage > details > p { margin-top: 12px; }
+.docx-comparison-coverage summary { font-weight: 600; cursor: pointer; }
+.docx-comparison-coverage ul { padding-left: 20px; margin-block: 8px; }
+.docx-comparison-coverage code { white-space: normal; }
+@media(max-width:600px) {
+  .docx-comparison .button, .docx-comparison select, .docx-comparison summary { min-height: 44px; }
+  .docx-comparison-picker label { flex: 1 1 160px; flex-direction: column; align-items: stretch; font-size: 12px; }
+  .docx-comparison-picker select { width: 100%; max-width: 100%; font-size: 16px; }
+  .docx-comparison .comparison-file-navigation { flex-wrap: wrap; gap: 8px; }
+  .docx-comparison .comparison-file-navigation span { order: -1; width: 100%; }
+  .docx-comparison .comparison-file-navigation button { flex: 1 1 120px; }
+  .docx-comparison-actions, .docx-comparison-coverage { padding: 12px; }
+  .docx-comparison .passage-navigation { position: sticky; top: 0; z-index: 1; background: #f7f9fb; }
+}

@@ -274,10 +274,16 @@ also render in bundled LibreOffice. D105b adds immutable main-story passage
 threads and explicit selected-thread exports as classic Word comments, with
 complete attributed replies/status and exact source/thread/access checks.
 Original packages remain unchanged; generated exports preserve unrelated
-parts and existing annotations. This is partial interchange support: general
+parts and existing annotations. D105c adds literal word/line comparisons of
+exact immutable Word versions, with separate document, footnote and endnote
+scopes, touch/keyboard/voice navigation and authorized offline pairs. Stored
+run projection limits and synthetic note markers remain explicit; projected
+text equality never certifies package equality. Original discussion anchors
+and evidence remain unchanged. This is partial interchange support: general
 rich edits, imported-comment editing, modern Word thread semantics, broader
-anchors, semantic document comparisons, projection-aware automated review and
-broader independent validation remain open.
+anchors, complete accepted/final Word text, semantic or formatting/page
+comparisons, projection-aware automated review and broader independent
+validation remain open.
 
 | Workflow | Planned acceptance requirement |
 | --- | --- |
