@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommand } from '../client/voice.ts';
 
+test('Active revision commands open responsibility queues without making decisions', () => {
+  for (const [noun, kind] of [['code revisions', 'code'], ['revisions', 'code'], ['reviews', 'code'], ['papers', 'paper'], ['drafts', 'document'], ['documents', 'document']] as const) {
+    for (const command of [`Show active ${noun}.`, `open the active ${noun}`, `go to active ${noun}`]) assert.deepEqual(parseCommand(command), { type: 'revisionActive', kind });
+  }
+  for (const command of ['accept active papers', 'show active papers and accept them', 'land active revisions', 'show Alice active papers', 'show active papers in project Research']) assert.equal(parseCommand(command).type, 'unknown');
+  assert.deepEqual(parseCommand('show active projects'), { type: 'projectFilter', value: 'active' });
+  assert.deepEqual(parseCommand('show papers view Active'), { type: 'revisionView', view: 'papers', name: 'Active' });
+});
+
 test('voice can navigate directly to an immutable-review object or wiki document', () => {
   for (const [command, id] of [['Open W 12.', 'W12'], ['show p2', 'P2'], ['go to L3', 'L3'], ['open code revision 4', 'D4'], ['open wiki page 5', 'W5'], ['show the paper 6', 'P6'], ['open draft 7', 'L7'], ['open R 12', 'R12'], ['show repository 3', 'R3']]) {
     assert.deepEqual(parseCommand(command), { type: 'openObject', id });

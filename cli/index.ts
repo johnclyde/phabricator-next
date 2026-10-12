@@ -31,6 +31,7 @@ import { taskNotificationsCommand } from './task-notifications';
 import { revisionMetadataCommand } from './revision-metadata';
 import { reviewDraftsCommand } from './review-drafts';
 import { revisionViewsCommand } from './revision-views';
+import { revisionActiveCommand } from './revision-active';
 import { wikiCommand } from './wiki';
 import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
@@ -43,6 +44,7 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] [--project ID|NAME ...] FILE...
   npm run arc -- diff --revision P2 --message "Changes" FILE...
   npm run arc -- list
+  npm run arc -- active-revisions --kind code|paper|document [--query TEXT]
   npm run arc -- revision-views [RV1]
   npm run arc -- open-revision-view RV1
   npm run arc -- create-revision-view --intent REQUEST.json [--request-id KEY]
@@ -356,6 +358,7 @@ async function main() {
   if (await taskNotificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionMetadataCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await reviewDraftsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await revisionActiveCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionViewsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await citationCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await pasteCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

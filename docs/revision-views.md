@@ -1,5 +1,7 @@
 # Personal revision views
 
+[Active revisions](revision-active.md) provide a separate author/reviewer responsibility queue. Opening Active preserves these saved filters and pending requests.
+
 Named revision views save your own filters across devices for code, papers and documents. A view stores a query, not a copy of revision content or permission to read it. Each opening evaluates the current authorized workspace snapshot. Offline openings use the snapshot already available to the current workspace session.
 
 ## Filters and ownership

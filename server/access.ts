@@ -11,6 +11,7 @@ import type { RevisionLifecycleInput, RevisionLifecycleSnapshot, RevisionLifecyc
 import { revisionLifecycleInputHash } from './revision-lifecycle.ts';
 import { revisionReviewerPermission, type RevisionReviewerInput, type RevisionReviewerSnapshot, type RevisionReviewerHistory } from '../shared/revision-reviewers.ts';
 import { revisionReviewerInputHash } from './revision-reviewers.ts';
+import { validateRevisionActiveSnapshot, type RevisionActiveItem } from '../shared/revision-active.ts';
 import type { RevisionMetadataInput, RevisionMetadataSnapshot, RevisionMetadataHistory } from '../shared/revision-metadata.ts';
 import { revisionSubscriptionInputHash } from './revision-subscriptions.ts';
 import type { RevisionSubscriptionInput, RevisionSubscriptionSnapshot, RevisionSubscriptionHistory, RevisionMuteHistory, RevisionSubscriptionPerson } from '../shared/revision-subscriptions.ts';
@@ -70,6 +71,20 @@ export class AccessLayer {
     state.accessEpoch = this.policies.epoch();
     state.canCreate = this.context.scopes.includes('write');
     state.currentPrincipalId = this.principal;
+    state.revisionActive = {
+      format: 'revision-active.v1', principalId: this.principal, accessEpoch: state.accessEpoch, closeOnAccept: this.store.revisionLifecycle.config.closeOnAccept,
+      items: state.revisions.map((revision): RevisionActiveItem => {
+        // This runs only after View filtering, inside the state read transaction.
+        // Keep the projection scalar: other reviewers and review bodies stay out.
+        const author = this.store.revisionAuthorship.snapshot(revision.id), lifecycle = this.store.revisionLifecycle.state(revision.id), reviewers = this.store.revisionReviewers.state(revision.id);
+        if (author.reviewerVersion !== reviewers.version || author.lifecycleVersion !== lifecycle.version || author.status !== lifecycle.status || author.closeOnAccept !== this.store.revisionLifecycle.config.closeOnAccept) throw new HttpError(409, 'Active revision state changed. Reload the workspace.', 'REVISION_ACTIVE_CHANGED');
+        const member = reviewers.members.find(person => person.principalId === this.principal), decision = member?.decision;
+        return { revisionId: revision.id, head: author.head, status: lifecycle.status, authorVersion: author.authorship.version, lifecycleVersion: lifecycle.version, reviewerVersion: reviewers.version,
+          isAuthor: author.authorship.author?.principalId === this.principal, reviewerStatus: member?.status ?? null,
+          decisionCurrent: decision ? decision.invalidated === null && decision.head.versionId === author.head.versionId && decision.head.number === author.head.number && decision.head.contentHash === author.head.contentHash : null };
+      }),
+    };
+    if (!validateRevisionActiveSnapshot(state.revisionActive, state)) throw new HttpError(409, 'Active revision state changed. Reload the workspace.', 'REVISION_ACTIVE_CHANGED');
     state.followingRevisionIds = state.revisions.filter(revision => this.store.revisionSubscriptions.effective(revision.id, this.principal)).map(revision => revision.id);
     state.followingTaskIds = state.tasks.filter(task => this.store.subscriptionStatus(task.id, this.principal).subscribed).map(task => task.id);
     state.joinedProjectIds = state.projects.filter(project => this.store.projectPreferences(project.id, this.principal).membership.active).map(project => project.id);

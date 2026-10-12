@@ -36,6 +36,9 @@ const notificationLifetimes = new WeakMap<WorkspaceSession, NotificationLifetime
 // Informational responses can advance the observed epoch without supplying the
 // workspace's visibility and capability snapshot needed by a subsequent write.
 const verifiedAuthorityEpochs = new WeakMap<WorkspaceSession, number>();
+// Access epochs do not advance when content or responsibility changes. An older
+// aggregate response must not revoke objects learned from a newer state read.
+const stateReadOrders = new WeakMap<WorkspaceSession, { issued: number; applied: number }>();
 interface DraftRetention { baseline: string | null; latest: string; generation: number }
 const draftRetentions = new WeakMap<WorkspaceSession, Map<string, DraftRetention>>();
 // Only a successful cleanup by this session permits an already mounted editor
@@ -866,6 +869,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     // Session invalidation still aborts it; object invalidation must allow the receipt.
     if (objectId && !authorMutation && !ownershipMutation && !projectMutation && !boardMutation) session.objectControllers.set(controller, objectId);
     const headers: Record<string, string> = {};
+    let stateOrder = stateReadOrders.get(session);
+    if (path === '/api/state' && !stateOrder) { stateOrder = { issued: 0, applied: 0 }; stateReadOrders.set(session, stateOrder); }
+    const stateTicket = path === '/api/state' ? ++stateOrder!.issued : null;
     if (session.state.sessionContext) headers['X-Session-Context'] = session.state.sessionContext;
     if (options) {
       headers['Content-Type'] = 'application/json'; headers['Idempotency-Key'] = options.id || crypto.randomUUID();
@@ -876,6 +882,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       assertSession(session);
       if (response.status === 401) { lockSession('Your session ended or changed in another tab. Sign in again.'); throw new RequestError('Your session ended. Sign in again.', 401); }
       const data: unknown = await response.json();
+      if (stateTicket !== null && stateTicket < stateOrder!.applied) throw new RequestError('A newer workspace snapshot has already loaded.', 409, 'STATE_SUPERSEDED');
       if (response.ok) rememberRevisionSources(data);
       if (response.ok && bulkMove && !(data && typeof data === 'object' && 'projectId' in data && data.projectId === objectId && 'saved' in data && data.saved === true && 'refreshRequired' in data && data.refreshRequired === true && 'boardVersion' in data && Number.isSafeInteger(data.boardVersion) && Number(data.boardVersion) > 0 && 'destinationProjectId' in data && data.destinationProjectId === bulkDestination && 'destinationBoardVersion' in data && Number.isSafeInteger(data.destinationBoardVersion) && Number(data.destinationBoardVersion) > 0)) throw new RequestError('The server returned an unrecognized move receipt. Keep the submitted request and retry it exactly to confirm the outcome.', 502, 'INVALID_RECEIPT');
       if (response.ok && boardMutation && data && typeof data === 'object' && 'projectId' in data && data.projectId === objectId && 'saved' in data && data.saved === true && 'refreshRequired' in data && data.refreshRequired === true && 'boardVersion' in data && Number.isSafeInteger(data.boardVersion) && Number(data.boardVersion) >= 0) {
@@ -922,6 +929,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       }
       if (path === '/api/state' && response.ok) reconcileStackMetadata(data);
       assertObject();
+      if (stateTicket !== null) stateOrder!.applied = stateTicket;
       return data as T;
     } catch (error) { assertObject(); throw error; }
     finally { notifications?.controllers.delete(controller); stacks?.controllers.delete(controller); session.controllers.delete(controller); session.objectControllers.delete(controller); session.taskReadControllers.delete(controller); }

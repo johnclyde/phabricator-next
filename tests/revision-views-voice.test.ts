@@ -18,5 +18,5 @@ test('authored navigation remains distinct from following, object navigation and
   assert.deepEqual(parseCommand('show papers I follow'), { type: 'revisionFollowingFilter', view: 'papers', following: true });
   assert.deepEqual(parseCommand('show my tasks'), { type: 'taskFilter', value: 'mine' });
   assert.deepEqual(parseCommand('open paper 12'), { type: 'openObject', id: 'P12' });
-  assert.deepEqual(parseCommand('show active papers'), { type: 'unknown', text: 'show active papers' });
+  assert.deepEqual(parseCommand('show active papers'), { type: 'revisionActive', kind: 'paper' });
 });
