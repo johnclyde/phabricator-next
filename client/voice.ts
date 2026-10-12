@@ -13,11 +13,23 @@ export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' |
 export type FindingVoiceAction = 'findings' | 'currentFinding' | 'nextFinding' | 'previousFinding' | 'findingSource';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
-export type VoiceCommand = { type: 'notificationFilter'; filter: 'all' | 'unread' | 'read' } | { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: FindingVoiceAction } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: TranscriptEditVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'revisionView'; view: 'reviews' | 'papers' | 'drafts'; name: string } | { type: 'revisionAuthoredFilter'; view: 'reviews' | 'papers' | 'drafts'; authored: boolean } | { type: 'notificationFilter'; filter: 'all' | 'unread' | 'read' } | { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: FindingVoiceAction } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: TranscriptEditVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
   const aliases: Record<string, WorkspaceView> = { audio: 'audio', 'audio inbox': 'audio', recordings: 'audio', home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files', pastes: 'pastes', paste: 'pastes' };
+  const revisionView = original.match(/^(?:open|show|go to) (?:the )?(code revision|code revisions|revision|revisions|review|reviews|paper|papers|draft|drafts|document|documents) (?:saved )?view (.+)$/i);
+  if (revisionView) {
+    const noun = revisionView[1]!.toLowerCase();
+    const name = revisionView[2]!.trim().replace(/^"([\s\S]*)"$/, '$1');
+    if (name && name.length <= 80 && !/[\u0000-\u001f\u007f]/u.test(name)) return { type: 'revisionView', view: /^papers?$/.test(noun) ? 'papers' : /^(?:drafts?|documents?)$/.test(noun) ? 'drafts' : 'reviews', name };
+    return { type: 'unknown', text: original };
+  }
+  const authored = text.match(/^(?:show|open) (?:(?:my|authored) (code revisions|revisions|reviews|papers|drafts|documents)|(code revisions|revisions|reviews|papers|drafts|documents) (?:i authored|authored by me|without (?:an? )?author filter))$/);
+  if (authored) {
+    const noun = authored[1] ?? authored[2];
+    return { type: 'revisionAuthoredFilter', view: noun === 'papers' ? 'papers' : noun === 'drafts' || noun === 'documents' ? 'drafts' : 'reviews', authored: !text.includes('without ') };
+  }
   const notifications = text.match(/^(?:(?:open|show|go to) (?:the )?(?:(all|unread|read) )?(?:notifications|notification inbox)|notifications|notification inbox)$/);
   if (notifications) return { type: 'notificationFilter', filter: (notifications[1] ?? 'all') as 'all' | 'unread' | 'read' };
   const destination = text.replace(/^(open|show|go to)\s+(the\s+)?/, '');

@@ -178,12 +178,12 @@ test('schema18 to19 is additive and preserves all existing raw rows, schema and 
     const tables = (store.database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map(row => row.name);
     const rows = new Map(tables.map(name => [name, store.database.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all()]));
     store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 35);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 36);
     for (const schema of schemas) assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql, schema.sql, schema.name);
     for (const [name, before] of rows) assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all(), before, name);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     assert.deepEqual(store.database.prepare('SELECT * FROM revision_docx_packages').all(), []);
-    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 35);
+    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 36);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -197,7 +197,7 @@ test('schema19 failure is atomic and leaves schema18 reopenable', () => {
   } finally { DatabaseSync.prototype.exec = exec; }
   try {
     const db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 18); assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name='revision_docx_packages'").get(), undefined); db.close();
-    const reopened = new Store({ path }); assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version, 35); reopened.close();
+    const reopened = new Store({ path }); assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version, 36); reopened.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

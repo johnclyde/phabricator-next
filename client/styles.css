@@ -1218,3 +1218,21 @@
 .session-google .button { width: 100%; min-height: 44px; white-space: normal; }
 .session-google p { margin: 2px 0 0; text-align: center; }
 .google-signin { justify-content: center; font-weight: 650; background: #fff; }
+
+/* Personal revision views keep filter controls usable on narrow screens. */
+.revision-views{padding:16px;border-bottom:1px solid var(--border);display:grid;gap:12px;min-width:0}
+.revision-view-builtins,.revision-view-actions,.revision-view-picker{display:flex;gap:8px;flex-wrap:wrap;align-items:end;min-width:0}
+.revision-view-builtins .selected{background:var(--blue-light,#eaf3fb);border-color:var(--blue,#2980b9);color:var(--blue,#2980b9)}
+.revision-views .button{min-height:44px;white-space:normal;flex:0 0 auto}
+.revision-view-picker .field{margin:0;flex:1 1 240px;min-width:0}
+.revision-views select,.revision-views input{width:100%;min-width:0;min-height:44px}
+.revision-view-state{margin:0;font-size:13px;color:var(--text-muted);overflow-wrap:anywhere}
+.revision-view-management{border-top:1px solid var(--border);padding-top:4px}
+.revision-view-management summary,.revision-view-recovery summary{min-height:44px;cursor:pointer;align-content:center}
+.revision-view-management .field{margin:8px 0 12px;max-width:650px}
+.revision-view-management p,.revision-view-recovery p{margin:10px 0;overflow-wrap:anywhere}
+.revision-view-recovery{border:1px solid var(--border);border-radius:4px;padding:12px;min-width:0}
+.revision-view-recovery pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}
+.revision-following-filter{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:16px}
+.revision-following-filter>.info-strip{grid-column:1/-1;margin:0}
+@media(max-width:700px){.revision-view-picker{display:grid;grid-template-columns:1fr 1fr}.revision-view-picker .field{grid-column:1/-1}.revision-view-builtins .button{flex:1 1 auto}.revision-view-actions{display:grid;grid-template-columns:1fr}.revision-views input,.revision-views select{font-size:16px}.revision-view-picker .button{width:100%}.revision-views{padding:12px}.revision-view-state{line-height:1.6}}

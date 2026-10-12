@@ -15,6 +15,7 @@ import { initializeRevisionProjects, RevisionProjectStore } from './revision-pro
 import { revisionProjectCreationInput } from '../shared/revision-projects.ts';
 import { initializeRevisionMetadata, RevisionMetadataStore } from './revision-metadata.ts';
 import { initializeReviewDrafts, ReviewDraftStore, type PreparedReviewDraft } from './review-drafts.ts';
+import { initializeRevisionViews, RevisionViewStore } from './revision-views.ts';
 import type { ReviewDraftPayload } from '../shared/review-drafts.ts';
 import type { RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { revisionDependencyInput, type RevisionDependencyInput } from '../shared/revision-dependencies.ts';
@@ -203,6 +204,7 @@ export class Store {
   readonly revisionReviewers: RevisionReviewerStore;
   readonly revisionMetadata: RevisionMetadataStore;
   readonly reviewDrafts: ReviewDraftStore;
+  readonly revisionViews: RevisionViewStore;
   readonly revisionSubscriptions: RevisionSubscriptionStore;
   readonly revisionProjects: RevisionProjectStore;
   readonly notifications: NotificationStore;
@@ -222,7 +224,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 35) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 36) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -512,6 +514,11 @@ export class Store {
       try { this.transaction(() => { initializeReviewDrafts(this.database); this.database.exec('PRAGMA user_version = 35'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 36) {
+      try { this.transaction(() => { initializeRevisionViews(this.database); this.database.exec('PRAGMA user_version = 36'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.revisionViews = new RevisionViewStore(this.database);
     this.objectSubscriptions = new ObjectSubscriptionStore(this.database);
     this.taskNotifications = new TaskNotificationsStore(this.database);
     this.revisionProjects = new RevisionProjectStore(this.database);

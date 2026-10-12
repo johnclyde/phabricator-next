@@ -44,6 +44,7 @@ import { assertHostingRequest, hostingConfiguration, type HostedOrigin } from '.
 import { serveTranscriptionModel, transcriptionModelDirectory } from './transcription-model.ts';
 import type { GoogleAuthPublicConfig } from '../shared/google-auth.ts';
 import { GOOGLE_ID_TOKEN_MAX_BYTES, type GoogleAuthConfiguration, type GoogleTokenVerifier } from './google-auth.ts';
+import { revisionViewInput, type RevisionViewAction, type RevisionViewInput } from '../shared/revision-views.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -317,6 +318,22 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const savedView = /^\/api\/revision-views\/([^/]+)(\/delete)?$/.exec(path);
+    if (method === 'POST' && path === '/api/revision-views' || savedView && (method === 'PUT' && !savedView[2] || method === 'POST' && savedView[2])) {
+      const action: RevisionViewAction = !savedView ? 'create' : savedView[2] ? 'delete' : 'edit', id = savedView?.[1] ?? null;
+      const authorize = () => { auth.revalidate(context, 'write'); if (id !== null) store.revisionViews.requireOwner(context.principalId, id); };
+      store.read(authorize);
+      if (!rawKey) throw new HttpError(400, 'Saved revision view changes require an Idempotency-Key.');
+      let data: RevisionViewInput;
+      try { data = revisionViewInput(action, input); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid saved revision view.', 'REVISION_VIEW_INVALID_INPUT'); }
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex'), fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const canViewProject = (projectId: string) => Boolean(store.database.prepare("SELECT 1 FROM entities WHERE id=? AND kind='project'").get(projectId)) && access.canView(projectId);
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionViews.mutate(context.principalId, action, id, data, retryKeySha256, canViewProject) }), authorize, response => {
+        if (response.status !== 200) throw new HttpError(409, 'Saved revision view evidence cannot be verified.', 'REVISION_VIEW_INVALID_RECEIPT');
+        return { status: 200, body: store.revisionViews.present(context.principalId, action, id, data, retryKeySha256, response.body) };
+      });
+    }
     const privateReview = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/review-drafts\/(publish|[^/]+)(\/discard)?$/.exec(path);
     if (privateReview && (method === 'PUT' && !privateReview[3] && privateReview[2] !== 'publish' || method === 'POST' && (privateReview[3] || privateReview[2] === 'publish'))) {
       const id = privateReview[1]!, kind: ReviewDraftOperationKind = privateReview[3] ? 'discard' : privateReview[2] === 'publish' ? 'publish' : 'save';
@@ -825,6 +842,11 @@ export function createApp(options: AppOptions = {}): App {
       }
       const docxDiscussionExport = req.method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/export-discussion$/.exec(path) : null;
       const context = auth.authenticate(req, req.method === 'GET' || docxDiscussionExport || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      // Private identities are authorized before even parsing request JSON or retry metadata.
+      const savedViewWrite = /^\/api\/revision-views\/([^/]+)(\/delete)?$/.exec(path);
+      if (savedViewWrite && (req.method === 'PUT' && !savedViewWrite[2] || req.method === 'POST' && savedViewWrite[2])) {
+        store.read(() => { auth.revalidate(context, 'write'); store.revisionViews.requireOwner(context.principalId, savedViewWrite[1]!); });
+      }
       if (docxDiscussionExport) { await docxDiscussionRead(req, res, context, docxDiscussionExport[1]!, url); return; }
       if (req.method === 'POST' && path === '/api/logout') {
         if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
@@ -867,6 +889,16 @@ export function createApp(options: AppOptions = {}): App {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
+          if (path === '/api/revision-views') {
+            if (url.search) throw new HttpError(400, 'Saved revision view lists do not accept query parameters.');
+            send(res, 200, { views: store.revisionViews.list(context.principalId), accessEpoch: policies.epoch() }); return;
+          }
+          const savedView = /^\/api\/revision-views\/([^/]+)$/.exec(path);
+          if (savedView) {
+            store.revisionViews.requireOwner(context.principalId, savedView[1]!);
+            if (url.search) throw new HttpError(400, 'Saved revision views do not accept query parameters.');
+            send(res, 200, { view: store.revisionViews.get(context.principalId, savedView[1]!), accessEpoch: policies.epoch() }); return;
+          }
           if (path === '/api/review-drafts') {
             if ([...url.searchParams.keys()].some(key => !['after', 'limit'].includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Choose unique supported private draft discovery parameters.');
             const after = url.searchParams.get('after'), limit = url.searchParams.get('limit');
