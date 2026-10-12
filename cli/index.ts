@@ -24,6 +24,7 @@ import { revisionAuthorshipCommand } from './revision-authorship';
 import { revisionLifecycleCommand } from './revision-lifecycle';
 import { revisionReviewersCommand } from './revision-reviewers';
 import { revisionSubscriptionsCommand } from './revision-subscriptions';
+import { objectSubscriptionsCommand } from './object-subscriptions';
 import { revisionProjectsCommand } from './revision-projects';
 import { notificationsCommand } from './notifications';
 import { taskNotificationsCommand } from './task-notifications';
@@ -43,6 +44,11 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- notifications [--filter all|unread|read] [--before CURSOR] [--limit N]
   npm run arc -- notification-count
   npm run arc -- mark-notifications --intent REQUEST.json [--request-id KEY]
+  npm run arc -- object-subscriptions W1|PA1 [--after PERSON] [--limit N] [--subscription-version N]
+  npm run arc -- object-subscription-status W1|PA1 --principal PERSON
+  npm run arc -- object-subscription-history W1|PA1 [--before N] [--limit N] [--subscription-version N]
+  npm run arc -- object-mute-history W1|PA1 [--before N] [--limit N] [--mute-version N]
+  npm run arc -- edit-object-subscriptions W1|PA1 --intent REQUEST.json [--request-id KEY]
   npm run arc -- task-mute T1
   npm run arc -- task-mute-history T1 [--before N] [--limit N] [--expected-mute-version N]
   npm run arc -- set-task-mute T1 --intent REQUEST.json [--request-id KEY]
@@ -331,6 +337,7 @@ async function main() {
   if (await revisionLifecycleCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionReviewersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionSubscriptionsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
+  if (await objectSubscriptionsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await revisionProjectsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await notificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await taskNotificationsCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

@@ -1,9 +1,9 @@
 # Notifications
 
-NOTIFY-01 and NOTIFY-02 implement the native revision and task inbox described here. Broader
+NOTIFY-01 through NOTIFY-03 implement the native revision, task, Wiki and Paste inbox described here. Broader
 notification parity remains tracked in [the roadmap](roadmap.md).
 
-The notification inbox is private to the current workspace person. Revision and task
+The notification inbox is private to the current workspace person. Revision, task, Wiki and Paste
 changes create durable events and recipient records in the same transaction as
 the change. A failed source or policy write cannot leave a notification behind.
 Exact retries reuse the original change rather than sending it again.
@@ -50,6 +50,15 @@ workboard causes follow Maniphest's transaction rules. See [task notification
 contracts](task-notifications.md) for the precise delivery matrix, private mute
 API, recovery behavior and upstream evidence.
 
+## Wiki and Paste delivery
+
+Wiki/Paste following and private mute share this inbox. Wiki authors are not
+automatic followers; Paste authors are. Body-only Wiki drafts and ordinary moves
+stay quiet. Paste comments pin their exact historical source. Wiki path openings
+capture a read boundary before resolving the page identity. See [Wiki/Paste
+following](object-subscriptions.md) for the complete event, access, recovery and
+migration contract.
+
 ## Inbox and access
 
 The bell menu shows recent notifications and an unread badge. The full inbox has
@@ -79,7 +88,7 @@ Each row has independent read-state concurrency protection.
 
 Mark All Read uses the observed delivery boundary. It marks accessible unread
 notifications through that boundary and leaves later arrivals alone. Opening a
-successfully loaded revision or task online can mark that object's observed notifications
+successfully loaded revision, task, Wiki page or Paste online can mark that object's observed notifications
 read through the same boundary. Passive background fetching does not mark
 objects read, and opening a cached object offline does not queue this action.
 
@@ -103,7 +112,7 @@ Individual actions supply `notificationId`, `expectedVersion` and
 `expectedAccessEpoch`. Read-through supplies `horizon` and the access epoch;
 object reading also supplies `objectId`. Legacy revision requests with
 `revisionId` remain valid and retain their exact digest; the two keys are mutually
-exclusive, and `revisionId` cannot name a task. The server determines the recipient
+exclusive, and `revisionId` accepts only revisions. The server determines the recipient
 from the authenticated request, never a caller-selected account.
 
 The CLI preserves exact intents without fetching replacement concurrency pins:
@@ -142,7 +151,8 @@ read it at that earlier time. Existing source, policies, discussion, evidence an
 saved receipts remain unchanged. Schema 32 adds private task mute storage and
 generic task delivery without rewriting any schema-31 event, read proof or saved
 receipt. Legacy cache rows are strictly projected while pending legacy request
-bodies remain unchanged.
+bodies remain unchanged. Schema 33 adds Wiki/Paste preferences and target contexts
+without rewriting existing events, operations or pending read inputs.
 
 Upstream comparison uses Phabricator
 [`5720a38`](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04):

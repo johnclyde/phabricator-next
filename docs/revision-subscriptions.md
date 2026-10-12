@@ -27,8 +27,8 @@ do not give them visibility.
 
 Mute and unmute are self-only operations with a separate version and private
 history. They do not unsubscribe the person, remove an automatic role or publish
-an activity event. Notification delivery is not implemented: the interface must
-describe mute as a saved preference, not promise that messages are sent or stopped.
+an activity event. NOTIFY-01 delivers revision updates to the private inbox and
+honors mute across all recipient routes; mail and push transport remain gaps.
 
 Current object, Space, repository and historical File restrictions apply to
 reads, mutations and receipt recovery. Cookie writes also require CSRF. An

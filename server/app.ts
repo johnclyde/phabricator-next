@@ -33,6 +33,7 @@ import { revisionAuthorInput } from '../shared/revision-authorship.ts';
 import { revisionLifecycleInput, type RevisionLifecycleConfig } from '../shared/revision-lifecycle.ts';
 import { revisionReviewerInput, type RevisionReviewerConfig } from '../shared/revision-reviewers.ts';
 import { revisionSubscriptionInput } from '../shared/revision-subscriptions.ts';
+import { objectSubscriptionInput } from '../shared/object-subscriptions.ts';
 import { revisionProjectInput } from '../shared/revision-projects.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { notificationReadInput } from '../shared/notifications.ts';
@@ -333,6 +334,21 @@ export function createApp(options: AppOptions = {}): App {
       const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
       const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
       return store.mutate(key, fingerprint, () => ({ status: 200, body: store.revisionProjects.mutate(id, data, actor, retryKeySha256) }), authorize, response => access.presentRevisionProject(id, data, response, retryKeySha256));
+    }
+    const objectSubscriptions = method === 'POST' ? /^\/api\/objects\/((?:W|PA)[1-9]\d{0,14})\/subscriptions$/.exec(path) : null;
+    if (objectSubscriptions) {
+      const id = objectSubscriptions[1]!;
+      store.read(() => { auth.revalidate(context, 'write'); access.require(id); });
+      if (!rawKey) throw new HttpError(400, 'Following changes require an Idempotency-Key.');
+      let data;
+      try { data = objectSubscriptionInput(input); } catch { throw new HttpError(400, 'Provide an exact following action, person and preference and access versions.'); }
+      const authorize = () => { auth.revalidate(context, 'write'); access.requireObjectSubscriptionAction(id, data); };
+      store.read(authorize);
+      const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`;
+      const retryKeySha256 = createHash('sha256').update(key).digest('hex');
+      const fingerprint = createHash('sha256').update(JSON.stringify([method, path, data])).digest('hex');
+      const actor: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
+      return store.mutate(key, fingerprint, () => ({ status: 200, body: store.objectSubscriptions.mutate(id, data, actor, access.objectSubscriptionTarget(id, data), retryKeySha256) }), authorize, response => access.presentObjectSubscription(id, data, response, retryKeySha256));
     }
     const subscriptions = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/subscriptions$/.exec(path) : null;
     if (subscriptions) {
@@ -674,7 +690,9 @@ export function createApp(options: AppOptions = {}): App {
         const wikiMove = /^\/api\/documents\/(W\d+)\/move$/.exec(path);
         if (method === 'POST' && wikiMove) {
           const receipt = store.moveDocument(wikiMove[1]!, input, attribution);
-          policies.configureWikiMove(receipt.source.id, receipt.destination.id, context.principalId, receipt.destination.version === 1);
+          const previousDestinationPolicy = receipt.destination.version === 1 ? null : policies.policy(receipt.destination.id, context.principalId);
+          const destinationPolicy = policies.configureWikiMove(receipt.source.id, receipt.destination.id, context.principalId, receipt.destination.version === 1);
+          if (previousDestinationPolicy && (!isDeepStrictEqual(previousDestinationPolicy.rules.view, destinationPolicy.rules.view) || !isDeepStrictEqual(previousDestinationPolicy.rules.edit, destinationPolicy.rules.edit))) store.notifyWikiMovePolicy(receipt, attribution);
           return { status: 200, body: receipt };
         }
         const restore = /^\/api\/documents\/(W\d+)\/restore$/.exec(path);
@@ -806,6 +824,19 @@ export function createApp(options: AppOptions = {}): App {
             if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Choose supported project-tag history parameters.');
             const number = (key: string): number | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)) || (key !== 'expectedProjectVersion' && Number(value) < 1) || key === 'limit' && Number(value) > 100) throw new HttpError(400, 'Choose valid project-tag history pagination.'); return Number(value); };
             send(res, 200, revisionProjects[2] ? access.revisionProjectHistory(id, { before: number('before'), limit: number('limit'), expectedProjectVersion: number('expectedProjectVersion') }) : access.revisionProjects(id)); return;
+          }
+          const objectSubscriptions = /^\/api\/objects\/((?:W|PA)[1-9]\d{0,14})\/subscriptions(?:\/(history|mute-history|person))?$/.exec(path);
+          if (objectSubscriptions) {
+            const id = objectSubscriptions[1]!, route = objectSubscriptions[2]; access.require(id);
+            const allowed = route === 'person' ? ['principalId'] : route === 'mute-history' ? ['before', 'limit', 'expectedMuteVersion'] : route === 'history' ? ['before', 'limit', 'expectedSubscriptionVersion'] : ['after', 'limit', 'expectedSubscriptionVersion'];
+            for (const key of url.searchParams.keys()) if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw new HttpError(400, 'Use unique supported following parameters.');
+            const number = (key: string): number | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!/^(0|[1-9]\d*)$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < (key.startsWith('expected') ? 0 : 1)) throw new HttpError(400, 'Choose valid following versions and page limits.'); return Number(value); };
+            const person = (key: string): string | undefined => { const value = url.searchParams.get(key); if (value === null) return undefined; if (!value.length || value.length > 240 || /[\u0000-\u001f\u007f\uD800-\uDFFF]/u.test(value)) throw new HttpError(400, 'Selected member is unavailable.'); return value; };
+            if (route === 'person') { const principalId = person('principalId'); if (!principalId) throw new HttpError(400, 'Choose one member.'); send(res, 200, access.objectSubscriptionPerson(id, principalId)); }
+            else if (route === 'mute-history') send(res, 200, access.objectMuteHistory(id, { before: number('before'), limit: number('limit'), expectedMuteVersion: number('expectedMuteVersion') }));
+            else if (route === 'history') send(res, 200, access.objectSubscriptionHistory(id, { before: number('before'), limit: number('limit'), expectedSubscriptionVersion: number('expectedSubscriptionVersion') }));
+            else send(res, 200, access.objectSubscriptions(id, { after: person('after'), limit: number('limit'), expectedSubscriptionVersion: number('expectedSubscriptionVersion') }));
+            return;
           }
           const revisionSubscriptions = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/subscriptions(?:\/(history|mute-history|person))?$/.exec(path);
           if (revisionSubscriptions) {

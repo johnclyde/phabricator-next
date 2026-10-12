@@ -34,7 +34,7 @@ test('generic target guards preserve strict legacy projection and exact legacy r
   assert.equal(notificationItem({...item,revision:{id:'L1',title:'Word',kind:'document'}}),null);
   const horizon='a'.repeat(720),old={action:'read_object' as const,revisionId:'L1',horizon,expectedAccessEpoch:1},next={action:'read_object' as const,objectId:'L1',horizon,expectedAccessEpoch:1};
   assert.equal(JSON.stringify(notificationInput(old)),JSON.stringify(old));assert.equal(notificationReadObjectId(old),'L1');assert.notEqual(notificationInputHash(old),notificationInputHash(next));
-  assert.throws(()=>notificationInput({...old,objectId:'L1'}));assert.throws(()=>notificationInput({...old,revisionId:'T1'}));assert.throws(()=>notificationInput({...next,objectId:'W1'}));
+  assert.throws(()=>notificationInput({...old,objectId:'L1'}));assert.throws(()=>notificationInput({...old,revisionId:'T1'}));for(const objectId of ['W1','PA1']){assert.deepEqual(notificationInput({...next,objectId}),{...next,objectId});assert.throws(()=>notificationInput({...old,revisionId:objectId}));}assert.throws(()=>notificationInput({...next,objectId:'PROJ1'}));
 });
 
 test('all task event kinds carry captured task version while mixed inboxes expose current authorized object titles',()=>{const f=fixture();try{

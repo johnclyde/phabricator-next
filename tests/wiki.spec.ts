@@ -129,7 +129,6 @@ test('wiki history pages reach old content without duplicating versions', async 
 test('late workspace discovery keeps history pages already opened by the reader', async ({ page, request, baseURL }) => {
   const document = await seedHistory(request, baseURL!, 23, 'Expanded history survives discovery');
   const stateURL = new URL('api/state', baseURL!).href;
-  const detailURL = new URL(`api/documents/${document.id}`, baseURL!).href;
   let release!: () => void; let captured!: () => void; let holding = true;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const ready = new Promise<void>(resolve => { captured = resolve; });
@@ -143,8 +142,8 @@ test('late workspace discovery keeps history pages already opened by the reader'
     await expect(page.locator('.wiki-history-entry')).toHaveCount(20);
     await page.getByRole('button', { name: 'Load older history', exact: true }).click();
     await expect(page.locator('.wiki-history-entry')).toHaveCount(23);
-    const refreshed = page.waitForResponse(response => response.url() === detailURL);
-    holding = false; release(); await (await refreshed).finished();
+    holding = false; release();
+    await expect.poll(() => page.evaluate(id => Object.keys(localStorage).filter(key => key.endsWith(':state')).some(key => JSON.parse(localStorage.getItem(key)!).documents?.some((entry: { id: string; version: number }) => entry.id === id && entry.version === 23)), document.id)).toBe(true);
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await expect(page.locator('.wiki-history-entry')).toHaveCount(23);
     await expect(page.getByRole('button', { name: 'Load older history', exact: true })).toHaveCount(0);

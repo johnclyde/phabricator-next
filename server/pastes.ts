@@ -7,7 +7,7 @@ import { registerDefaultPolicy } from './policy.ts';
 import { choice, HttpError, integer, object, string } from './validation.ts';
 
 type JsonRow = { data: string };
-type Callbacks = { nextId: () => string; event: (id: string, action: string, detail: string, actor: ActorAttribution) => void };
+type Callbacks = { nextId: () => string; event: (id: string, action: string, detail: string, actor: ActorAttribution) => void; batch?: <T>(work: () => T) => T; notify?: (transaction: PasteTransaction) => void };
 const hash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex');
 const unavailable = () => new HttpError(404, 'Paste was not found.', 'PASTE_UNAVAILABLE');
 const corrupt = () => new HttpError(409, 'Stored paste integrity could not be verified.', 'PASTE_INTEGRITY');
@@ -71,7 +71,7 @@ export class PasteStore {
     const key = `paste_write_${++savepoint}`; this.database.exec(`SAVEPOINT ${key}`);
     try {
       this.database.prepare("UPDATE sequences SET value=value WHERE name='paste'").run();
-      const result = work(); this.database.exec(`RELEASE ${key}`); return result;
+      const result = this.callbacks.batch ? this.callbacks.batch(work) : work(); this.database.exec(`RELEASE ${key}`); return result;
     } catch (error) { this.database.exec(`ROLLBACK TO ${key}; RELEASE ${key}`); throw error; }
   }
   get(pasteId: string): PasteRecord {
@@ -138,8 +138,8 @@ export class PasteStore {
       const now = new Date().toISOString(); const pasteId = id(this.callbacks.nextId());
       const record: PasteRecord = { id: pasteId, title: data.title, language: data.language, status: 'active', authorId, version: 1, contentVersion: 1, contentHash: hash(data.content), bytes: checked.bytes, lineCount: checked.lineCount, createdAt: now, updatedAt: now };
       this.database.prepare("INSERT INTO entities(id,kind,data) VALUES(?,'paste',?)").run(pasteId, JSON.stringify(record));
-      registerDefaultPolicy(this.database, pasteId); this.insertVersion(record, data.content, actor); this.append(record, actor, { kind: 'create', snapshot: record });
-      this.callbacks.event(pasteId, 'created', 'created this paste', actor); return record;
+      registerDefaultPolicy(this.database, pasteId); this.insertVersion(record, data.content, actor); const transaction = this.append(record, actor, { kind: 'create', snapshot: record });
+      this.callbacks.event(pasteId, 'created', 'created this paste', actor); this.callbacks.notify?.(transaction); return record;
     });
   }
   update(pasteId: string, input: unknown, actor: ActorAttribution): PasteRecord {
@@ -156,8 +156,8 @@ export class PasteStore {
       const record: PasteRecord = { ...previous, title: data.title ?? previous.title, language: data.language === undefined ? previous.language : data.language, status: data.status ?? previous.status, version: next(previous.version), updatedAt: new Date().toISOString(), ...(checked ? { contentVersion: next(previous.contentVersion), contentHash: hash(checked.content), bytes: checked.bytes, lineCount: checked.lineCount } : {}) };
       this.database.prepare("UPDATE entities SET data=? WHERE id=? AND kind='paste'").run(JSON.stringify(record), pasteId);
       if (checked) this.insertVersion(record, checked.content, actor);
-      this.append(record, actor, { kind: 'edit', snapshot: record, ...(changes.length ? { changes } : {}), ...(checked ? { contentChange: { from: previous.contentVersion, to: record.contentVersion, fromHash: previous.contentHash, toHash: record.contentHash } } : {}) });
-      this.callbacks.event(pasteId, 'edited', 'edited this paste', actor); return record;
+      const transaction = this.append(record, actor, { kind: 'edit', snapshot: record, ...(changes.length ? { changes } : {}), ...(checked ? { contentChange: { from: previous.contentVersion, to: record.contentVersion, fromHash: previous.contentHash, toHash: record.contentHash } } : {}) });
+      this.callbacks.event(pasteId, 'edited', 'edited this paste', actor); this.callbacks.notify?.(transaction); return record;
     });
   }
   comment(pasteId: string, input: unknown, actor: ActorAttribution): PasteTransaction {
@@ -165,7 +165,7 @@ export class PasteStore {
     return this.mutation(() => {
       const record = this.get(pasteId); const version = this.version(pasteId, data.contentVersion);
       const transaction = this.append(record, actor, { kind: 'comment', contentVersion: version.number, contentHash: version.sha256, comment: data.body });
-      this.callbacks.event(pasteId, 'commented', 'commented on this paste', actor); return transaction;
+      this.callbacks.event(pasteId, 'commented', 'commented on this paste', actor); this.callbacks.notify?.(transaction); return transaction;
     });
   }
   list(query: PasteListQuery = {}, canView: (pasteId: string) => boolean = () => false): PastePage {

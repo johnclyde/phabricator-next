@@ -365,8 +365,14 @@ The behavioral baseline is pinned Phabricator
   [title effects](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/xaction/PhrictionDocumentTitleTransaction.php)
   and [content effects](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/xaction/PhrictionDocumentContentTransaction.php)
 
+NOTIFY-03 adds people following and private mute, with inbox delivery for visible
+changes, quiet body-only drafts and ordinary moves, and observed-boundary read
+marking for direct and path-based openings. Wiki authors do not follow automatically.
+See [Wiki/Paste following](object-subscriptions.md). Wiki comments, tags and broader
+notification transports remain open.
+
 Full Phriction parity is not claimed. Upstream content/status import, full Conduit mappings,
-Remarkup rendering, subscriptions, mail, Herald, full-text indexing, and the
+Remarkup rendering, mail, Herald, full-text indexing, and the
 broader wiki transaction model remain open. The location model reserves the
 upstream stub state, but explicit stub creation and upstream interchange remain
 open. Active/All discovery is implemented; configurable saved defaults remain open.

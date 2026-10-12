@@ -1,6 +1,7 @@
 import { initializeNotifications, initializeNotificationTargets, NotificationStore } from './notifications.ts';
 import { initializeTaskNotifications, TaskNotificationsStore } from './task-notifications.ts';
-import { NOTIFICATION_LIMITS } from '../shared/notifications.ts';
+import { initializeObjectSubscriptions, ObjectSubscriptionStore } from './object-subscriptions.ts';
+import { NOTIFICATION_LIMITS, type NotificationContext, type NotificationKind } from '../shared/notifications.ts';
 import { initializeWikiSearch, WikiSearchStore } from './wiki-search.ts';
 import { initializeRevisionDependencies, RevisionDependencyStore } from './revision-dependencies.ts';
 import { RevisionStackStore } from './revision-stack.ts';
@@ -185,6 +186,7 @@ export class Store {
   readonly revisionProjects: RevisionProjectStore;
   readonly notifications: NotificationStore;
   readonly taskNotifications: TaskNotificationsStore;
+  readonly objectSubscriptions: ObjectSubscriptionStore;
   private taskProjectsReady = false;
   private wikiLocationsReady = false;
   private wikiPublicationReady = false;
@@ -197,7 +199,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 32) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 33) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -474,6 +476,11 @@ export class Store {
       try { this.transaction(() => { initializeNotificationTargets(this.database); initializeTaskNotifications(this.database); this.database.exec('PRAGMA user_version = 32'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 33) {
+      try { this.transaction(() => { initializeNotificationTargets(this.database); initializeObjectSubscriptions(this.database); this.database.exec('PRAGMA user_version = 33'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    this.objectSubscriptions = new ObjectSubscriptionStore(this.database);
     this.taskNotifications = new TaskNotificationsStore(this.database);
     this.revisionProjects = new RevisionProjectStore(this.database);
     this.revisionMetadata = new RevisionMetadataStore(this.database, options.revisionMetadata);
@@ -489,7 +496,10 @@ export class Store {
         return { title: this.revisionMetadata.state(id).title, kind: row.kind, head: this.revisionAuthorship.snapshot(id).head, broadcast: this.revisionLifecycle.state(id).reviewStarted };
       },
       task: id => { const task = this.get<Task>('task', id); return { title: task.title, version: task.version }; },
+      wiki: id => { const document = this.get<WikiDocument>('document', id); return { title: document.title, context: this.wikiNotificationContext(document.publication!) }; },
+      paste: id => { const paste = this.pastes.get(id); return { title: paste.title, context: { kind: 'paste', pasteVersion: paste.version, contentVersion: paste.contentVersion, contentHash: paste.contentHash } }; },
       recipients: id => {
+        if (/^(?:W|PA)[1-9]\d{0,14}$/.test(id)) return this.objectSubscriptions.deliveryPreferences(id);
         const task = id.startsWith('T') ? this.get<Task>('task', id) : null;
         const projects = new Set<string>(), watchers = new Set<string>(); let scanned = 0;
         for (const tag of task?.projectIds ?? this.revisionProjects.state(id).projectIds) for (const project of [tag, ...ancestorIds(this.database, tag)]) projects.add(project);
@@ -507,13 +517,23 @@ export class Store {
         return this.revisionSubscriptions.deliveryPreferences(id, [...watchers]);
       },
     });
-    for (const domain of [this.revisionProjects, this.revisionMetadata, this.revisionAuthorship, this.revisionLifecycle, this.revisionReviewers, this.revisionSubscriptions]) domain.connectNotifications(this.notifications.emit);
+    for (const domain of [this.revisionProjects, this.revisionMetadata, this.revisionAuthorship, this.revisionLifecycle, this.revisionReviewers, this.revisionSubscriptions, this.objectSubscriptions]) domain.connectNotifications(this.notifications.emit);
     this.revisionDependencies = new RevisionDependencyStore(this.database, id => this.revisionMetadata.state(id));
     this.revisionStack = new RevisionStackStore(this.database, id => this.revisionMetadata.state(id), this.revisionLifecycle.config.closeOnAccept);
     this.wikiSearch=new WikiSearchStore(this.database);
     this.wikiPublicationReady = true;
     this.wikiLocationsReady = true;
-    this.pastes = new PasteStore(this.database, { nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor) });
+    this.pastes = new PasteStore(this.database, {
+      nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor),
+      batch: work => this.notifications.batch(work),
+      notify: transaction => {
+        if (transaction.kind === 'comment') this.objectSubscriptions.implicitComment(transaction);
+        const status = transaction.changes?.find(change => change.field === 'status');
+        const kind: NotificationKind = transaction.kind === 'create' ? 'created' : transaction.kind === 'comment' ? 'paste_commented' : status ? status.newValue === 'archived' ? 'paste_archived' : 'paste_reactivated' : 'paste_updated';
+        this.notifications.emit({ objectId: transaction.pasteId, kind, cause: { type: 'paste_transaction', id: transaction.id }, attribution: transaction.attribution, createdAt: transaction.createdAt,
+          context: { kind: 'paste', pasteVersion: transaction.pasteVersion, contentVersion: transaction.contentVersion, contentHash: transaction.contentHash } });
+      },
+    });
     this.files = new FileStore(this.database);
     this.citationEvidence = new CitationEvidenceStore(this.database, this.files);
     this.workboards = new WorkboardStore(this.database, { project: id => this.projects.get(id), task: id => this.get<Task>('task', id), nextColumnId: () => this.nextId('workboard_column', 'COL'), normalizeTags: ids => this.normalizeTaskProjectIds(ids), moveTask: (task, ids, move, attribution, now, operationId) => this.writeTaskWorkboardChange(task, ids, move, attribution, now, operationId) });
@@ -1047,7 +1067,7 @@ export class Store {
     try {
       // Acquire the writer lock before observing heads, including direct Store calls.
       this.database.prepare("UPDATE policy_meta SET value=value WHERE name='epoch'").run();
-      const result = work(); this.database.exec('RELEASE wiki_document_write'); return result;
+      const result = this.notifications.batch(work); this.database.exec('RELEASE wiki_document_write'); return result;
     } catch (error) { this.database.exec('ROLLBACK TO wiki_document_write; RELEASE wiki_document_write'); throw error; }
   }
   private rawWikiVersion(id:string):WikiVersion {
@@ -1082,7 +1102,17 @@ export class Store {
     this.save('document',document);
     this.database.prepare('INSERT INTO wiki_publication VALUES(?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET revision=excluded.revision,head_version_id=excluded.head_version_id,published_version_id=excluded.published_version_id').run(document.id,publication.revision,head.id,published.id);
     const transaction:WikiLifecycleTransaction={id:randomUUID(),documentId:document.id,sequence:publication.revision,kind,actor:attribution?.displayName??'You',...(attribution?{attribution}:{}),createdAt:document.updatedAt,message,inputSha256,before:before?this.wikiSnapshot(before):null,after:this.wikiSnapshot(document),newVersionId};
-    this.database.prepare('INSERT INTO wiki_transactions VALUES(?,?,?,?)').run(transaction.id,document.id,transaction.sequence,JSON.stringify(transaction));return transaction;
+    this.database.prepare('INSERT INTO wiki_transactions VALUES(?,?,?,?)').run(transaction.id,document.id,transaction.sequence,JSON.stringify(transaction));
+    // Title effects compare with the published title, even while saving a draft.
+    // Body-only drafts and both ordinary move transactions are feed-hidden upstream.
+    const titleChanged = !!before && head.title !== before.title;
+    const bodyChanged = !!before && head.content !== this.rawWikiVersion(before.publication!.headVersionId).content;
+    const statusChanged = !!before && document.location!.status !== before.location!.status;
+    const notificationKind: NotificationKind | null = kind === 'create' ? 'created' : kind === 'draft' ? titleChanged ? 'wiki_title_changed' : null
+      : kind === 'publish' ? 'wiki_published' : kind === 'delete' ? 'wiki_deleted'
+      : (kind === 'edit' || kind === 'restore') && (titleChanged || bodyChanged || statusChanged) ? kind === 'restore' ? 'wiki_restored' : 'wiki_updated' : null;
+    if (notificationKind) this.notifications.emit({ objectId: document.id, kind: notificationKind, cause: { type: 'wiki_transaction', id: transaction.id }, attribution, createdAt: transaction.createdAt, context: this.wikiNotificationContext(publication) });
+    return transaction;
   }
   documentTransaction(id:string,sequence:number):WikiLifecycleTransaction {
     integer(sequence,'sequence');const row=this.database.prepare('SELECT data FROM wiki_transactions WHERE document_id=? AND sequence=?').get(id,sequence) as JsonRow|undefined;
@@ -1329,6 +1359,15 @@ export class Store {
       return {id:version.documentId,title:version.title,slug:version.slug,content:version.content,version:version.number,createdAt:this.get<WikiDocument>('document',version.documentId).createdAt,updatedAt:version.createdAt,location:version.location!};
     };
     return {source:snapshot(source),destination:snapshot(destination),sourceVersionId,destinationVersionId,operationId:source.move.operationId};
+  }
+  private wikiNotificationContext(publication: WikiPublication): Extract<NotificationContext, { kind: 'wiki' }> {
+    return { kind: 'wiki', publicationRevision: publication.revision, headVersionId: publication.headVersionId, headVersion: publication.headVersion, publishedVersionId: publication.publishedVersionId, publishedVersion: publication.publishedVersion };
+  }
+  /** The policy layer calls this only after an existing destination's copied view/edit policy changes. */
+  notifyWikiMovePolicy(receipt: WikiMoveReceipt, attribution: ActorAttribution): void {
+    const canonical = this.wikiMoveReceipt(receipt.source.id, receipt.sourceVersionId, receipt.destinationVersionId);
+    if (!isDeepStrictEqual(canonical, receipt) || canonical.destination.version === 1 || !canonical.destination.publication) throw new HttpError(409, 'Wiki move evidence does not match.', 'WIKI_MOVE_MISMATCH');
+    this.notifications.emit({ objectId: canonical.destination.id, kind: 'wiki_policy_changed', cause: { type: 'wiki_move_policy', id: canonical.operationId }, attribution, createdAt: canonical.destination.updatedAt, context: this.wikiNotificationContext(canonical.destination.publication) });
   }
   private saveWikiVersion(document: WikiDocument, metadata: Pick<WikiVersion, 'kind' | 'author' | 'message' | 'restoredFrom' | 'attribution' | 'move'>): WikiVersion {
     const version: WikiVersion = { id: randomUUID(), documentId: document.id, number: document.version, title: document.title,

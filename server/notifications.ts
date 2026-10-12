@@ -11,11 +11,11 @@ import type { NotificationContext, NotificationEvent, NotificationInbox, Notific
 import { HttpError } from './validation.ts';
 
 interface CauseFields { requireActorView?: boolean; kind: NotificationKind; cause: { type: string; id: string }; attribution?: ActorAttribution; createdAt?: string }
-export type NotificationCause = CauseFields & ({ revisionId: string; head?: RevisionAuthorHead } | { objectId: string; context?: { kind: 'task'; taskVersion: number } });
+export type NotificationCause = CauseFields & ({ revisionId: string; head?: RevisionAuthorHead } | { objectId: string; context?: NotificationContext });
 interface CapturedCause extends CauseFields { objectId: string; context: NotificationContext }
 export type NotificationPublisher = (cause: NotificationCause) => void;
 export interface NotificationEligibility { eligible: (principalId: string) => boolean; canView: (objectId: string, principalId: string) => boolean }
-interface Options { revision: (id: string) => { title: string; kind: 'code' | 'paper' | 'document'; head: RevisionAuthorHead; broadcast: boolean }; task?: (id: string) => { title: string; version: number }; recipients: (id: string) => { recipients: string[]; muted: string[] } }
+interface Options { revision: (id: string) => { title: string; kind: 'code' | 'paper' | 'document'; head: RevisionAuthorHead; broadcast: boolean }; task?: (id: string) => { title: string; version: number }; wiki?: (id: string) => { title: string; context: Extract<NotificationContext, {kind:'wiki'}> }; paste?: (id: string) => { title: string; context: Extract<NotificationContext, {kind:'paste'}> }; recipients: (id: string) => { recipients: string[]; muted: string[] } }
 interface Delivery { id: string; sequence: number; event_id: string; principal_id: string; revision_id: string; read: number; version: number }
 interface ReadState { read: boolean; version: number }
 interface Effect { id: string; objectId: string; before: ReadState; after: ReadState }
@@ -36,8 +36,8 @@ export function notificationInputHash(input: NotificationInput): string { return
 let serial = 0;
 function scope<T>(db: DatabaseSync, work: () => T, write = false): T { const name = `notifications_${++serial}`; db.exec(`SAVEPOINT ${name}`); try { if (write) db.exec('UPDATE notification_read_state SET version=version WHERE 0'); const result = work(); db.exec(`RELEASE ${name}`); return result; } catch (error) { db.exec(`ROLLBACK TO ${name}; RELEASE ${name}`); throw error; } }
 export function initializeNotifications(db: DatabaseSync): void { initializeNotificationSchema(db, true); }
-/** Schema32 fences old binaries. The existing entity FK already accepts tasks;
- * retaining the historical column name preserves all schema31 evidence bytes. */
+/** Binary fences permit new target types without rewriting existing event or
+ * operation bytes. The historical column name and entity FK remain unchanged. */
 export function initializeNotificationTargets(db: DatabaseSync): void { initializeNotifications(db); }
 function initializeNotificationSchema(db: DatabaseSync, verifyExisting: boolean): void {
   scope(db, () => {
@@ -82,7 +82,9 @@ export class NotificationStore {
   flush(): void { const queue = this.queues.at(-1); if (queue) for (const cause of queue.splice(0)) this.publish(cause); }
   private target(id: string): { object: NotificationItem['object']; context: NotificationContext; broadcast: boolean } {
     if (isRevisionId(id)) { const revision = this.options.revision(id); return { object: { id, title: revision.title, kind: revision.kind }, context: { kind: 'revision', head: revision.head }, broadcast: revision.broadcast }; }
-    if (!isNotificationObjectId(id) || !this.options.task) throw unavailable();
+    if (/^W[1-9]\d{0,14}$/.test(id) && this.options.wiki) { const wiki = this.options.wiki(id); return { object: { id, title: wiki.title, kind: 'wiki' }, context: wiki.context, broadcast: true }; }
+    if (/^PA[1-9]\d{0,14}$/.test(id) && this.options.paste) { const paste = this.options.paste(id); return { object: { id, title: paste.title, kind: 'paste' }, context: paste.context, broadcast: true }; }
+    if (!/^T[1-9]\d{0,14}$/.test(id) || !this.options.task) throw unavailable();
     const task = this.options.task(id); if (!natural(task.version) || task.version < 1) throw invalid();
     return { object: { id, title: task.title, kind: 'task' }, context: { kind: 'task', taskVersion: task.version }, broadcast: true };
   }

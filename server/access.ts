@@ -10,6 +10,8 @@ import { revisionReviewerInputHash } from './revision-reviewers.ts';
 import type { RevisionMetadataInput, RevisionMetadataSnapshot, RevisionMetadataHistory } from '../shared/revision-metadata.ts';
 import { revisionSubscriptionInputHash } from './revision-subscriptions.ts';
 import type { RevisionSubscriptionInput, RevisionSubscriptionSnapshot, RevisionSubscriptionHistory, RevisionMuteHistory, RevisionSubscriptionPerson } from '../shared/revision-subscriptions.ts';
+import { objectSubscriptionInputHash } from './object-subscriptions.ts';
+import type { ObjectSubscriptionInput, ObjectSubscriptionSnapshot, ObjectSubscriptionHistory, ObjectMuteHistory, ObjectSubscriptionPerson } from '../shared/object-subscriptions.ts';
 import { revisionMetadataInputHash } from './revision-metadata.ts';
 import { revisionProjectInputHash } from './revision-projects.ts';
 import type { RevisionProjectInput, RevisionProjectSnapshot, RevisionProjectHistory } from '../shared/revision-projects.ts';
@@ -169,6 +171,60 @@ export class AccessLayer {
       const permission = revisionReviewerPermission(action.action);
       return access.capabilities[permission] ? action : { ...action, available: false, reason: `${permission === 'edit' ? 'Editing' : 'Interaction'} permission is required for this reviewer action.` };
     }), access, accessEpoch: this.policies.epoch() };
+  }
+  objectSubscriptions(id: string, query: { after?: string; limit?: number; expectedSubscriptionVersion?: number }): ObjectSubscriptionSnapshot {
+    this.require(id);
+    return { ...this.store.objectSubscriptions.snapshot(id, this.principal, query), access: this.describe(id), accessEpoch: this.policies.epoch() };
+  }
+  objectSubscriptionPerson(id: string, principalId: string): ObjectSubscriptionPerson {
+    this.require(id); this.objectSubscriptionReference(id, principalId, false);
+    return { ...this.store.objectSubscriptions.person(id, principalId), accessEpoch: this.policies.epoch() };
+  }
+  objectSubscriptionHistory(id: string, query: { before?: number; limit?: number; expectedSubscriptionVersion?: number }): ObjectSubscriptionHistory {
+    this.require(id);
+    return { ...this.store.objectSubscriptions.history(id, query), accessEpoch: this.policies.epoch() };
+  }
+  objectMuteHistory(id: string, query: { before?: number; limit?: number; expectedMuteVersion?: number }): ObjectMuteHistory {
+    this.require(id);
+    return { ...this.store.objectSubscriptions.muteHistory(id, this.principal, query), accessEpoch: this.policies.epoch() };
+  }
+  requireObjectSubscriptionAction(id: string, input: ObjectSubscriptionInput): void {
+    this.require(id);
+    if (input.action === 'mute' || input.action === 'unmute') {
+      if (input.principalId !== this.principal) throw new HttpError(403, 'Mute preferences may only be changed for yourself.', 'ACTION_FORBIDDEN');
+    } else if (input.principalId !== this.principal) {
+      if (input.action === 'unsubscribe') this.require(id, 'edit');
+      else if (!this.policies.access(id, this.principal).edit) this.require(id, 'interact');
+    }
+  }
+  private objectSubscriptionReference(id: string, principalId: string, active: boolean): { principalId: string; displayName: string } {
+    if (!active) {
+      const status = this.store.objectSubscriptions.status(id, principalId);
+      if ((status.version > 0 || status.automatic.length > 0) && status.displayName !== null) return { principalId, displayName: status.displayName };
+    }
+    const resolved = this.principalReference(principalId, active);
+    return { principalId: resolved, displayName: resolved === this.principal ? this.context.displayName : this.auth.listAccounts().find(account => account.id === resolved)!.displayName };
+  }
+  objectSubscriptionTarget(id: string, input: ObjectSubscriptionInput): { principalId: string; displayName: string } {
+    this.requireObjectSubscriptionAction(id, input);
+    if (input.principalId === this.principal) return { principalId: this.principal, displayName: this.context.displayName };
+    return this.objectSubscriptionReference(id, input.principalId, input.action === 'subscribe');
+  }
+  presentObjectSubscription(id: string, input: ObjectSubscriptionInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
+    this.requireObjectSubscriptionAction(id, input);
+    const invalid = (): never => { throw new HttpError(409, 'This saved following receipt does not match the requested operation.', 'OBJECT_SUBSCRIPTION_INVALID_RECEIPT'); };
+    const body = record(response.body);
+    if (!body || response.status !== 200 || body.objectId !== id || typeof body.operationId !== 'string') return invalid();
+    let operation;
+    try {
+      if (this.store.objectSubscriptions.operationObjectId(body.operationId) !== id || this.store.objectSubscriptions.operationPrincipalId(body.operationId) !== this.principal) return invalid();
+      operation = this.store.objectSubscriptions.operation(body.operationId);
+    } catch { return invalid(); }
+    if (operation.objectId !== id || operation.attribution.principalId !== this.principal
+      || operation.retryKeySha256 !== retryKeySha256
+      || operation.inputSha256 !== objectSubscriptionInputHash(input) || !isDeepStrictEqual(operation.input, input)
+      || !isDeepStrictEqual(body, operation.receipt)) return invalid();
+    return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionSubscriptions(id: string, query: { after?: string; limit?: number; expectedSubscriptionVersion?: number; expectedAuthorVersion?: number; expectedReviewerVersion?: number }): RevisionSubscriptionSnapshot {
     this.require(id);

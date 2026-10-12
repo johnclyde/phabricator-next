@@ -31,7 +31,7 @@ test('schema28 preserves every schema27 row and constraint, unknown plans, wide 
     const legacyEntity = JSON.parse(store.database.prepare('SELECT data FROM entities WHERE id=?').get(wide)!.data as string);
     store.database.prepare('UPDATE entities SET data=? WHERE id=?').run(JSON.stringify({ ...legacyEntity, title: legacyTitle, summary: legacySummary }), wide);
     drop(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 32); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 33); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.equal(store.revisionMetadata.config.requireTestPlan, true); assert.equal(store.detail(id).revision.testPlan, null); assert.equal(store.detail(id).revision.metadataVersion, 0); assert.equal(store.detail(id).revision.status, 'accepted');
@@ -65,7 +65,7 @@ test('schema28 metadata corruption or table collisions roll back every migration
       if (corruption === 'collision') db.exec('DROP TABLE revision_metadata_operations');
       else if (corruption === 'object-title') db.prepare("UPDATE entities SET data=json_set(data,'$.title','Old revision') WHERE id=?").run(id);
       else db.prepare('UPDATE versions SET data=? WHERE revision_id=?').run(originalVersion, id);
-      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 32); assert.equal(repaired.detail(id).revision.testPlan, null);
+      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 33); assert.equal(repaired.detail(id).revision.testPlan, null);
     } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
   }
 });

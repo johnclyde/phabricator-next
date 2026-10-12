@@ -58,3 +58,51 @@ test('editing and restoring exact whitespace-bearing titles confirm without stra
   expect((await api<WikiDetail>(request, baseURL!, `/documents/${document.id}`)).document.title).toBe('  Original title  ');
   await expect(page.getByRole('heading', { name: 'Unconfirmed Wiki Change', exact: true })).not.toBeVisible();
 });
+
+test.describe('wiki workspace catch-up', () => {
+  test.use({ serviceWorkers: 'block' });
+  test('equal discovery leaves the editor usable while a newer publication refreshes the pinned reader', async ({ page, request, baseURL }) => {
+    const document = await create(request, baseURL!);
+    const initial = await api<WikiDetail>(request, baseURL!, `/documents/${document.id}`);
+    await api(request, baseURL!, `/documents/${document.id}/drafts`, { ...pins(initial), title: document.title, content: 'Shared second version.' });
+    const draft = await api<WikiDetail>(request, baseURL!, `/documents/${document.id}`);
+    const stateURL = new URL('api/state', baseURL!).href;
+    const detailURL = new URL(`api/documents/${document.id}`, baseURL!).href;
+    let holding = true, detailReads = 0, release!: () => void, captured!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { captured = resolve; });
+    await page.route(stateURL, async route => {
+      if (!holding) { await route.continue(); return; }
+      const response = await route.fetch(); captured(); await gate; await route.fulfill({ response });
+    });
+    await page.route(detailURL, async route => { detailReads++; await route.continue(); });
+    try {
+      await page.goto(`./#${document.id}`); await ready;
+      await page.getByLabel('Version to inspect', { exact: true }).fill('2');
+      await page.getByLabel('Version to inspect', { exact: true }).fill('1');
+      await page.getByRole('button', { name: 'Edit Document', exact: true }).click();
+      const dialog = page.getByRole('dialog');
+      await dialog.getByLabel('Content', { exact: true }).fill('Unsent text survives discovery.');
+      const beforeCatchUp = detailReads;
+      holding = false; release();
+      await expect.poll(() => page.evaluate(id => Object.keys(localStorage).filter(key => key.endsWith(':state')).some(key => JSON.parse(localStorage.getItem(key)!).documents?.some((entry: { id: string; publication?: { revision: number } }) => entry.id === id && entry.publication?.revision === 2)), document.id)).toBe(true);
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      expect(detailReads).toBe(beforeCatchUp);
+      await expect(dialog.getByLabel('Content', { exact: true })).toHaveValue('Unsent text survives discovery.');
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await page.getByRole('button', { name: 'Edit Document', exact: true }).click();
+      await expect(dialog.getByLabel('Content', { exact: true })).toHaveValue('Unsent text survives discovery.');
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+      await api(request, baseURL!, `/documents/${document.id}/publish`, { ...pins(draft), targetVersionId: draft.head!.id });
+      // Already online: this refreshes workspace discovery without firing Wiki's
+      // focus/reconnect load. Its newer publication counter must request detail.
+      await page.evaluate(() => window.dispatchEvent(new Event('online')));
+      await expect(page.getByText(`${document.slug} · Published version 2 · Latest content 2`, { exact: true })).toBeVisible();
+      expect(detailReads).toBeGreaterThan(beforeCatchUp);
+      await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+      await expect(page.locator('.wiki-content')).toHaveText('Original published content.');
+      expect(await page.evaluate(id => Object.keys(localStorage).filter(key => key.includes(`:wiki-edit:${id}:`)).map(key => JSON.parse(localStorage.getItem(key)!)), document.id)).toContainEqual(expect.objectContaining({ content: 'Unsent text survives discovery.', pins: expect.objectContaining({ expectedPublicationRevision: 2, expectedPublishedVersionId: draft.document.publication!.publishedVersionId }) }));
+    } finally { holding = false; release(); await page.unrouteAll({ behavior: 'wait' }); }
+  });
+});

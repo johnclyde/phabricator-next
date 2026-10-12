@@ -1,3 +1,4 @@
+import ObjectSubscriptions from './ObjectSubscriptions';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, BookOpen, GitCompareArrows, History, Pencil, RotateCcw, WifiOff } from 'lucide-react';
 import { diffLines, diffWordsWithSpace } from 'diff';
@@ -19,7 +20,8 @@ function date(value: string): string { return new Date(value).toLocaleString(); 
 function author(version: WikiVersion): string { return version.author || 'Unknown (legacy snapshot)'; }
 
 /** Phriction's source history is immutable; viewing an old version never edits it. */
-export default function Wiki({ id, currentVersion, publicationRevision, online, state, manageAccess, mutate, edit, create, refreshWorkspace }: {
+export default function Wiki({ onOpened, id, currentVersion, publicationRevision, online, state, manageAccess, mutate, edit, create, refreshWorkspace }: {
+  onOpened: (id: string) => void;
   create: (path: string) => void;
   refreshWorkspace: () => Promise<void>;
   id: string;
@@ -75,7 +77,7 @@ export default function Wiki({ id, currentVersion, publicationRevision, online, 
         if (!writeStored(`wiki:${id}`, merged)) setStorageWarning('Browser storage is unavailable. This history was not saved for offline reading.');
         return merged;
       });
-      setSnapshot(false); setError('');
+      setSnapshot(false); setError(''); onOpened(id);
       const published = next.document.publication?.publishedVersion ?? next.document.version;
       const current = next.history.versions.find(version => version.number === published);
       if (current) saveVersion({ ...current, content: next.document.content });
@@ -93,7 +95,13 @@ export default function Wiki({ id, currentVersion, publicationRevision, online, 
   useEffect(() => {
     void load();
     return () => { loadGeneration.current += 1; };
-  }, [load, currentVersion, publicationRevision, online]);
+  }, [load, online]);
+  // Workspace discovery often arrives after this document's authorized detail.
+  // Only newer content/publication counters need another read; an equal catch-up
+  // must not disable an editor action or retire an unrelated pending refresh.
+  useEffect(() => {
+    if (detail && ((currentVersion ?? 0) > detail.document.version || (publicationRevision ?? 0) > (detail.document.publication?.revision ?? 0))) void load();
+  }, [load, currentVersion, publicationRevision, detail?.document.version, detail?.document.publication?.revision]);
   useEffect(() => { const clear = () => { loadGeneration.current++; pageGeneration.current++; lifecyclePageGeneration.current++; setPaging(false); setLifecyclePaging(false); loaded.current = {}; inFlight.current.clear(); setVersions({}); setDetail(null); queueMicrotask(() => { if (mounted.current) void load(); }); }; const off = onTaskSnapshotChange(clear); const focus = () => void load(); window.addEventListener('focus', focus); return () => { off(); window.removeEventListener('focus', focus); }; }, [load]);
   // A null selection follows the published content pointer. An explicitly chosen immutable
   // version remains selected when workspace discovery or a background edit
@@ -201,7 +209,7 @@ export default function Wiki({ id, currentVersion, publicationRevision, online, 
     {detail.document.location?.status === 'moved' && <section className="panel card-body wiki-moved"><h2>This Document Has Moved</h2>{detail.hierarchy?.movedTo ? <p>Continue at <a href={wikiHref(detail.hierarchy.movedTo.path)}>{detail.hierarchy.movedTo.title} ({detail.hierarchy.movedTo.id})</a>.</p> : <p>The destination is unavailable.</p>}<p>The original history remains here. Child documents keep their existing paths.</p></section>}
     {savedDraftRecords(`draft:document:${id}:`).length > 0 && <section className="panel card-body"><h2>Retained Source Drafts</h2><p>Unsaved drafts remain attached to this original document. They have not moved to the destination.</p>{savedDraftRecords(`draft:document:${id}:`).map(item => <button key={item.key} className="button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' })), link = document.createElement('a'); link.href = url; link.download = `${id}-retained-draft.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}>Export {item.key.split(':').at(-1)} Draft</button>)}</section>}
     {moving && <DraftAvailability draftKey={`wiki-move:${id}`}><WikiMoveDialog refreshWorkspace={refreshWorkspace} detail={detail} online={online} close={() => setMoving(false)} saved={async () => { await refreshWorkspace(); await load(); }}/></DraftAvailability>}
-    <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/>
+    <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/><ObjectSubscriptions id={id} state={state} online={online} refreshWorkspace={refreshWorkspace}/>
     {snapshot && <div className="banner warning"><WifiOff size={16}/><span>{durable ? 'Saved document snapshot. Only versions opened on this device are available offline. Local drafts remain editable. Reconnect before saving or publishing.' : 'Connection interrupted. Loaded versions are kept only in this session. Local drafts remain editable. Reconnect before saving or publishing.'}</span></div>}
     {storageWarning && <div className="banner warning" role="status">{storageWarning}</div>}
     {error && <div className="banner error" role="alert"><span>{error}</span><button onClick={() => void load()} disabled={loading}>Reload document</button></div>}

@@ -24,6 +24,13 @@ The Paste application provides list filters, creation and editing, source versio
 
 Visited source and drafts use the existing workspace storage boundaries: local mode can retain them on the device, while password mode keeps content in the verified tab. Known access loss removes server content and quarantines unsaved work for export or discard. Drafts keep their original editing version, and uncertain writes keep an exact request ID and payload. Saves and comments require an explicit online action; reconnecting does not submit Paste requests automatically.
 
+## Following and inbox
+
+NOTIFY-03 adds people following, automatic author delivery, human comment opt-in,
+private mute and version-pinned inbox events. The controls preserve historical
+content selections and exact offline request recovery. See [Wiki/Paste following](object-subscriptions.md)
+for permissions, recipient rules, history, limits and remaining notification gaps.
+
 ## API
 
 | API | Result |
@@ -50,4 +57,4 @@ Schema 18 widens the existing entity constraint to admit Paste and adds immutabl
 
 The implementation is based on the latest pinned archived source, especially [Paste's storage and automatic author policies](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/paste/storage/PhabricatorPaste.php), [editable fields](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/paste/editor/PhabricatorPasteEditEngine.php), [content transactions](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/paste/xaction/PhabricatorPasteContentTransaction.php), [search filters](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/paste/query/PhabricatorPasteSearchEngine.php), and [view actions](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/paste/controller/PhabricatorPasteViewController.php). Syntax presentation uses a pinned local [highlight.js](https://github.com/highlightjs/highlight.js) dependency.
 
-PASTE-01 remains an initial application slice, not full parity. Project tags, subscribers and notifications, mail creation/replies, Herald rules, tokens/flags, addressable line-range URLs, embedded Remarkup ranges, document rendering, configurable forms and default policies, full-text ranking and saved queries, title-inferred languages and the complete upstream highlighting catalog, parent/fork interoperability, Conduit compatibility, historical data migration and complete review-packet export remain open. Anonymous public Paste viewing is intentionally not enabled merely because this project's source repository is public.
+PASTE-01 remains an initial application slice, not full parity. Project tags, mail creation/replies, Herald rules, tokens/flags, addressable line-range URLs, embedded Remarkup ranges, document rendering, configurable forms and default policies, full-text ranking and saved queries, title-inferred languages and the complete upstream highlighting catalog, parent/fork interoperability, Conduit compatibility, historical data migration and complete review-packet export remain open. Anonymous public Paste viewing is intentionally not enabled merely because this project's source repository is public.

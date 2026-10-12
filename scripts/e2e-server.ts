@@ -27,6 +27,16 @@ if (process.env.E2E_NOTIFICATION_FIXTURE === '1') {
   const task = app.store.createTask({ title: 'Local durable task notification fixture', description: 'Offline task notification source.' }, { ...author, requestId: 'task-notification-offline-fixture' });
   app.store.createTaskComment(task.id, { body: 'A disposable task contributor comment.' }, { ...author, principalId: contributor.id, displayName: contributor.displayName, requestId: 'task-notification-offline-comment' });
 }
+if (process.env.E2E_OBJECT_NOTIFICATION_FIXTURE === '1') {
+  const author = { principalId: `local:${app.auth.workspaceId}`, displayName: 'Local reader', credentialId: null, requestId: 'object-notification-offline-fixture' };
+  const contributor = await app.auth.createAccount({ username: 'object-notification-fixture', displayName: 'Object Fixture Contributor', password: 'test-only-local-object-notification-password' });
+  const actor = { ...author, principalId: contributor.id, displayName: contributor.displayName, requestId: 'object-notification-offline-update' };
+  const document = app.store.createDocument({ title: 'Local durable wiki notification fixture', slug: 'notification-fixture', content: 'First local wiki source.' }, author);
+  app.store.objectSubscriptions.mutate(document.id, { action: 'subscribe', principalId: author.principalId, expectedSubscriptionVersion: 0, expectedAccessEpoch: app.policies.epoch() }, author);
+  app.store.updateDocument(document.id, { title: document.title, slug: document.slug, content: 'Updated local wiki source.', expectedVersion: document.version }, actor);
+  const paste = app.store.pastes.create({ title: 'Local durable Paste notification fixture', content: 'Exact local paste source.\n' }, author);
+  app.store.pastes.comment(paste.id, { body: 'A disposable Paste comment.', contentVersion: paste.contentVersion }, actor);
+}
 const passwordStore = createStore({ path: join(directory, 'password-workspace.sqlite') });
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });
 for (const account of authAccounts) await provisioner.createAccount(account);
