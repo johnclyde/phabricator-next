@@ -14,7 +14,8 @@ and hyphens; a terminal period is excluded. Matching is case-insensitive while
 the original spelling remains intact. `mail@example` and `@@person` are not
 mentions. Recognized code, literal and link constructs suppress mentions; quoted
 prose and list text can still contain them. This is extraction, not a general
-Remarkup renderer or an interpreter for custom markup.
+Remarkup renderer or an interpreter for custom markup. F025 adds a separate
+[core discussion reader](remarkup.md), preserving this scanner and saved proofs.
 
 Resolution happens inside the original writer transaction. Only enabled people
 who can currently view the target are resolved. Local mode also recognizes its

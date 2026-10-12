@@ -1,4 +1,5 @@
-import { MentionedText, MentionPicker } from './PeopleMentions';
+import { MentionPicker } from './PeopleMentions';
+import { DiscussionBody } from './Remarkup';
 import type { PublicAccount } from '../shared/auth';
 import DraftAvailability from './DraftAvailability';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -180,7 +181,7 @@ function ThreadSuggestion({ root, thread, detail, online, canEdit, mutate, saved
 function Comment({ comment, versions }: { comment: ReviewComment; versions: RevisionVersion[] }) {
   const original = versions.find(version => version.id === comment.versionId);
   const viewed = comment.viewedVersionId ? versions.find(version => version.id === comment.viewedVersionId) : null;
-  return <div className="comment" data-comment-id={comment.id}><span className="avatar small-avatar">{comment.author.slice(0, 1).toUpperCase()}</span><div><div className="comment-meta"><strong>{comment.author}</strong><span>{timestamp(comment.createdAt)}</span><span>v{original?.number ?? '?'}{comment.filePath ? ` · ${comment.filePath}:${comment.line || 'passage'}` : ''}</span>{viewed && viewed.id !== comment.versionId && <span>Replied while viewing v{viewed.number}</span>}</div><p><MentionedText body={comment.body} mentions={comment.mentions}/></p></div></div>;
+  return <div className="comment" data-comment-id={comment.id}><span className="avatar small-avatar">{comment.author.slice(0, 1).toUpperCase()}</span><div><div className="comment-meta"><strong>{comment.author}</strong><span>{timestamp(comment.createdAt)}</span><span>v{original?.number ?? '?'}{comment.filePath ? ` · ${comment.filePath}:${comment.line || 'passage'}` : ''}</span>{viewed && viewed.id !== comment.versionId && <span>Replied while viewing v{viewed.number}</span>}</div><DiscussionBody body={comment.body} mentions={comment.mentions}/></div></div>;
 }
 function ReplyComposer({ principals, revisionId, threadId, version, originalNumber, mutate, saved }: { revisionId: string; threadId: string; version: RevisionVersion; originalNumber?: number; mutate: Mutate; saved: () => Promise<void>; principals: PublicAccount[] }) {
   const { readStored, writeStored, removeStoredIfEqual, durable, assertActive, draftIsHeld, draftHasUnsavedMemory } = useWorkspace();

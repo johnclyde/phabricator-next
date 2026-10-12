@@ -993,6 +993,42 @@
 
 .object-following-disclosure>summary{padding:12px 16px;cursor:pointer;font-weight:600;line-height:1.5;color:var(--text);overflow-wrap:anywhere}.object-following-disclosure>summary>small{font-size:11px;font-weight:400;margin-left:12px}.object-following-disclosure[open]>summary{border-bottom:1px solid var(--border)}
 .person-mention { display: inline; color: #245574; background: #e7f0f8; border: 1px solid #c9dce9; border-radius: 3px; padding: 0 3px; overflow-wrap: anywhere; }
+.discussion-body, .paste-history li > .discussion-body { display: block; min-width: 0; max-width: 100%; }
+.remarkup-content { line-height: 1.7; overflow-wrap: anywhere; white-space: normal; min-width: 0; }
+.discussion-body .remarkup-content p { white-space: normal; margin: 0 0 10px; font-size: inherit; line-height: inherit; }
+.remarkup-content > :last-child, .remarkup-content li > div > :last-child, .remarkup-content blockquote > :last-child { margin-bottom: 0; }
+.remarkup-content h2, .remarkup-content h3, .remarkup-content h4, .remarkup-content h5, .remarkup-content h6 { line-height: 1.4; margin: 14px 0 8px; font-weight: 650; }
+.remarkup-content h2 { font-size: 20px; } .remarkup-content h3 { font-size: 18px; } .remarkup-content h4 { font-size: 16px; } .remarkup-content h5, .remarkup-content h6 { font-size: 14px; }
+.remarkup-content > :first-child { margin-top: 0; }
+.remarkup-content ul, .remarkup-content ol { padding-left: 26px; margin: 8px 0; list-style-position: outside; }
+.remarkup-content ul { list-style-type: disc; } .remarkup-content ol { list-style-type: decimal; }
+.remarkup-content li { display: list-item; padding: 0; margin: 3px 0; border: 0; }
+.remarkup-content li > div { display: block; }
+.remarkup-content li.remarkup-check-item { list-style: none; position: relative; }
+.remarkup-check-item > input { position: absolute; left: -23px; top: 4px; width: 15px; height: 15px; min-height: 0; padding: 0; margin: 0; opacity: 1; }
+.remarkup-content blockquote { margin: 10px 0; padding: 8px 12px; border-left: 3px solid #91b6d0; background: #edf4f9; color: #455f74; }
+.remarkup-quote-header { font-weight: 600; margin-bottom: 5px; }
+.remarkup-content code { background: #edf1f5; border-radius: 3px; padding: 1px 4px; white-space: pre-wrap; font-size: .94em; }
+.remarkup-code-block { margin: 10px 0; min-width: 0; max-width: 100%; }
+.remarkup-code-language { background: #e6edf3; border: 1px solid var(--border); border-bottom: 0; padding: 5px 10px; font-weight: 600; font-size: 11px; }
+.remarkup-code-block pre, .remarkup-source pre { margin: 0; padding: 10px 12px; background: #f1f5f8; border: 1px solid var(--border); border-radius: 3px; max-width: 100%; overflow: auto; white-space: pre; line-height: 1.65; font-size: 12px; max-height: 420px; }
+.remarkup-code-block pre code { white-space: pre; background: transparent; padding: 0; }
+.remarkup-content hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+.remarkup-content mark { background: #fff0a8; color: inherit; }
+.remarkup-note { border-left: 3px solid #6c9cbf; padding: 8px 12px; margin: 10px 0; background: #edf4f9; }
+.remarkup-warning { border-color: #c89a3e; background: #fff7e3; } .remarkup-important { border-color: #bc635e; background: #fff0ef; }
+.remarkup-note-label { display: block; margin-bottom: 3px; }
+.remarkup-literal { white-space: pre-wrap; overflow-wrap: anywhere; }
+.remarkup-source { margin-top: 4px; font-size: 11px; color: var(--muted); }
+.remarkup-source > summary { cursor: pointer; width: fit-content; min-height: 28px; padding: 5px 0; }
+.remarkup-source[open] > summary { margin-bottom: 4px; }
+.remarkup-source pre { color: #343b49; }
+.remarkup-copy { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 7px; }
+.remarkup-copy .button { min-height: 36px; }
+.remarkup-fallback { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.paste-history .remarkup-content span { font-size: inherit; color: inherit; }
+.paste-history .remarkup-content .person-mention { color: #245574; }
+@media (max-width: 700px) { .remarkup-source > summary { min-height: 44px; padding: 12px 0; } .remarkup-copy .button { min-height: 44px; } .remarkup-code-block pre, .remarkup-source pre { font-size: 12px; max-height: 360px; } }
 .mention-picker { margin: 8px 0 12px; }
 .mention-picker > summary { cursor: pointer; min-height: 44px; padding: 12px 0; color: #285d83; }
 .mention-picker-fields { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; }

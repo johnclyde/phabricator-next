@@ -47,7 +47,7 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   await page.getByRole('button', { name: 'Discussion', exact: false }).click();
   await page.getByRole('textbox', { name: 'Review comment', exact: true }).fill('Please make the requested duration precise.');
   await page.getByRole('button', { name: 'Add Comment', exact: true }).click();
-  await expect(page.getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
+  await expect(page.locator('.remarkup-content').getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Edit & add version', exact: true }).click();
   await page.getByRole('textbox', { name: 'File content', exact: true }).fill('The applicant requests a seven-day extension.\n');
   await page.getByRole('textbox', { name: 'What changed?', exact: true }).fill('Specify the duration.');
@@ -57,9 +57,9 @@ test('prose revisions preserve word diffs, comments and invalidate old acceptanc
   await expect(page.locator('.prose-content del')).toContainText('short');
   await expect(page.getByRole('button', { name: 'Accept Reviewed Version', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Discussion', exact: false }).click();
-  await expect(page.getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
+  await expect(page.locator('.remarkup-content').getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');
-  await expect(page.getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
+  await expect(page.locator('.remarkup-content').getByText('Please make the requested duration precise.', { exact: true })).toBeVisible();
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('2');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   await page.screenshot({ path: `.data/${info.project.name}-review.png`, fullPage: true });

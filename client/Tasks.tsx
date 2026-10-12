@@ -1,4 +1,5 @@
-import { MentionedText, MentionPicker } from './PeopleMentions';
+import { MentionPicker } from './PeopleMentions';
+import { DiscussionBody } from './Remarkup';
 import TaskNotifications from './TaskNotifications';
 import { projectDisplayName } from '../shared/projects';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -81,7 +82,7 @@ export default function TaskPage({ onOpened, id, state, online, mutate, manageAc
 function Transaction({ transaction, state }: { transaction: TaskTransaction; state: AppState }) {
   const kind = { create: 'Created task', legacy: 'Retained legacy snapshot', edit: 'Edited task', comment: 'Commented', dependency: 'Changed dependency', dependency_status: 'Related task status changed', subscription: 'Following changed', merge: 'Merged duplicate', project: 'Changed project tags', column: 'Moved workboard card' }[transaction.kind];
   return <li className={`task-transaction transaction-${transaction.kind}`}><header><strong>{transaction.actor || 'Unknown (legacy)'}</strong><span>{kind}</span><small>{date(transaction.createdAt)} · Task version {transaction.taskVersion}</small></header>
-    {transaction.comment !== undefined && <p className="task-comment-body"><MentionedText body={transaction.comment} mentions={transaction.mentions}/></p>}
+    {transaction.comment !== undefined && <DiscussionBody className="task-comment-body" body={transaction.comment} mentions={transaction.mentions}/>}
     {transaction.column && <p>On <a href={`#${transaction.column.projectId}/workboard`}>{state.projects.find(project => project.id === transaction.column!.projectId)?.displayName || transaction.column.projectId}</a>: {transaction.column.fromColumns.map(column => column.name).join(', ') || 'No recorded column'} → {transaction.column.toColumn.name}. Task status is recorded separately.</p>}
     {transaction.column?.bulkSource && <p>Bulk move from <a href={`#${transaction.column.bulkSource.projectId}/workboard`}>{transaction.column.bulkSource.projectId}</a> · {transaction.column.bulkSource.column.name}. Other project tags may keep this task on its original board.</p>}
     {transaction.snapshot && <details className="task-baseline"><summary>{transaction.kind === 'legacy' ? 'View retained snapshot' : 'View original task fields'}</summary><dl><dt>Title</dt><dd>{transaction.snapshot.title}</dd><dt>Status</dt><dd>{text(transaction.snapshot.status)}</dd><dt>Priority</dt><dd>{text(transaction.snapshot.priority)}</dd><dt>Visible project tags</dt><dd><ProjectChips ids={taskProjectIds(transaction.snapshot)} state={state}/></dd><dt>Owner</dt><dd>{member(transaction.snapshot.ownerId, state, transaction.snapshot.ownerId === undefined ? 'Not recorded' : 'Unassigned')}</dd><dt>Author</dt><dd>{member(transaction.snapshot.authorId, state, 'Unknown (legacy)')}</dd><dt>Description</dt><dd><pre>{transaction.snapshot.description}</pre></dd></dl></details>}

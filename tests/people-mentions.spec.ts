@@ -47,7 +47,10 @@ test('revision comments and replies insert people by keyboard and render only sa
     await form.getByRole('button', { name: 'Add Comment', exact: true }).click();
     const thread = page.locator('.review-thread').filter({ hasText: 'Please @bob inspect this.' });
     await expect(thread.locator('.person-mention')).toHaveText(['@bob', '@BoB']);
-    await expect(thread.locator('.comment p')).toHaveText(commentBody); await expect(thread.locator('.comment img')).toHaveCount(0);
+    await expect(thread.locator('.remarkup-content code')).toHaveText('@bob');
+    const exactSource = thread.locator('.discussion-body').first().locator('.remarkup-source');
+    await exactSource.locator('summary').click(); await expect(exactSource.getByLabel('Exact comment source')).toHaveText(commentBody); await exactSource.locator('summary').click();
+    await expect(thread.locator('.comment img')).toHaveCount(0);
     expect(await page.evaluate(() => (window as Window & { mentionExecuted?: boolean }).mentionExecuted)).toBeUndefined();
     await expect(thread.locator('.person-mention').first()).toHaveAttribute('title', 'Bob Editor (@bob)');
     await expect(thread.locator('.person-mention a')).toHaveCount(0);
