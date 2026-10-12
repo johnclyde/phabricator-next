@@ -14,11 +14,20 @@ const gitFixture = await createGitFixture();
 const comparisonFixture = await createGitComparisonFixture(gitFixture);
 const blameFixture = await createGitBlameFixture(gitFixture);
 const fixturePath = resolve('.data/e2e-repository-fixture.json');
+const findingFixturePath = resolve('.data/e2e-finding-fixture.json');
 const paperRunner = process.env.E2E_REAL_TEX === '1' ? texRunnerFromEnvironment() : null;
 if (process.env.E2E_REAL_TEX === '1' && !paperRunner) throw new Error('Real TeX browser verification requires a configured isolated compiler.');
 mkdirSync(resolve('.data'), { recursive: true });
 writeFileSync(fixturePath, JSON.stringify({ barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit, importNextCommit: gitFixture.importNextCommit, importEqualCommit: gitFixture.importEqualCommit, comparisonBase: comparisonFixture.base, comparisonTarget: comparisonFixture.target, blame: blameFixture }));
 const app = createApp({ paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+if (process.env.E2E_FINDING_FIXTURE === '1') {
+  // Stored test evidence verifies presentation only. No adapter or model is run.
+  const author = { principalId: `local:${app.auth.workspaceId}`, displayName: 'Test fixture', credentialId: null, requestId: 'finding-provenance-fixture' };
+  const detail = app.store.createRevision({ title: 'Test-only stored AI evidence fixture', kind: 'document', testPlan: 'Verify stored provenance without invoking an AI provider.', files: [{ path: 'fixture.txt', content: 'Test-only source; no provider invoked.\nOriginal fixture evidence.\n' }] }, author);
+  const hosted = app.store.saveReview(detail.revision.id, 1, { provider: 'openai', model: 'test-only-hosted-model', summary: 'Static test fixture. No hosted model was called.', findings: [{ id: 'ai-1', severity: 'warning', filePath: 'fixture.txt', line: 1, title: 'Static hosted finding', body: 'Test-only hosted provenance content.', source: 'ai' }] }, author);
+  const local = app.store.saveReview(detail.revision.id, 1, { provider: 'ollama', model: 'test-only-local-model', summary: 'Static test fixture. No local model was called.', findings: [{ id: 'ai-1', severity: 'info', filePath: 'fixture.txt', line: 2, title: 'Static local-model finding', body: 'Test-only local-model provenance content.', source: 'ai' }] }, author);
+  writeFileSync(findingFixturePath, JSON.stringify({ revisionId: detail.revision.id, hostedReviewId: hosted.id, localReviewId: local.id }));
+}
 if (process.env.E2E_NOTIFICATION_FIXTURE === '1') {
   const author = { principalId: `local:${app.auth.workspaceId}`, displayName: 'Local reader', credentialId: null, requestId: 'notification-offline-fixture' };
   const contributor = await app.auth.createAccount({ username: 'notification-fixture', displayName: 'Fixture Contributor', password: 'test-only-local-notification-password' });
@@ -48,7 +57,7 @@ let closing = false;
 const close = () => {
   if (closing) return;
   closing = true;
-  void Promise.all([app.close(), passwordApp.close()]).finally(async () => { passwordStore.close(); rmSync(directory, { recursive: true, force: true }); rmSync(fixturePath, { force: true }); await gitFixture.close(); process.exit(); });
+  void Promise.all([app.close(), passwordApp.close()]).finally(async () => { passwordStore.close(); rmSync(directory, { recursive: true, force: true }); rmSync(fixturePath, { force: true }); if (process.env.E2E_FINDING_FIXTURE === '1') rmSync(findingFixturePath, { force: true }); await gitFixture.close(); process.exit(); });
 };
 process.on('SIGTERM', close);
 process.on('SIGINT', close);

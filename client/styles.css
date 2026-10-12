@@ -1088,3 +1088,34 @@
   .docx-comparison-actions, .docx-comparison-coverage { padding: 12px; }
   .docx-comparison .passage-navigation { position: sticky; top: 0; z-index: 1; background: #f7f9fb; }
 }
+
+.review-findings { min-width: 0; }
+.finding-toolbar, .finding-navigation, .finding-pages { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.finding-toolbar .field { flex: 1 1 320px; min-width: 0; margin: 0; }
+.finding-toolbar select { width: 100%; }
+.finding-review-summary { padding: 16px 18px; overflow-wrap: anywhere; }
+.finding-review-summary > * + * { margin-top: 12px; }
+.finding-review-summary h3 { line-height: 1.6; }
+.finding-review-summary summary { cursor: pointer; }
+.finding-literal { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.finding-navigation { background: #f7f9fb; }
+.finding-navigation > small { flex-basis: 100%; color: var(--muted); }
+.review-findings .finding { margin: 14px 18px; scroll-margin-block: 110px 90px; }
+.review-findings .finding > div { flex-wrap: wrap; }
+.review-findings .finding h4 { font: inherit; font-weight: 650; margin: 0; overflow-wrap: anywhere; }
+.review-findings .finding[aria-current=true] { outline: 2px solid #2980b9; outline-offset: 2px; }
+.review-findings .finding > p { margin-top: 10px; }
+.review-findings code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.finding-reload { margin: 14px 18px; }
+.finding-pages { justify-content: space-between; }
+@media(max-width:600px) {
+  .finding-toolbar, .finding-navigation, .finding-pages, .finding-review-summary { padding: 12px; }
+  .review-findings .button, .review-findings .text-button, .review-findings select, .review-findings summary { min-height: 44px; }
+  .finding-toolbar select { font-size: 16px; }
+  .finding-toolbar .button, .finding-navigation .button, .finding-pages .button { flex: 1 1 140px; white-space: normal; }
+  .finding-navigation > span { order: -1; width: 100%; text-align: center; }
+  .finding-pages > span { width: 100%; order: -1; text-align: center; }
+  .review-findings .finding { margin: 14px 12px; }
+  .review-findings .finding > div { gap: 8px; }
+  .finding-reload { margin: 12px; }
+}

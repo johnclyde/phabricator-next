@@ -68,3 +68,15 @@ test('notification commands select a private inbox without marking messages read
   for (const command of ['mark all notifications read', 'clear notifications', 'delete notifications', 'open notifications and mark them read', 'read all notifications aloud', 'read notifications', 'open Bob notifications']) assert.equal(parseCommand(command).type, 'unknown');
   assert.deepEqual(parseCommand('open outbox'), { type: 'navigate', view: 'outbox' });
 });
+
+test('finding commands navigate selected immutable evidence without requesting review or changing source', () => {
+  for (const command of ['read findings', 'Read the review findings.']) assert.deepEqual(parseCommand(command), { type: 'findings' });
+  for (const command of ['read finding', 'read current finding', 'read the selected finding', 'read this finding']) assert.deepEqual(parseCommand(command), { type: 'currentFinding' });
+  for (const command of ['next finding', 'read the next finding', 'go to next finding']) assert.deepEqual(parseCommand(command), { type: 'nextFinding' });
+  for (const command of ['previous finding', 'read the previous finding', 'show prior finding']) assert.deepEqual(parseCommand(command), { type: 'previousFinding' });
+  for (const command of ['open original finding source', 'Show the original finding source.']) assert.deepEqual(parseCommand(command), { type: 'findingSource' });
+  for (const command of ['run AI review', 'accept finding', 'dismiss finding', 'resolve finding', 'apply finding', 'next finding and accept', 'open original finding source and edit it']) assert.equal(parseCommand(command).type, 'unknown');
+  assert.deepEqual(parseCommand('show reviews'), { type: 'navigate', view: 'reviews' });
+  assert.deepEqual(parseCommand('next change'), { type: 'nextChange' });
+  assert.deepEqual(parseCommand('next thread'), { type: 'nextThread' });
+});
