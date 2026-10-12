@@ -39,7 +39,7 @@ export const COMPARISON_LIMITS: Readonly<ComparisonLimits> = Object.freeze({
   maxPassages: 1_000,
   maxRenderedCodeUnits: 120_000,
 });
-export type ComparisonLimitReason = 'input_code_units' | 'source_lines' | 'tokens' | 'edit_length' | 'comparisons' | 'segments' | 'passages' | 'rendered_code_units';
+export type ComparisonLimitReason = 'input_code_units' | 'source_lines' | 'tokens' | 'edit_length' | 'comparisons' | 'segments' | 'passages' | 'rendered_code_units' | 'paragraphs';
 interface ComparisonIdentity {
   filePath: string;
   mode: ComparisonMode;

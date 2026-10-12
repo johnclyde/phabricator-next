@@ -10,6 +10,7 @@ export interface ComparisonVoiceSnapshot {
   result: FileComparison;
   passageIndex: number;
   skipSpaceTabOnly?: boolean;
+  paragraphAlignment?: boolean;
   word?: { scopeLabel: string; basePackageSha256: string | null; targetPackageSha256: string };
 }
 
@@ -101,7 +102,8 @@ export function comparisonNarration(snapshot: ComparisonVoiceSnapshot, scope: 'a
     }
   }
   const notice = ' … Reading stopped at the speech length limit. Use read current change to hear one passage.';
-  const narration = header + filterNotice + body + (snapshot.word ? ' This stored projection has limited tracked-change coverage; it is not fully accepted Word text.' : '');
+  const paragraphNotice = snapshot.paragraphAlignment && !snapshot.word ? 'Source paragraph alignment. Exact paragraph matches describe source text, not rendered structure. ' : '';
+  const narration = header + paragraphNotice + filterNotice + body + (snapshot.word ? ' This stored projection has limited tracked-change coverage; it is not fully accepted Word text.' : '');
   const bounded = clip(narration, COMPARISON_SPEECH_LIMIT - Array.from(notice).length);
   return bounded.shortened ? bounded.text + notice : narration;
 }

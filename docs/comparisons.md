@@ -6,7 +6,7 @@ These D102 comparison controls serve code revisions, papers and prose drafts. Th
 
 The comparison precedes revision management panels. Version selectors, view tabs, file selection and change navigation remain visible. **Comparison options**, closed initially, contains Words/Lines, Swap, Show Current, the target snapshot and the space/tab navigation preference. Opening or closing it changes no source or saved selection. Keyboard shortcuts ignore a focused disclosure summary, just as they ignore other controls.
 
-Word uses the same reading order and a separate **Word comparison options** disclosure. Its version pair, scope and Words/Lines controls remain visible, along with a concise text-only limitation and whether the original Word packages differ. Full projection limits, package identities, scope navigation and reader/reset actions remain available inside the disclosure. Unavailable-source, access, offline and storage warnings remain visible. This presentation does not add paragraph alignment or rendered document comparison.
+Word uses the same reading order and a separate **Word comparison options** disclosure. Its version pair, scope and Words/Lines controls remain visible, along with a concise text-only limitation and whether the original Word packages differ. Full projection limits, package identities, scope navigation and reader/reset actions remain available inside the disclosure. Unavailable-source, access, offline and storage warnings remain visible. Word retains literal projected-text comparison; rendered document comparison remains open.
 
 D102b verification passed type checking, both production builds and the full suite (1,894 total: 1,885 passed, nine optional TeX integrations skipped). The final builds passed 96 desktop/mobile browser checks across root and mounted paths, covering layout, exact pairs, drafts, narration, offline reopening, source revocation, password-session retirement and existing PDF source navigation. Four real-compiler browser cases were skipped because no isolated compiler was configured. Preview data and schema were preserved exactly. Browser mobile emulation does not qualify physical iOS/Android devices.
 
@@ -35,6 +35,20 @@ The pure shared comparison helper bounds combined source size, source lines, tok
 An exceeded limit produces an explicit unavailable comparison with the selected source/download alternatives. It never reports a truncated diff as “no changes.” Raw source remains the exact snapshot; a comparison fallback does not edit or shorten it.
 
 Source comments and the paper structure view have a separate target-only display budget of 120,000 UTF-16 units and 8,000 displayed lines. A small target remains available for source comments even when a large base prevents comparison. An oversized target remains readable as raw source or downloadable, with an explicit notice that inline comments and structure are unavailable for that file.
+
+## Aligning source paragraphs
+
+For papers and prose documents, **Align source paragraphs** is an optional Words-mode setting under Comparison options. It is off by default and persists only as presentation metadata alongside the immutable pair. Code, Lines mode and Word projections retain their existing literal comparison. The setting changes neither source nor comments, suggestions, review evidence or acceptance.
+
+Physical source paragraphs are blocks separated by blank lines containing only ASCII spaces or tabs. LF and CRLF are preserved, bare CR remains content, and non-breaking spaces do not create blank separators. A wrapped LaTeX block is a source paragraph, not a parsed or rendered paragraph. There is no TeX execution, semantic interpretation or model call.
+
+Unique exact paragraph bodies establish an ordered backbone. Exact bodies outside that backbone receive **Reordered source paragraph** labels and buttons that focus their corresponding addition or removal. Both sides remain visible in full, with their original source offsets and existing passage indexes. The labels describe exact text matches, not proof of an author's editing history. Reversing a pair may select a different equally valid backbone. Repeated, copied or edited paragraphs are not guessed as matches, and shifting unchanged paragraphs by inserting text does not imply a reorder.
+
+Ordinary gaps receive literal word comparisons. Gaps containing reordered paragraphs keep complete removals and additions, so nearby edits may appear coarser. Paragraph alignment shares the normal aggregate token, comparison, edit and rendering budgets, plus a combined ceiling of 2,000 paragraphs. Exceeding any budget returns no partial comparison. Source downloads remain available.
+
+Counterpart buttons share the usual change cursor and narration. Deferred focus is retired when the selected pair/file, session, access or source generation changes. Speech identifies source paragraph alignment without calling it rendered or semantic comparison. Comments keep their original anchors; this view does not relocate them or enable deleted-side discussion.
+
+D102c verification passed type checking, both production builds and the full suite (1,913 total: 1,904 passed, nine optional TeX integrations skipped). The final builds passed 124 desktop/mobile browser checks across root and mounted paths, including exact reconstruction, repeated/edited-match exclusions, multiple reordered bodies, stale focus callbacks, retained drafts/evidence, offline historical pairs and on-device narration. Four real-compiler browser cases were skipped because no isolated compiler was configured. Preview schema and rows remained unchanged. These browser checks use mobile emulation, not physical phones.
 
 ## Reading the selected changes aloud
 

@@ -1306,3 +1306,14 @@
   .revision-comparison-panel > .panel-heading .small-actions { gap: 12px; }
   .revision-comparison-panel > .panel-heading .text-button { min-height: 44px; }
 }
+
+.paragraph-alignment-note { padding: 8px 16px; margin: 0; border-bottom: 1px solid var(--border); background: #f1f6fa; color: #46647a; font-size: 12px; line-height: 1.5; }
+.paragraph-reorder { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 0; padding: 4px 8px; width: fit-content; max-width: 100%; border: 1px solid #b8cddd; border-radius: 3px; background: #edf4f9; color: #3b5d77; font: 12px/1.5 var(--font, sans-serif); white-space: normal; }
+.paragraph-reorder button { min-height: 44px; white-space: normal; }
+.paragraph-match-text { border-bottom: 2px dotted #5c7695; }
+.paragraph-match-text:focus { outline: 2px solid #496e8a; outline-offset: 2px; }
+@media (max-width: 700px) {
+  .paragraph-alignment-note { padding-inline: 12px; }
+  .paragraph-reorder { font-size: 12px; gap: 4px 8px; }
+  .paragraph-reorder button { font-size: 12px; }
+}

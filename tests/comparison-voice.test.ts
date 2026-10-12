@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compareFile } from '../shared/comparison.ts';
+import { compareParagraphFile } from '../shared/paragraph-comparison.ts';
 import { comparisonNarration, COMPARISON_SPEECH_LIMIT, type ComparisonVoiceSnapshot } from '../client/comparison-voice.ts';
 
 function snapshot(before: string | null, after: string | null, path = 'motion.md'): ComparisonVoiceSnapshot {
@@ -8,6 +9,9 @@ function snapshot(before: string | null, after: string | null, path = 'motion.md
     revisionId: 'L3', base: { id: 'old', number: 1, contentHash: 'hash-old' }, target: { id: 'new', number: 3, contentHash: 'hash-new' },
     filePath: path, result: compareFile(before === null ? null : { path, content: before }, after === null ? null : { path, content: after }), passageIndex: 0,
   };
+}
+function paragraphSnapshot(before: string | null, after: string | null, path = 'motion.md'): ComparisonVoiceSnapshot {
+  return { ...snapshot(before, after, path), paragraphAlignment: true, result: compareParagraphFile(before === null ? null : { path, content: before }, after === null ? null : { path, content: after }) };
 }
 
 test('narration names the exact selected pair and file and reads only its literal changes', () => {
@@ -138,4 +142,57 @@ test('Word narration distinguishes absent scopes and bounded failures without pr
   const bounded = comparisonNarration({ ...snapshot('\u2003\n'.repeat(100), '\u00a0\r'.repeat(100), 'endnotes'), word });
   assert.ok(Array.from(bounded).length <= COMPARISON_SPEECH_LIMIT);
   assert.match(bounded, /speech length limit/);
+});
+
+test('aligned narration follows original counterpart passages and calls them source text rather than rendered structure', () => {
+  const first = 'The first \\emph{finding} is exact.', second = 'The second \\emph{finding} is exact.';
+  const before = `${first}\n\n${second}\n\nConclusion remains.\n`, after = `${second}\n\n${first}\n\nConclusion remains.\n`;
+  const selected = paragraphSnapshot(before, after, 'paper.tex');
+  const result = compareParagraphFile({ path: 'paper.tex', content: before }, { path: 'paper.tex', content: after });
+  assert.equal(result.status, 'ready'); if (result.status !== 'ready') return;
+  assert.equal(result.reordered.length, 1);
+  const original = structuredClone(result), match = result.reordered[0]!;
+  const removed = comparisonNarration({ ...selected, result, passageIndex: match.beforePassage }, 'current');
+  const added = comparisonNarration({ ...selected, result, passageIndex: match.afterPassage }, 'current');
+  for (const spoken of [removed, added]) {
+    assert.match(spoken, /^L3, version 1 to version 3, file paper\.tex\./);
+    assert.match(spoken, /Source paragraph alignment\. Exact paragraph matches describe source text, not rendered structure\./);
+    assert.ok(spoken.includes(first), 'the selected original paragraph remains literal, including its TeX command');
+    assert.doesNotMatch(spoken, /No text changes|latest version|semantic equivalence|AI/);
+    assert.ok(Array.from(spoken).length <= COMPARISON_SPEECH_LIMIT);
+  }
+  assert.match(removed, new RegExp(`Change ${match.beforePassage + 1} of ${result.passages.length}\\.`));
+  assert.match(removed, /Removed text:/); assert.doesNotMatch(removed, /Added text:/);
+  assert.match(added, new RegExp(`Change ${match.afterPassage + 1} of ${result.passages.length}\\.`));
+  assert.match(added, /Added text:.*The first/s);
+  assert.match(added, /Removed text: \[2 line feeds\]/, 'counterpart navigation still narrates separator changes in the same original passage');
+  assert.deepEqual(result, original, 'narration cannot change source offsets, matching rows, or the literal result');
+});
+
+test('aligned speech keeps filtering, Unicode bounds and whole-comparison failure truthful', () => {
+  const filtered = comparisonNarration({ ...paragraphSnapshot('First  sentence.\n\nTail.', 'First sentence.\n\nTail.'), skipSpaceTabOnly: true });
+  assert.match(filtered, /Source paragraph alignment/);
+  assert.match(filtered, /No changed passages remain under this filter/);
+  assert.doesNotMatch(filtered, /No text changes in this file/);
+  const selected = paragraphSnapshot('\u2003\n'.repeat(100), '\u00a0\r'.repeat(100), `${'長😀'.repeat(150)}.tex`);
+  assert.equal(selected.result.status, 'ready');
+  const bounded = comparisonNarration(selected);
+  assert.match(bounded, /Source paragraph alignment/); assert.match(bounded, /filename shortened/); assert.match(bounded, /speech length limit/);
+  assert.ok(Array.from(bounded).length <= COMPARISON_SPEECH_LIMIT);
+  assert.doesNotMatch(bounded, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+  const unavailable = paragraphSnapshot('confidential paragraph'.repeat(12_000), 'new');
+  assert.equal(unavailable.result.status, 'too_large');
+  const failure = comparisonNarration(unavailable);
+  assert.match(failure, /exceeds the comparison limit\. No changes were summarized/);
+  assert.doesNotMatch(failure, /confidential|No text changes|changed passages|Removed text:|Added text:/);
+  assert.match(comparisonNarration(paragraphSnapshot('same\n\nsource', 'same\n\nsource')), /No text changes in this file/);
+});
+
+test('literal and Word speech do not acquire paragraph interpretation from a dormant preference', () => {
+  const literal = snapshot('Old claim.', 'New claim.');
+  assert.equal(comparisonNarration({ ...literal, paragraphAlignment: false }), comparisonNarration(literal));
+  assert.doesNotMatch(comparisonNarration(literal), /paragraph alignment|rendered structure/i);
+  const word = { ...snapshot('Old note.', 'New note.', 'footnotes'), word: { scopeLabel: 'Footnotes', basePackageSha256: 'a'.repeat(64), targetPackageSha256: 'b'.repeat(64) } };
+  assert.equal(comparisonNarration({ ...word, paragraphAlignment: true }), comparisonNarration(word), 'Word always retains its separate projected-text contract');
+  assert.match(comparisonNarration(word), /limited tracked-change coverage/);
 });

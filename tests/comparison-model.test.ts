@@ -123,3 +123,48 @@ test('navigation preference is optional for old metadata and accepts only a bool
   }
   for (const flag of [null, 0, 1, 'true', [], {}]) assert.equal(isComparisonSelection({ ...legacy, skipSpaceTabOnly: flag }, 'P1'), false);
 });
+
+test('paragraph alignment is an optional boolean whose saved record excludes computed matches and source', () => {
+  const legacy = selection();
+  assert.equal(Object.hasOwn(defaultComparison(detail())!, 'paragraphAlignment'), false, 'old and new default comparisons remain literal');
+  assert.equal(isComparisonSelection(legacy, 'P1'), true);
+  assert.equal(comparisonIdentity(legacy), comparisonIdentity({ ...legacy, paragraphAlignment: false }));
+  assert.notEqual(comparisonIdentity(legacy), comparisonIdentity({ ...legacy, paragraphAlignment: true }), 'changing alignment retires the old reading context');
+  for (const flag of [true, false]) {
+    const selected = { ...legacy, paragraphAlignment: flag, skipSpaceTabOnly: true };
+    const supplied = {
+      ...selected, source: 'Private manuscript text', reordered: [{ before: { start: 0, end: 8 }, quote: 'Private paragraph' }],
+      renderedStructure: 'Not source evidence', speech: 'Private narration',
+      base: { ...selected.base!, files: first.files }, target: { ...selected.target, files: second.files },
+    };
+    const saved = comparisonMetadata(supplied), restored: unknown = JSON.parse(JSON.stringify(saved));
+    assert.deepEqual(restored, selected);
+    assert.equal(isComparisonSelection(restored, 'P1'), true);
+    assert.deepEqual(Object.keys(saved).sort(), ['revisionId', 'base', 'target', 'filePath', 'mode', 'view', 'skipSpaceTabOnly', 'paragraphAlignment'].sort());
+    assert.deepEqual(Object.keys(saved.base!).sort(), ['contentHash', 'id']);
+    assert.deepEqual(Object.keys(saved.target).sort(), ['contentHash', 'id']);
+    supplied.base.id = 'later change'; supplied.target.contentHash = 'later change';
+    assert.deepEqual(saved, selected, 'the saved record owns copies of both exact pins');
+  }
+  for (const flag of [null, 0, 1, 'true', 'false', [], {}, new Boolean(true)]) {
+    assert.equal(isComparisonSelection({ ...legacy, paragraphAlignment: flag }, 'P1'), false, `Do not coerce ${String(flag)} into a reading preference.`);
+  }
+});
+
+test('restoring paragraph alignment retains the exact arbitrary pair and never repairs missing source pins', () => {
+  const latest = version(3, [{ path: 'newest.tex', content: 'A different current manuscript.' }]);
+  const refreshed = detail([latest, first, second], 3);
+  const selected = { ...selection(), paragraphAlignment: true };
+  for (const [base, target] of [[first, second], [second, first], [second, second], [null, first]] as const) {
+    const restored = comparisonMetadata({ ...selected, base: base && versionIdentity(base), target: versionIdentity(target) });
+    const original = structuredClone(restored);
+    assert.deepEqual(resolveComparison(refreshed, restored), { base, target });
+    assert.deepEqual(restored, original);
+    assert.equal(restored.paragraphAlignment, true);
+  }
+  const persisted = comparisonMetadata({ ...selected, mode: 'lines', view: 'source', filePath: 'removed.txt' });
+  assert.equal(persisted.paragraphAlignment, true, 'temporarily choosing another presentation does not erase the opt-in preference');
+  assert.deepEqual(resolveComparison(refreshed, persisted), { base: first, target: second });
+  expectUnavailable(resolveComparison(detail([latest, second], 3), selected), /version|snapshot/i);
+  expectUnavailable(resolveComparison(refreshed, { ...selected, target: { ...selected.target, contentHash: 'changed' } }), /version|snapshot/i);
+});
