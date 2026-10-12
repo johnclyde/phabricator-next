@@ -7,8 +7,10 @@ import type { Activity, ActorAttribution } from '../shared/types.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import { HttpError, string } from './validation.ts';
 import { hostingConfiguration } from './hosting.ts';
+import type { AuthProviders } from '../shared/google-auth.ts';
+import { createGoogleTokenVerifier, googleAuthConfiguration, googleSignInRejected, validGoogleIdentity, GOOGLE_ID_TOKEN_MAX_BYTES, type GoogleAuthConfiguration, type GoogleTokenVerifier } from './google-auth.ts';
 
-export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; publicOrigin?: string; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferRevisionAuthors?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
+export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; publicOrigin?: string; googleAuth?: GoogleAuthConfiguration; googleTokenVerifier?: GoogleTokenVerifier; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferRevisionAuthors?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
 export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number; revisions: number; projectMemberships: number }
 type AccountRow = { id: string; username: string; display_name: string; disabled: number; salt: string; password_hash: string; password_scheme: string };
 type SessionRow = { id: string; account_id: string; context: string; expires_at: number };
@@ -40,8 +42,15 @@ export class Auth {
   private readonly transferRevisionAuthors: AuthOptions['transferRevisionAuthors'];
   private readonly transferLocalProjectMemberships: AuthOptions['transferLocalProjectMemberships'];
   private deriving = 0;
+  private readonly googleAuth: GoogleAuthConfiguration | undefined;
+  private readonly googleTokenVerifier: GoogleTokenVerifier | undefined;
+  private readonly googleAccounts = new Map<string, { id: string; username: string }>();
+  private verifyingGoogle = 0;
   constructor(options: AuthOptions) {
     this.publicOrigin = hostingConfiguration(options.publicOrigin, options.mode)?.origin;
+    if (options.googleAuth !== undefined && (options.mode !== 'password' || !this.publicOrigin || options.provisioning)) throw new Error('APP_GOOGLE_AUTH requires a provisioned password workspace and APP_PUBLIC_ORIGIN HTTPS hosting.');
+    if (options.googleTokenVerifier && options.googleAuth === undefined) throw new Error('A Google token verifier requires Google authentication configuration.');
+    this.googleAuth = options.googleAuth === undefined ? undefined : googleAuthConfiguration(options.googleAuth);
     this.database = options.database;
     this.mode = options.mode;
     this.provisioning = options.provisioning ?? false;
@@ -50,6 +59,7 @@ export class Auth {
     this.transferLocalProjectMemberships = options.transferLocalProjectMemberships;
     this.basePath = normalizeBasePath(options.basePath);
     this.now = options.now ?? Date.now;
+    this.googleTokenVerifier = this.googleAuth ? options.googleTokenVerifier ?? createGoogleTokenVerifier(this.googleAuth, { now: this.now }) : undefined;
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS auth_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS auth_accounts (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0, salt TEXT NOT NULL, password_hash TEXT NOT NULL, password_scheme TEXT NOT NULL DEFAULT 'scrypt-v1');
@@ -59,6 +69,11 @@ export class Auth {
       CREATE TABLE IF NOT EXISTS auth_login_limits (name TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL);
     `);
     if (!(this.database.prepare('PRAGMA table_info(auth_accounts)').all() as { name: string }[]).some(column => column.name === 'password_scheme')) this.database.exec("ALTER TABLE auth_accounts ADD COLUMN password_scheme TEXT NOT NULL DEFAULT 'scrypt-v1'");
+    for (const [uid, username] of Object.entries(this.googleAuth?.accounts ?? {})) {
+      const account = this.database.prepare('SELECT * FROM auth_accounts WHERE username = ?').get(username) as AccountRow | undefined;
+      if (!account) throw new Error('Every APP_GOOGLE_AUTH mapping must name an existing workspace account.');
+      this.googleAccounts.set(uid, { id: account.id, username: account.username });
+    }
     this.database.prepare('INSERT OR IGNORE INTO auth_meta (name, value) VALUES (?, ?)').run('workspace_id', randomUUID());
     this.workspaceId = this.meta('workspace_id')!;
     const suffix = hash(`${this.workspaceId}:${this.basePath}`).slice(0, 20);
@@ -201,37 +216,71 @@ export class Auth {
     }
     for (const name of ['global', `account:${hash(username)}`]) this.database.prepare('INSERT INTO auth_login_limits (name, count, expires_at) VALUES (?, 1, ?) ON CONFLICT(name) DO UPDATE SET count = count + 1').run(name, now + LOGIN_WINDOW);
   }
-  async login(req: IncomingMessage, username: unknown, password: unknown): Promise<{ cookie: string; session: SessionState }> {
-    if (this.mode !== 'password') throw new HttpError(400, 'Password sign-in is not enabled.');
+  providers(): AuthProviders {
+    const config = this.googleAuth;
+    return { google: config ? { projectId: config.projectId, apiKey: config.apiKey, authDomain: config.authDomain, appId: config.appId } : null };
+  }
+  private loginChallenge(req: IncomingMessage): ChallengeRow {
     this.sameOrigin(req);
     const challengeSecret = this.cookie(req, this.challengeCookie);
     const challenge = challengeSecret ? this.database.prepare('SELECT * FROM auth_challenges WHERE hash = ?').get(hash(challengeSecret)) as ChallengeRow | undefined : undefined;
     if (!challenge || challenge.expires_at <= this.now()) throw new HttpError(403, 'Reload the sign-in form before trying again.');
     this.requireHeader(req, 'x-csrf-token', challenge.context);
+    return challenge;
+  }
+  /** Must run inside the credential writer transaction after method-specific verification. */
+  private completeLogin(req: IncomingMessage, row: AccountRow, challenge: ChallengeRow): { cookie: string; session: SessionState } {
+    const current = this.account(row.id);
+    const liveChallenge = this.database.prepare('SELECT * FROM auth_challenges WHERE hash = ?').get(challenge.hash) as ChallengeRow | undefined;
+    if (!current || current.disabled || current.username !== row.username || current.password_hash !== row.password_hash || current.password_scheme !== row.password_scheme || !liveChallenge || liveChallenge.expires_at <= this.now() || liveChallenge.context !== challenge.context) throw new HttpError(401, 'Sign-in could not be completed. Reload the sign-in form.');
+    // Keep the browser challenge-cookie identity stable across tabs, rotating its one-use CSRF context.
+    this.database.prepare('UPDATE auth_challenges SET context = ?, expires_at = ? WHERE hash = ?').run(secret(), this.now() + CHALLENGE_LIFETIME, challenge.hash);
+    const previous = this.sessionRow(req);
+    if (previous) this.database.prepare('DELETE FROM auth_sessions WHERE id = ?').run(previous.id);
+    this.database.prepare('DELETE FROM auth_login_limits WHERE name = ?').run(`account:${hash(row.username)}`);
+    this.database.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(this.now());
+    const value = secret();
+    const session: SessionRow = { id: randomUUID(), account_id: row.id, context: secret(), expires_at: this.now() + SESSION_LIFETIME };
+    this.database.prepare('INSERT INTO auth_sessions (id, secret_hash, account_id, context, expires_at) VALUES (?, ?, ?, ?, ?)').run(session.id, hash(value), row.id, session.context, session.expires_at);
+    return { cookie: this.setCookie(this.sessionCookie, value, SESSION_LIFETIME / 1000), session: this.sessionState(session) };
+  }
+  async login(req: IncomingMessage, username: unknown, password: unknown): Promise<{ cookie: string; session: SessionState }> {
+    if (this.mode !== 'password') throw new HttpError(400, 'Password sign-in is not enabled.');
+    const challenge = this.loginChallenge(req);
     const name = typeof username === 'string' ? username.toLowerCase() : '';
     if (name.length > 64 || typeof password !== 'string' || Buffer.byteLength(password) > 1024) throw new HttpError(401, 'The username or password is incorrect.');
     this.throttle(name);
     const row = this.database.prepare('SELECT * FROM auth_accounts WHERE username = ?').get(name) as AccountRow | undefined;
     const derived = await this.derive(password, row?.password_scheme === 'scrypt-v1' ? row.salt : '00'.repeat(32));
     if (!row || row.disabled || row.password_scheme !== 'scrypt-v1' || !same(derived.toString('hex'), row.password_hash)) throw new HttpError(401, 'The username or password is incorrect.');
-    return this.writeTransaction(() => {
-      // Account state and challenge can change while the password KDF is running.
-      const current = this.account(row.id);
-      const liveChallenge = this.database.prepare('SELECT * FROM auth_challenges WHERE hash = ?').get(challenge.hash) as ChallengeRow | undefined;
-      if (!current || current.disabled || current.password_hash !== row.password_hash || current.password_scheme !== row.password_scheme || !liveChallenge || liveChallenge.expires_at <= this.now() || liveChallenge.context !== challenge.context) throw new HttpError(401, 'Sign-in could not be completed. Reload the sign-in form.');
-      // Preserve the browser's challenge-cookie identity across login/logout.
-      // Rotating only its one-use CSRF token prevents concurrent anonymous
-      // bootstraps in other tabs from replacing one another's cookies.
-      this.database.prepare('UPDATE auth_challenges SET context = ?, expires_at = ? WHERE hash = ?').run(secret(), this.now() + CHALLENGE_LIFETIME, challenge.hash);
-      const previous = this.sessionRow(req);
-      if (previous) this.database.prepare('DELETE FROM auth_sessions WHERE id = ?').run(previous.id);
-      this.database.prepare('DELETE FROM auth_login_limits WHERE name = ?').run(`account:${hash(name)}`);
-      this.database.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(this.now());
-      const value = secret();
-      const session: SessionRow = { id: randomUUID(), account_id: row.id, context: secret(), expires_at: this.now() + SESSION_LIFETIME };
-      this.database.prepare('INSERT INTO auth_sessions (id, secret_hash, account_id, context, expires_at) VALUES (?, ?, ?, ?, ?)').run(session.id, hash(value), row.id, session.context, session.expires_at);
-      return { cookie: this.setCookie(this.sessionCookie, value, SESSION_LIFETIME / 1000), session: this.sessionState(session) };
-    });
+    return this.writeTransaction(() => this.completeLogin(req, row, challenge));
+  }
+  async loginGoogle(req: IncomingMessage, idToken: unknown): Promise<{ cookie: string; session: SessionState }> {
+    if (!this.googleTokenVerifier) throw new HttpError(400, 'Google sign-in is not enabled.');
+    const challenge = this.loginChallenge(req);
+    if (req.headers.authorization !== undefined) throw new HttpError(400, 'Use the browser sign-in form without an API token.');
+    const requireAnonymous = () => {
+      const session = this.sessionRow(req);
+      if (session && session.expires_at > this.now() && this.account(session.account_id)?.disabled === 0) throw new HttpError(409, 'The browser is already signed in. Sign out before choosing a different account.', 'SESSION_CHANGED');
+    };
+    requireAnonymous();
+    if (typeof idToken !== 'string' || !idToken || Buffer.byteLength(idToken) > GOOGLE_ID_TOKEN_MAX_BYTES) throw googleSignInRejected();
+    this.throttle(`google-challenge:${challenge.hash}`);
+    if (this.verifyingGoogle >= 2) throw new HttpError(429, 'Authentication is busy. Try again later.');
+    // Pin credential state before awaiting an external verifier, so password reset/disable cannot race session issuance.
+    const accounts = new Map([...this.googleAccounts.values()].map(mapping => [mapping.id, this.account(mapping.id)]));
+    this.verifyingGoogle++;
+    try {
+      let identity;
+      try { identity = await this.googleTokenVerifier(idToken); } catch { throw googleSignInRejected(); }
+      return this.writeTransaction(() => {
+        requireAnonymous();
+        if (!validGoogleIdentity(identity, this.now())) throw googleSignInRejected();
+        const mapping = this.googleAccounts.get(identity.uid), row = mapping && accounts.get(mapping.id);
+        if (!mapping || !row || row.disabled || row.username !== mapping.username) throw googleSignInRejected();
+        return this.completeLogin(req, row, challenge);
+      });
+    } finally { this.verifyingGoogle--; }
   }
   authenticate(req: IncomingMessage, scope: AuthScope = 'read'): AuthContext {
     if (this.mode === 'local') return this.local();

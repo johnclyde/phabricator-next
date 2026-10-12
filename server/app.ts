@@ -42,6 +42,8 @@ import { taskMuteInput } from '../shared/task-notifications.ts';
 import { isReviewDraftId, reviewDraftSaveInput, reviewDraftDiscardInput, reviewDraftPublishInput, type ReviewDraftInput, type ReviewDraftOperationKind } from '../shared/review-drafts.ts';
 import { assertHostingRequest, hostingConfiguration, type HostedOrigin } from './hosting.ts';
 import { serveTranscriptionModel, transcriptionModelDirectory } from './transcription-model.ts';
+import type { GoogleAuthPublicConfig } from '../shared/google-auth.ts';
+import { GOOGLE_ID_TOKEN_MAX_BYTES, type GoogleAuthConfiguration, type GoogleTokenVerifier } from './google-auth.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -53,6 +55,8 @@ export interface AppOptions {
   basePath?: string;
   authMode?: AuthMode;
   publicOrigin?: string;
+  googleAuth?: GoogleAuthConfiguration;
+  googleTokenVerifier?: GoogleTokenVerifier;
   transcriptionModelDirectory?: string;
   revisionLifecycle?: RevisionLifecycleConfig;
   revisionReviewers?: RevisionReviewerConfig;
@@ -114,7 +118,7 @@ async function waitForGit<T>(work: Promise<T>, signal?: AbortSignal): Promise<T>
   try { return await Promise.race([aborted, work]); } finally { remove(); }
 }
 
-async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: string, path: string, basePath: string): Promise<void> {
+async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: string, path: string, basePath: string, google: GoogleAuthPublicConfig | null): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(404, 'Route not found.');
   let pathname: string;
   try { pathname = decodeURIComponent(path); }
@@ -145,7 +149,7 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
   const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
   res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
   res.setHeader('Cache-Control', pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'${google ? ' https://apis.google.com' : ''}; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'${google ? ' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com' : ''}; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'${google ? `; frame-src https://${google.authDomain}` : ''}`);
   res.statusCode = 200;
   if (req.method === 'HEAD') res.end(); else res.end(html ?? await readFile(file));
 }
@@ -161,7 +165,7 @@ export function createApp(options: AppOptions = {}): App {
   const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle, revisionReviewers: options.revisionReviewers, revisionMetadata: options.revisionMetadata });
   let auth: Auth;
-  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, publicOrigin: hosting?.origin, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
+  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, publicOrigin: hosting?.origin, googleAuth: options.googleAuth, googleTokenVerifier: options.googleTokenVerifier, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
   catch (error) { if (!options.store) store.close(); throw error; }
   if (options.seed !== false) seedDemo(store);
   const policies = new PolicyStore(store.database, { principalExists: id =>
@@ -791,11 +795,15 @@ export function createApp(options: AppOptions = {}): App {
         if (url.search) throw new HttpError(400, 'Model asset URLs do not accept query parameters.');
         await serveTranscriptionModel(req, res, path, transcriptionDirectory); return;
       }
-      if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath); return; }
+      if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath, auth.providers().google); return; }
       if (path.startsWith('/api/phriction.')) {
         send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath, hosting?.origin)); return;
       }
       if (req.method === 'GET' && path === '/api/health') { send(res, 200, { ok: true }); return; }
+      if (req.method === 'GET' && path === '/api/auth/providers') {
+        if (url.search) throw new HttpError(400, 'Authentication provider URLs may not contain query parameters.');
+        send(res, 200, auth.providers()); return;
+      }
       if (req.method === 'GET' && path === '/api/session') {
         const result = auth.session(req);
         if (result.cookie) res.setHeader('Set-Cookie', result.cookie);
@@ -805,6 +813,13 @@ export function createApp(options: AppOptions = {}): App {
         if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
         const input = object(await body(req), ['username', 'password']);
         const result = await auth.login(req, input.username, input.password);
+        res.setHeader('Set-Cookie', result.cookie);
+        send(res, 200, result.session); return;
+      }
+      if (req.method === 'POST' && path === '/api/login/google') {
+        if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
+        const input = object(await body(req, GOOGLE_ID_TOKEN_MAX_BYTES + 128), ['idToken']);
+        const result = await auth.loginGoogle(req, input.idToken);
         res.setHeader('Set-Cookie', result.cookie);
         send(res, 200, result.session); return;
       }

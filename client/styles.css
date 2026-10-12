@@ -1213,3 +1213,8 @@
   .private-review > details > summary { min-height: 48px; }
   .comment-form-footer > .button, .thread-reply .comment-form-footer > .button { min-height: 44px; }
 }
+
+.session-google { display: grid; gap: 10px; margin: 20px 0 16px; }
+.session-google .button { width: 100%; min-height: 44px; white-space: normal; }
+.session-google p { margin: 2px 0 0; text-align: center; }
+.google-signin { justify-content: center; font-weight: 650; background: #fff; }

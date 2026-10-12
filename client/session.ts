@@ -1,4 +1,5 @@
 import type { SessionState } from '../shared/auth';
+import type { AuthProviders } from '../shared/google-auth';
 import { applicationPath, storageKey } from './mount';
 
 export class SessionChangedError extends Error {
@@ -68,7 +69,7 @@ export function assertSession(session: WorkspaceSession | null): asserts session
 }
 
 /** Public authentication responses are never persisted or passed through workspace caching. */
-export async function sessionRequest(path: '/api/session' | '/api/login' | '/api/logout', options: {
+export async function sessionRequest(path: '/api/session' | '/api/login' | '/api/login/google' | '/api/logout', options: {
   body?: unknown; csrfToken?: string | null; sessionContext?: string | null; signal?: AbortSignal;
 } = {}): Promise<SessionState> {
   const headers: Record<string, string> = {};
@@ -103,4 +104,18 @@ export function markLogoutPending(value: boolean): void {
 }
 export function broadcastSessionChange(kind: 'login' | 'logout'): void {
   try { localStorage.setItem(storageKey('session-event'), JSON.stringify({ kind, nonce: crypto.randomUUID() })); } catch { /* Server context checks also prevent cross-account requests. */ }
+}
+
+/** Public sign-in configuration is read online and is never workspace content or a stored grant. */
+export async function authProvidersRequest(signal?: AbortSignal): Promise<AuthProviders> {
+  const response = await fetch(applicationPath('/api/auth/providers'), { credentials: 'same-origin', cache: 'no-store', signal });
+  if (!response.ok) throw new Error('Google sign-in availability could not be checked. Password sign-in remains available.');
+  const value: unknown = await response.json();
+  if (!value || typeof value !== 'object' || !('google' in value)) throw new Error('The server returned invalid sign-in settings.');
+  const config = value.google;
+  if (config === null && Object.keys(value).length === 1) return { google: null };
+  if (Object.keys(value).length !== 1 || !config || typeof config !== 'object' || Object.keys(config).sort().join(',') !== 'apiKey,appId,authDomain,projectId') throw new Error('The server returned invalid Google sign-in settings.');
+  const row = config as Record<string, unknown>;
+  if (typeof row.projectId !== 'string' || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(row.projectId) || row.authDomain !== `${row.projectId}.firebaseapp.com` || typeof row.apiKey !== 'string' || !/^[A-Za-z0-9_-]{20,256}$/.test(row.apiKey) || typeof row.appId !== 'string' || !/^1:[0-9]{1,30}:web:[a-f0-9]{8,64}$/.test(row.appId)) throw new Error('The server returned invalid Google sign-in settings.');
+  return value as AuthProviders;
 }

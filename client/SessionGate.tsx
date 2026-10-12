@@ -1,12 +1,13 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { LockKeyhole, LogOut, ShieldCheck } from 'lucide-react';
 import type { SessionState } from '../shared/auth';
+import type { GoogleAuthPublicConfig } from '../shared/google-auth';
 import { createWorkspaceClient, type WorkspaceClient } from './offline';
 import { applicationPath, storageKey } from './mount';
 import { sessionAudioClipCount } from './audio-inbox';
 import { hasTemporaryAudio } from './audio-draft';
 import { hasTemporaryTranscripts } from './audio-transcript-drafts';
-import { activateSession, broadcastSessionChange, currentSession, lockSession, logoutPending, markLogoutPending, onSessionLocked, rememberedLocalSession, rememberMode, RequestError, sessionRequest } from './session';
+import { authProvidersRequest, activateSession, broadcastSessionChange, currentSession, lockSession, logoutPending, markLogoutPending, onSessionLocked, rememberedLocalSession, rememberMode, RequestError, sessionRequest } from './session';
 
 interface WorkspaceAccess extends WorkspaceClient { signOut: () => void }
 const WorkspaceContext = createContext<WorkspaceAccess | null>(null);
@@ -31,6 +32,15 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmLogout, setConfirmLogout] = useState(false);
+  const [google, setGoogle] = useState<GoogleAuthPublicConfig | null>(null);
+  const [googleAuth, setGoogleAuth] = useState<import('./google-auth').PreparedGoogleAuth | null>(null);
+  const [googleSetup, setGoogleSetup] = useState(0);
+  const [pageActive, setPageActive] = useState(true);
+  const [googleError, setGoogleError] = useState('');
+  const [googleAttempt, setGoogleAttempt] = useState(false);
+  const [googleExchanging, setGoogleExchanging] = useState(false);
+  const googlePosted = useRef(false);
+  const signingIn = useRef(false);
   const operation = useRef(0);
   const transport = useRef<AbortController | null>(null);
   const confirmation = useRef<HTMLDialogElement>(null);
@@ -50,6 +60,8 @@ export default function SessionGate({ children }: { children: ReactNode }) {
 
   const bootstrap = useCallback(async () => {
     const ticket = ++operation.current;
+    if (signingIn.current) setGoogleSetup(value => value + 1);
+    signingIn.current = false; googlePosted.current = false; setGoogleAttempt(false); setGoogleExchanging(false);
     transport.current?.abort();
     const controller = new AbortController(); transport.current = controller;
     if (!currentSession()) setBusy(true);
@@ -76,6 +88,24 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   }, [install]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    let prepared: import('./google-auth').PreparedGoogleAuth | null = null;
+    setGoogle(null); setGoogleAuth(null); setGoogleError('');
+    if (pageActive && session?.mode === 'password' && !session.account && !pendingLogout.current) void (async () => {
+      try {
+        const providers = await authProvidersRequest(controller.signal);
+        if (controller.signal.aborted || !providers.google) return;
+        setGoogle(providers.google);
+        const provider = await import('./google-auth');
+        if (controller.signal.aborted) return;
+        prepared = await provider.prepareGoogleAuth(providers.google, controller.signal);
+        if (!controller.signal.aborted) setGoogleAuth(prepared); else prepared.dispose();
+      } catch { if (!controller.signal.aborted) setGoogleError('Google sign-in is unavailable. Use your workspace password or retry Google setup.'); }
+    })();
+    return () => { controller.abort(); prepared?.dispose(); };
+  }, [session?.mode, session?.workspaceId, Boolean(session?.account), googleSetup, pageActive]);
+
+  useEffect(() => {
     const unsubscribe = onSessionLocked(reason => {
       setClient(null); setSession(null); setConfirmLogout(false); setPassword(''); setNotice(reason);
       if (!pendingLogout.current) void bootstrap();
@@ -87,8 +117,8 @@ export default function SessionGate({ children }: { children: ReactNode }) {
       lockSession('Your session changed in another tab. Verifying access…');
       void bootstrap();
     };
-    const resume = () => { if (document.visibilityState === 'visible') void bootstrap(); };
-    const hide = () => { if (currentSession()?.state.mode === 'password') lockSession('Verify your session to reopen this workspace.'); };
+    const resume = () => { if (document.visibilityState === 'visible') { setPageActive(true); if (!signingIn.current) void bootstrap(); } };
+    const hide = () => { setPageActive(false); operation.current++; transport.current?.abort(); signingIn.current = false; googlePosted.current = false; setGoogleAttempt(false); setGoogleExchanging(false); setBusy(false); if (currentSession()?.state.mode === 'password') lockSession('Verify your session to reopen this workspace.'); };
     const unload = (event: BeforeUnloadEvent) => {
       const current = currentSession();
       if (current && (createWorkspaceClient(current).draftRecords().length > 0 || sessionAudioClipCount(current) > 0 || hasTemporaryAudio(current) || hasTemporaryTranscripts(current))) { event.preventDefault(); event.returnValue = ''; }
@@ -114,7 +144,8 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   useEffect(() => { if (confirmLogout) confirmation.current?.showModal(); }, [confirmLogout]);
 
   const login = async (event: FormEvent) => {
-    event.preventDefault(); if (!session) return;
+    event.preventDefault(); if (!session || signingIn.current || pendingLogout.current || logoutPending()) return;
+    signingIn.current = true;
     const ticket = ++operation.current; transport.current?.abort();
     const controller = new AbortController(); transport.current = controller;
     setBusy(true); setError('');
@@ -146,8 +177,37 @@ export default function SessionGate({ children }: { children: ReactNode }) {
           if (ticket === operation.current && !controller.signal.aborted) setError('The sign-in form could not be refreshed. Reconnect, enter your password, and try again.');
         }
       } else setError(failure instanceof Error ? failure.message : 'Sign in failed.');
-    } finally { if (ticket === operation.current) setBusy(false); }
+    } finally { if (ticket === operation.current) { signingIn.current = false; setBusy(false); } }
   };
+  const loginGoogle = async () => {
+    if (!session || session.mode !== 'password' || session.account || !google || !googleAuth || signingIn.current || pendingLogout.current || logoutPending()) return;
+    const ticket = ++operation.current; transport.current?.abort();
+    const controller = new AbortController(); transport.current = controller;
+    signingIn.current = true; googlePosted.current = false; setGoogleExchanging(false); setGoogleAttempt(true); setBusy(true); setError(''); setNotice('Complete sign-in in the Google window.'); setPassword('');
+    const current = () => ticket === operation.current && !controller.signal.aborted && !pendingLogout.current && !logoutPending();
+    try {
+      // Do not await a challenge read before opening the popup: mobile browsers require this click's gesture.
+      const idToken = await googleAuth.signIn(controller.signal);
+      if (!current()) return;
+      const fresh = await sessionRequest('/api/session', { signal: controller.signal });
+      if (!current()) return;
+      rememberMode(fresh); setSession(fresh);
+      if (fresh.mode !== 'password' || fresh.account) { install(fresh); setNotice('Another tab changed this browser’s session. Sign out before switching accounts.'); return; }
+      googlePosted.current = true; setGoogleExchanging(true); setNotice('Finishing workspace sign-in…');
+      const next = await sessionRequest('/api/login/google', { body: { idToken }, csrfToken: fresh.csrfToken, signal: controller.signal });
+      if (!current()) return;
+      install(next); broadcastSessionChange('login');
+    } catch (failure) {
+      if (!current()) return;
+      setNotice('');
+      if (failure instanceof RequestError) setError(failure.message);
+      else {
+        const code = failure && typeof failure === 'object' && 'code' in failure ? String(failure.code) : '';
+        setError(code === 'auth/popup-blocked' ? 'Your browser blocked the Google window. Allow popups for this workspace and try again, or use your password.' : code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request' ? 'Google sign-in was cancelled. Your workspace remains locked.' : 'Google sign-in could not finish. Check your connection and try again, or use your workspace password.');
+      }
+    } finally { if (ticket === operation.current) { signingIn.current = false; googlePosted.current = false; setGoogleAuth(null); setGoogleAttempt(false); setGoogleExchanging(false); setBusy(false); setGoogleSetup(value => value + 1); } }
+  };
+  const cancelGoogle = () => { if (googlePosted.current) return; operation.current++; transport.current?.abort(); signingIn.current = false; googlePosted.current = false; setGoogleAttempt(false); setGoogleExchanging(false); setBusy(false); setNotice('Google sign-in cancelled in this tab.'); setGoogleAuth(null); setGoogleSetup(value => value + 1); };
   const logout = async () => {
     const previous = client?.session?.state;
     if (!previous) return;
@@ -171,7 +231,7 @@ export default function SessionGate({ children }: { children: ReactNode }) {
   </WorkspaceContext.Provider>;
 
   return <main className="session-gate"><a className="session-brand" href="#home"><img src={applicationPath('/icon.svg')} alt=""/>Phabricator <span>NEXT</span></a><section className="session-card"><div className="session-emblem"><LockKeyhole size={25}/></div><h1>{busy ? 'Verifying workspace…' : session?.mode === 'password' && !pendingLogout.current ? 'Sign in to your workspace' : 'Workspace locked'}</h1><p>Your documents and review history are available after your session is verified.</p>{notice && <p className="session-notice" role="status">{notice}</p>}{error && <div className="banner error" role="alert">{error}</div>}
-    {session?.mode === 'password' && !pendingLogout.current ? <form onSubmit={login}><label className="field"><span>Username</span><input required autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} disabled={busy}/></label><label className="field"><span>Password</span><input required type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} disabled={busy}/></label><button className="button primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign In'}</button></form> : <button className="button primary" disabled={busy} onClick={() => void bootstrap()}>{busy ? 'Connecting…' : pendingLogout.current ? 'Retry sign out' : 'Retry connection'}</button>}
+    {session?.mode === 'password' && !pendingLogout.current ? <>{google && <div className="session-google"><button type="button" className="button google-signin" disabled={busy || !googleAuth} onClick={() => void loginGoogle()}>{googleExchanging ? 'Finishing workspace sign-in…' : googleAttempt ? 'Signing in with Google…' : googleAuth ? 'Continue with Google' : 'Preparing Google sign-in…'}</button>{googleAttempt && <button type="button" className="button" disabled={googleExchanging} onClick={cancelGoogle}>Cancel Google sign-in</button>}<p className="small muted">Or sign in with your workspace password.</p></div>}{googleError && <div className="session-google"><p className="session-notice" role="status">{googleError}</p><button type="button" className="button" disabled={busy} onClick={() => setGoogleSetup(value => value + 1)}>Retry Google setup</button></div>}<form onSubmit={login}><label className="field"><span>Username</span><input required autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} disabled={busy}/></label><label className="field"><span>Password</span><input required type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} disabled={busy}/></label><button className="button primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign In'}</button></form></> : <button className="button primary" disabled={busy} onClick={() => void bootstrap()}>{busy ? 'Connecting…' : pendingLogout.current ? 'Retry sign out' : 'Retry connection'}</button>}
     <div className="session-explanation"><ShieldCheck size={17}/><span>Protected workspaces keep drafts in this tab only. Export unsaved work before signing out or leaving; closing the tab or an expired session clears it. Signing in replaces this browser’s previous session and clears its unsaved drafts in other tabs.</span></div>
   </section></main>;
 }

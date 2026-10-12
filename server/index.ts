@@ -7,6 +7,7 @@ import { revisionLifecycleFromEnvironment } from './revision-lifecycle-config.ts
 import { revisionReviewersFromEnvironment } from './revision-reviewer-config.ts';
 import { revisionMetadataFromEnvironment } from './revision-metadata-config.ts';
 import { hostingConfiguration } from './hosting.ts';
+import { googleAuthFromEnvironment } from './google-auth.ts';
 
 const port = Number(process.env.PORT ?? 4310);
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer between 1 and 65535.');
@@ -15,7 +16,7 @@ const authMode = process.env.APP_AUTH_MODE ?? 'local';
 if (authMode !== 'local' && authMode !== 'password') throw new Error('APP_AUTH_MODE must be local or password.');
 const hosting = hostingConfiguration(process.env.APP_PUBLIC_ORIGIN, authMode);
 const gitRepositories = parseGitRepositories(process.env.APP_GIT_REPOSITORIES);
-const app = createApp({ transcriptionModelDirectory: process.env.APP_TRANSCRIPTION_MODEL_DIR, revisionMetadata: revisionMetadataFromEnvironment(), revisionLifecycle: revisionLifecycleFromEnvironment(), revisionReviewers: revisionReviewersFromEnvironment(), paperRunner: texRunnerFromEnvironment(), port, basePath, authMode, publicOrigin: hosting?.origin, gitRepositories, databasePath: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite'), seed: process.env.SEED_DEMO !== 'false' && process.env.SEED_DEMO !== '0' });
+const app = createApp({ googleAuth: googleAuthFromEnvironment(), transcriptionModelDirectory: process.env.APP_TRANSCRIPTION_MODEL_DIR, revisionMetadata: revisionMetadataFromEnvironment(), revisionLifecycle: revisionLifecycleFromEnvironment(), revisionReviewers: revisionReviewersFromEnvironment(), paperRunner: texRunnerFromEnvironment(), port, basePath, authMode, publicOrigin: hosting?.origin, gitRepositories, databasePath: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite'), seed: process.env.SEED_DEMO !== 'false' && process.env.SEED_DEMO !== '0' });
 app.server.listen(port, '127.0.0.1', () => console.log(`Phabricator Next is running at ${hosting?.origin ?? `http://127.0.0.1:${port}`}${basePath} (${authMode === 'local' ? 'local single-user' : 'password-authenticated shared workspace'} mode; ${hosting ? 'HTTPS proxy required; loopback upstream only' : 'loopback only'}).`));
 let stopping = false;
 const stop = (): void => {
