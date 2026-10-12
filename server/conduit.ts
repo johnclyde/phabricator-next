@@ -175,7 +175,7 @@ function execute(method: string, params: Record<string, unknown>, store: Store, 
 }
 export interface ConduitEnvelope { result: unknown; error_code: string | null; error_info: string | null }
 /** Errors never echo supplied tokens, field names, values, or internal exception messages. */
-export async function conduitRequest(req: IncomingMessage, method: string, url: URL, store: Store, auth: Auth, policies: PolicyStore, basePath: string): Promise<ConduitEnvelope> {
+export async function conduitRequest(req: IncomingMessage, method: string, url: URL, store: Store, auth: Auth, policies: PolicyStore, basePath: string, publicOrigin?: string): Promise<ConduitEnvelope> {
   try {
     if (req.method !== 'POST' || url.search) throw invalid('Conduit methods require POST without URL query parameters.');
     const { params, token } = await parameters(req);
@@ -184,11 +184,11 @@ export async function conduitRequest(req: IncomingMessage, method: string, url: 
     try { context = auth.authenticateConduit(req, token, write ? 'write' : 'read'); } catch { throw new ConduitError('ERR-INVALID-AUTH', `A valid ${write ? 'write' : 'read'} credential is required. Browser sessions also require their current context and CSRF headers.`); }
     if (write) {
       const selected = executeConduitWrite(req, method, params, store, auth, policies, context);
-      return { result: legacyDictionary({ phid: selected.phid, status: selected.receipt.snapshot.location.status }, selected.content, `http://${req.headers.host}${basePath}`), error_code: null, error_info: null };
+      return { result: legacyDictionary({ phid: selected.phid, status: selected.receipt.snapshot.location.status }, selected.content, `${publicOrigin ?? `http://${req.headers.host}`}${basePath}`), error_code: null, error_info: null };
     }
     const result = store.read(() => {
       auth.revalidate(context, 'read');
-      return execute(method, params, store, new AccessLayer(store, auth, policies, context), `http://${req.headers.host}${basePath}`);
+      return execute(method, params, store, new AccessLayer(store, auth, policies, context), `${publicOrigin ?? `http://${req.headers.host}`}${basePath}`);
     });
     return { result, error_code: null, error_info: null };
   } catch (error) {

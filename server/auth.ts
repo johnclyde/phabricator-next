@@ -6,8 +6,9 @@ import type { ProjectAudience, ObjectPolicy, Space } from '../shared/policy.ts';
 import type { Activity, ActorAttribution } from '../shared/types.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import { HttpError, string } from './validation.ts';
+import { hostingConfiguration } from './hosting.ts';
 
-export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferRevisionAuthors?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
+export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; publicOrigin?: string; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferRevisionAuthors?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
 export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number; revisions: number; projectMemberships: number }
 type AccountRow = { id: string; username: string; display_name: string; disabled: number; salt: string; password_hash: string; password_scheme: string };
 type SessionRow = { id: string; account_id: string; context: string; expires_at: number };
@@ -30,6 +31,7 @@ export class Auth {
   readonly mode: AuthMode;
   private readonly database: DatabaseSync;
   private readonly basePath: string;
+  private readonly publicOrigin: string | undefined;
   private readonly now: () => number;
   private readonly sessionCookie: string;
   private readonly challengeCookie: string;
@@ -39,6 +41,7 @@ export class Auth {
   private readonly transferLocalProjectMemberships: AuthOptions['transferLocalProjectMemberships'];
   private deriving = 0;
   constructor(options: AuthOptions) {
+    this.publicOrigin = hostingConfiguration(options.publicOrigin, options.mode)?.origin;
     this.database = options.database;
     this.mode = options.mode;
     this.provisioning = options.provisioning ?? false;
@@ -130,12 +133,10 @@ export class Auth {
     return values[0];
   }
   private setCookie(name: string, value: string, seconds: number): string {
-    // HTTP is permitted only because the server remains bound to loopback.
-    // A network hosting mode must require TLS and add Secure explicitly.
-    return `${name}=${value}; Path=${this.basePath}; HttpOnly; SameSite=Strict; Max-Age=${seconds}`;
+    return `${name}=${value}; Path=${this.basePath}; HttpOnly; SameSite=Strict; Max-Age=${seconds}${this.publicOrigin ? '; Secure' : ''}`;
   }
   private sameOrigin(req: IncomingMessage): void {
-    if (!req.headers.host || req.headers.origin !== `http://${req.headers.host}`) throw new HttpError(403, 'A same-origin browser request is required.');
+    if (!req.headers.host || req.headers.origin !== (this.publicOrigin ?? `http://${req.headers.host}`)) throw new HttpError(403, 'A same-origin browser request is required.');
   }
   private header(req: IncomingMessage, name: string): string | undefined {
     const value = req.headers[name];

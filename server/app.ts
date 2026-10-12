@@ -39,6 +39,7 @@ import { revisionProjectInput } from '../shared/revision-projects.ts';
 import { revisionMetadataInput, type RevisionMetadataConfig } from '../shared/revision-metadata.ts';
 import { notificationReadInput } from '../shared/notifications.ts';
 import { taskMuteInput } from '../shared/task-notifications.ts';
+import { assertHostingRequest, hostingConfiguration, type HostedOrigin } from './hosting.ts';
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
@@ -49,6 +50,7 @@ export interface AppOptions {
   distPath?: string;
   basePath?: string;
   authMode?: AuthMode;
+  publicOrigin?: string;
   revisionLifecycle?: RevisionLifecycleConfig;
   revisionReviewers?: RevisionReviewerConfig;
   revisionMetadata?: RevisionMetadataConfig;
@@ -61,14 +63,9 @@ export interface AppOptions {
 }
 export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; close: () => Promise<void> }
 
-function security(req: IncomingMessage, res: ServerResponse, configuredPort: number): void {
-  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) throw new HttpError(403, 'Only loopback clients are allowed.');
-  const ports = new Set([configuredPort, req.socket.localPort ?? configuredPort, 5173]);
-  const allowedHosts = [...ports].flatMap(port => [`127.0.0.1:${port}`, `localhost:${port}`]);
-  if (!req.headers.host || !allowedHosts.includes(req.headers.host)) throw new HttpError(403, 'Only loopback hosts are allowed.');
+function security(req: IncomingMessage, res: ServerResponse, configuredPort: number, hosting: HostedOrigin | undefined, basePath: string): void {
+  assertHostingRequest(req, configuredPort, hosting, basePath);
   const origin = req.headers.origin;
-  if (origin !== undefined && !allowedHosts.some(host => origin === `http://${host}`)) throw new HttpError(403, 'This origin is not allowed.');
-  if (req.headers['sec-fetch-site'] === 'cross-site' && !origin) throw new HttpError(403, 'Cross-site requests are not allowed.');
   if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
@@ -151,6 +148,7 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
 }
 
 export function createApp(options: AppOptions = {}): App {
+  const hosting = hostingConfiguration(options.publicOrigin, options.authMode ?? 'local');
   if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
   if (options.store && options.revisionLifecycle) throw new Error('Configure revisionLifecycle on the supplied Store, or let createApp create the Store.');
   if (options.store && options.revisionReviewers) throw new Error('Configure revisionReviewers on the supplied Store, or let createApp create the Store.');
@@ -159,7 +157,7 @@ export function createApp(options: AppOptions = {}): App {
   const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle, revisionReviewers: options.revisionReviewers, revisionMetadata: options.revisionMetadata });
   let auth: Auth;
-  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
+  try { auth = createAuth({ database: store.database, mode: options.authMode ?? 'local', basePath, publicOrigin: hosting?.origin, transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution) }); }
   catch (error) { if (!options.store) store.close(); throw error; }
   if (options.seed !== false) seedDemo(store);
   const policies = new PolicyStore(store.database, { principalExists: id =>
@@ -733,7 +731,7 @@ export function createApp(options: AppOptions = {}): App {
 
   const server = createServer((req, res) => {
     void (async () => {
-      security(req, res, options.port ?? 4310);
+      security(req, res, options.port ?? 4310, hosting, basePath);
       const target = req.url ?? '/';
       if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\') || target.includes('#')) throw new HttpError(400, 'Malformed URL.');
       const pathname = target.split('?')[0]!;
@@ -758,7 +756,7 @@ export function createApp(options: AppOptions = {}): App {
       }
       if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath); return; }
       if (path.startsWith('/api/phriction.')) {
-        send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath)); return;
+        send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath, hosting?.origin)); return;
       }
       if (req.method === 'GET' && path === '/api/health') { send(res, 200, { ok: true }); return; }
       if (req.method === 'GET' && path === '/api/session') {

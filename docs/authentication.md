@@ -1,6 +1,6 @@
 # Workspace authentication
 
-The application has two explicit modes. `APP_AUTH_MODE=local` is the existing single-user loopback workspace. `APP_AUTH_MODE=password` requires an enabled account for every content read or mutation, including history, exports and review requests. Both modes still bind to loopback. TLS, trusted proxies and remote access are separate milestones. [Object and Space policies](policies.md) restrict access within a workspace.
+The application has two explicit modes. `APP_AUTH_MODE=local` is the existing single-user loopback workspace. `APP_AUTH_MODE=password` requires an enabled account for every content read or mutation, including history, exports and review requests. Both modes still bind to loopback. An explicit HTTPS public origin supports a same-host TLS proxy for remote browser and phone access; see [hosting](hosting.md). [Object and Space policies](policies.md) restrict access within a workspace.
 
 Existing objects migrate to the shared default Space with explicit workspace-member rules. New Spaces default to selected-member access for their creator. Objects can further restrict viewing, editing and interaction. Bearer scopes and object policies are independent requirements: a token cannot exceed its account’s object access. Account creation is an operator action from the terminal; there is no public registration or web bootstrap endpoint.
 
@@ -40,7 +40,7 @@ npm run accounts -- revoke editor TOKEN_ID
 
 ## Browser sessions and offline work
 
-Sessions expire after 12 hours. Cookies are HttpOnly, SameSite=Strict and scoped to the configured application path, with names tied to workspace and mount. They currently omit Secure because this mode is restricted to HTTP loopback; this is not a production network-hosting configuration. Applications on the same browser origin are not mutually isolated by cookie paths.
+Sessions expire after 12 hours. Cookies are HttpOnly, SameSite=Strict and scoped to the configured application path, with names tied to workspace and mount. Local HTTP mode omits Secure. Configuring `APP_PUBLIC_ORIGIN` requires password mode and adds Secure to challenge/session cookies and logout deletion. The configured public HTTPS origin is checked explicitly; forwarding headers never change authority. Applications on the same browser origin are not mutually isolated by cookie paths.
 
 Sign-in uses a one-use, expiring challenge and exact-origin validation. Protected browser requests carry a session-context token on reads as well as writes; writes additionally require CSRF validation. A cookie changed in another tab cannot silently switch the account under an older tab's requests. Login rotates a previous session, logout revokes it, and mixed cookie/bearer authentication is rejected. Passwords use salted, versioned scrypt hashing with bounded concurrency and persistent login throttling. The current scheme uses N=32768, r=8, p=3 and 32-byte salts/keys, one of the configurations in the [OWASP password storage guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt).
 

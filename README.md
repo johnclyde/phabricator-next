@@ -32,7 +32,7 @@ Then open `http://127.0.0.1:4310/workspace/`. Assets, API calls, CLI server URLs
 
 The first launch creates `.data/phabricator.sqlite` with clearly labeled sample work: a code revision, a LaTeX paper, and a fictional prose motion with two versions. Set `SEED_DEMO=false` before first launch for an empty workspace. `DATABASE_PATH` selects another database. Restarting preserves your work. To back up a database, stop the app and copy the database together with any SQLite WAL/SHM sidecars; do not delete `.data` to update the application.
 
-The server intentionally binds to loopback. Password sign-in is available with `APP_AUTH_MODE=password` after terminal account provisioning; see [workspace authentication](docs/authentication.md). Object rules and restrictive Spaces control access; see [access policies](docs/policies.md). Remote phone access and TLS/trusted-proxy hosting remain future milestones; this is not yet a public-server deployment configuration.
+The server intentionally binds to loopback. Password sign-in is available with `APP_AUTH_MODE=password` after terminal account provisioning; see [workspace authentication](docs/authentication.md). Object rules and restrictive Spaces control access; see [access policies](docs/policies.md). For remote browser and phone access, configure an explicit HTTPS public origin behind a same-host TLS proxy; see [hosting](docs/hosting.md). Hosted mode requires password authentication, Secure cookies and a persistent data directory.
 
 ## What works
 
