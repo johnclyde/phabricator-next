@@ -113,9 +113,15 @@ rejects embedded commit-message fields. Full Edit Revision validates required
 fields; upstream comment/action paths permit unrelated actions on old missing
 fields, which the native action routes preserve.
 
+F026 adds [core formatted reading](remarkup.md) for the current Summary and Test
+Plan across text and Word revisions. These remain current metadata when an older
+source version is selected. Exact source and copying remain available; editors
+and history stay literal, and a missing legacy Test Plan is never invented.
+These fields do not resolve people or produce mention effects.
+
 Explicit source/configuration/access pins, bounded corpus sizes and exact retry
 receipts are native extensions. Custom fields/forms, translated or custom corpus
-labels, Remarkup rendering, full commit-message parsing, repository
+labels, full Remarkup, full commit-message parsing, repository
 reassignment, activity-feed publication, Conduit metadata edits and upstream
 history import remain gaps. [Revision project tags](revision-projects.md) and [revision following](revision-subscriptions.md) have separate contracts. Metadata updates also reach the [revision notification inbox](notifications.md). This slice does not establish Differential parity.
 

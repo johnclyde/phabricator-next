@@ -1,10 +1,50 @@
-# Core discussion formatting
+# Core Remarkup formatting
 
 F025 adds a bounded, portable Remarkup parser and safe browser presentation for
 saved revision roots and replies, task comments, and Paste comments. This covers
 code, paper, prose and Word discussion through the same reader. It is a
 presentation slice; comment bodies, captured mention evidence, source versions,
 review decisions, following and notification causes are unchanged.
+
+F026 extends the same core reader to wiki content and object prose fields while
+preserving source editing, historical selections and current access checks.
+
+## Wiki and object prose
+
+The F026 reader formats the selected immutable wiki content version, the current
+task description, and current revision Summary and Test Plan. The revision
+reader is shared by code, paper, prose and Word reviews. Task-list descriptions
+mount their formatted reader only when the existing disclosure is opened.
+Closing it or changing its object/source releases that view.
+
+Wiki publication remains independent of editing: the default reader follows
+the published pointer; explicitly selecting an older version or an unpublished
+draft keeps that exact selection. Delete and move-away versions retain their
+marker notices. Revision metadata is deliberately current across source
+versions, including while an older source version is selected. Its existing
+current-details notice remains visible. Task descriptions show the current
+loaded task snapshot; history preserves exact before/after source.
+
+These prose fields do not contain F024 discussion mention proofs. The generic
+reader accepts no mention identities; `@username` syntax stays literal and
+does not look up people, add followers, or send notifications. Displaying,
+opening or copying prose invokes no provider, object resolver, or write API.
+Already-authorized snapshots retain their existing offline and session
+lifetimes; there is no additional persistence layer.
+
+Each reader labels its exact source by field, with an explicit Copy Source
+action. Empty-field and legacy missing-Test-Plan messages remain presentation
+notices, never invented source. Pending clipboard status belongs to the exact
+field/source context. Editors, immutable history, before/after comparisons,
+source files, Word projection and passage quotations remain literal source.
+Compact revision-list summaries remain plain text inside their existing links.
+
+The portable formatting limit remains 20,000 UTF-16 code units. Valid wiki
+content may reach 500,000, while task descriptions and revision metadata may
+reach 100,000. Larger values remain fully readable and copyable as literal
+text, with an explicit fallback notice; nothing is truncated. Formatting
+larger prose, heading anchors/table of contents and full wiki Remarkup remain
+separate parity work. There is no schema change, source rewrite, or migration.
 
 ## Supported reading
 
@@ -80,9 +120,9 @@ interpreters, syntax highlighting in comment code, heading anchors/TOCs,
 cross-object/wiki lookup, footnotes and upstream HTML interchange remain gaps.
 Unsupported features never invoke a fallback Markdown or HTML engine. Their
 source remains available; ordinary inline styles can still appear inside
-unrecognized prose syntax. Interpreter and embed forms remain inert. Wiki
-bodies, task descriptions, revision
-metadata, source files and AI findings are outside this presentation slice.
+unrecognized prose syntax. Interpreter and embed forms remain inert. F026 adds
+wiki and object prose readers as described above; source files and AI findings
+remain outside the formatting presentation.
 Full upstream nesting, malformed-input recovery and custom rule behavior are
 also not claimed by this bounded subset.
 
@@ -97,8 +137,10 @@ No PHP code or vendored runtime is executed or included in the application.
 - [Block rules](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/blockrule) and [inline rules](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/markuprule): syntax, precedence and explicit links.
 - [Semantic fixtures](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/infrastructure/markup/remarkup/__tests__/remarkup): newline styles, list/header ambiguity, quotes, code, notes and URL boundaries.
 - [People mention rule](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/people/markup/PhabricatorMentionRemarkupRule.php): syntactic tokenization precedes styles even when a username does not resolve.
+- [Phriction content reader](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/storage/PhrictionContent.php) and [version selection](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/phriction/controller/PhrictionDocumentController.php): selected/published content and lifecycle notices. Upstream enables a table of contents, which remains a native gap.
+- Differential [Summary](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/customfield/DifferentialSummaryField.php) and [Test Plan](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/customfield/DifferentialTestPlanField.php), plus the [Maniphest description](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/maniphest/controller/ManiphestTaskDetailController.php): core formatted prose fields.
 
-## Verification
+## F025 verification
 
 - `npm run check` passed. The complete `npm test` run passed 1,537 tests;
   nine optional TeX integration tests were skipped, with no failures.
@@ -123,3 +165,30 @@ No PHP code or vendored runtime is executed or included in the application.
   tables and all 91 existing rows, schema objects, rowids and foreign keys match
   the pre-update snapshot exactly; integrity checks and saved health/document
   response hashes pass. There is no migration or historical rewrite.
+
+## F026 verification
+
+- `npm run check` and production builds for the root and `/mounted/` passed.
+  The complete `npm test` run passed 1,544 tests, with nine optional TeX
+  integration tests skipped and no failures.
+- Pure rendering tests cover escaped HTML and safe destinations, complete
+  500,000-unit wiki and 100,000-unit field sources, CRLF/Unicode preservation,
+  proofless mentions, contextual labels and unmounted closed descriptions.
+- New browser cases cover selected wiki publication/draft/history, lazy task
+  descriptions, current revision metadata during historical source selection,
+  Word metadata, exact source copying, offline reading, access revocation,
+  complete literal fallback and empty/missing source provenance. Equal-text
+  version changes retire pending clipboard feedback. Read-only presentation
+  leaves immutable source, history, review and following records unchanged.
+- All 164 unique browser checks passed: 124 at the root and 40 at `/mounted/`,
+  across desktop and phone viewports. These include 32 new prose checks and
+  existing wiki, task, metadata, discussion, mention, comparison and draft
+  regressions. Twelve repeated checks additionally verified the strengthened
+  guard against external/provider requests. Desktop, phone and tablet layouts
+  were visually inspected. An older exact-source test now waits for the reload
+  result before asserting replacement text; its equality assertion is unchanged.
+- The local preview serves the exact tested JavaScript and CSS; every installed
+  build file matches the candidate. Schema 34, all 98 tables and all 91 existing
+  rows, schema objects, rowids and foreign keys match the pre-update snapshot.
+  Integrity checks and health/document response hashes pass. No migration or
+  historical rewrite was required.

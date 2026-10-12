@@ -371,8 +371,14 @@ marking for direct and path-based openings. Wiki authors do not follow automatic
 See [Wiki/Paste following](object-subscriptions.md). Wiki comments, tags and broader
 notification transports remain open.
 
+F026 adds [core formatted reading](remarkup.md) for the selected immutable content
+version, with exact source and copying, bounded whole-document literal fallback,
+and unchanged publication, comparison, offline and access semantics. Prose does
+not resolve people or produce mention effects. Heading links, a table of contents
+and full wiki Remarkup remain gaps.
+
 Full Phriction parity is not claimed. Upstream content/status import, full Conduit mappings,
-Remarkup rendering, mail, Herald, full-text indexing, and the
+full Remarkup, mail, Herald, full-text indexing, and the
 broader wiki transaction model remain open. The location model reserves the
 upstream stub state, but explicit stub creation and upstream interchange remain
 open. Active/All discovery is implemented; configurable saved defaults remain open.

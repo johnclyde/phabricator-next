@@ -4,27 +4,90 @@ import { parseRemarkup, safeRemarkupHref, type RemarkupBlock, type RemarkupInlin
 import { verifiedMentionProof } from './people-mentions';
 import { remarkupMentionParts } from './remarkup-rendering';
 
+export interface RemarkupBodyProps {
+  body: string;
+  sourceLabel?: string;
+  sourceSummary?: string;
+  fallbackNoun?: string;
+  className?: string;
+  contentClassName?: string;
+  contextKey?: string;
+}
+
+/** Prose fields have no saved mention bindings and never resolve people. */
+export function RemarkupBody({ body, sourceLabel = 'Exact source', sourceSummary = 'Source text', fallbackNoun = 'text', className = '', contentClassName = '', contextKey }: RemarkupBodyProps) {
+  return <RemarkupReader body={body} sourceLabel={sourceLabel} sourceSummary={sourceSummary} fallbackNoun={fallbackNoun} outerClassName={`remarkup-body ${className}`.trim()} contentClassName={contentClassName} contextKey={contextKey}/>;
+}
+
+/** Preserve the discussion contract, including its immutable mention proof. */
 export function DiscussionBody({ body, mentions, className = '' }: { body: string; mentions?: MentionProof; className?: string }) {
+  return <RemarkupReader body={body} mentions={mentions} sourceLabel="Exact comment source" sourceSummary="Source" fallbackNoun="comment" outerClassName="discussion-body" contentClassName={className}/>;
+}
+
+export interface LazyRemarkupBodyProps extends RemarkupBodyProps {
+  contextKey: string;
+  summary?: string;
+  disclosureClassName?: string;
+}
+
+/** A closed list-row disclosure does not mount, parse or copy the reader. */
+export function LazyRemarkupBody({ summary = 'Description', disclosureClassName = '', ...props }: LazyRemarkupBodyProps) {
+  const { body, contextKey } = props;
+  const latest = useRef({ body, contextKey });
+  latest.current = { body, contextKey };
+  const [disclosure, setDisclosure] = useState({ body, contextKey, open: false });
+  const sameContext = disclosure.body === body && disclosure.contextKey === contextKey;
+  // Reset during rendering so a new object or version is never parsed using a
+  // previously expanded row's state, even before effects have run.
+  if (!sameContext) setDisclosure({ body, contextKey, open: false });
+  const open = sameContext && disclosure.open;
+  return <details className={disclosureClassName || undefined} open={open} onToggle={event => {
+    if (latest.current.body !== body || latest.current.contextKey !== contextKey) return;
+    const nextOpen = event.currentTarget.open;
+    setDisclosure(current => current.body === body && current.contextKey === contextKey && current.open !== nextOpen ? { ...current, open: nextOpen } : current);
+  }}><summary>{summary}</summary>{open && <RemarkupBody {...props}/>}</details>;
+}
+
+function RemarkupReader({ body, mentions, sourceLabel, sourceSummary, fallbackNoun, outerClassName, contentClassName, contextKey }: {
+  body: string;
+  mentions?: MentionProof;
+  sourceLabel: string;
+  sourceSummary: string;
+  fallbackNoun: string;
+  outerClassName: string;
+  contentClassName: string;
+  contextKey?: string;
+}) {
   const document = useMemo(() => parseRemarkup(body), [body]);
   const [verified, setVerified] = useState<{ body: string; source: MentionProof; proof: MentionProof } | null>(null);
-  const [copyStatus, setCopyStatus] = useState(''), currentBody = useRef(body), mounted = useRef(true), copyGeneration = useRef(0);
-  currentBody.current = body;
+  const [copied, setCopied] = useState<{ body: string; contextKey: string | undefined; sourceLabel: string; message: string } | null>(null);
+  const current = useRef({ body, contextKey, sourceLabel }), mounted = useRef(true), copyGeneration = useRef(0);
+  if (current.current.body !== body || current.current.contextKey !== contextKey || current.current.sourceLabel !== sourceLabel) {
+    current.current = { body, contextKey, sourceLabel }; copyGeneration.current++;
+  }
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; copyGeneration.current++; }; }, []);
   useEffect(() => {
-    let current = true; setCopyStatus(''); copyGeneration.current++;
-    if (document.fallback) { setVerified(null); return () => { current = false; }; }
-    void verifiedMentionProof(body, mentions).then(proof => { if (current) setVerified(proof && mentions ? { body, source: mentions, proof } : null); });
-    return () => { current = false; };
+    setCopied(null); copyGeneration.current++;
+  }, [body, mentions, contextKey, sourceLabel]);
+  useEffect(() => {
+    let active = true;
+    if (document.fallback || !mentions) { setVerified(null); return () => { active = false; }; }
+    void verifiedMentionProof(body, mentions).then(proof => { if (active) setVerified(proof ? { body, source: mentions, proof } : null); });
+    return () => { active = false; };
   }, [body, mentions, document.fallback]);
   const proof = verified?.body === body && verified.source === mentions ? verified.proof : null;
+  const copyStatus = copied?.body === body && copied.contextKey === contextKey && copied.sourceLabel === sourceLabel ? copied.message : '';
   const copy = async () => {
     const ticket = ++copyGeneration.current;
+    const report = (message: string) => {
+      if (mounted.current && ticket === copyGeneration.current && current.current.body === body && current.current.contextKey === contextKey && current.current.sourceLabel === sourceLabel) setCopied({ body, contextKey, sourceLabel, message });
+    };
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard is unavailable. Select the source text to copy it.');
       await navigator.clipboard.writeText(body);
-      if (mounted.current && ticket === copyGeneration.current && currentBody.current === body) setCopyStatus('Exact source copied.');
+      report('Exact source copied.');
     } catch (failure) {
-      if (mounted.current && ticket === copyGeneration.current && currentBody.current === body) setCopyStatus(failure instanceof Error ? failure.message : 'Could not copy. Select the source text to copy it.');
+      report(failure instanceof Error ? failure.message : 'Could not copy. Select the source text to copy it.');
     }
   };
   const inline = (nodes: RemarkupInline[], enhance = true): ReactNode => nodes.map((node, index) => {
@@ -60,5 +123,5 @@ export function DiscussionBody({ body, mentions, className = '' }: { body: strin
       case 'literal': return <div className="remarkup-literal" key={key}>{node.text}</div>;
     }
   });
-  return <div className="discussion-body"><div className={`remarkup-content ${className}`.trim()}>{blocks(document.blocks)}</div>{document.fallback && <div className="remarkup-fallback">This comment is shown as plain text because its formatting exceeds the supported limit.</div>}<details className="remarkup-source"><summary>Source</summary><pre tabIndex={0} aria-label="Exact comment source">{body}</pre><div className="remarkup-copy"><button className="button" type="button" onClick={() => void copy()}>Copy Source</button>{copyStatus && <span role="status">{copyStatus}</span>}</div></details></div>;
+  return <div className={outerClassName}><div className={`remarkup-content ${contentClassName}`.trim()}>{blocks(document.blocks)}</div>{document.fallback && <div className="remarkup-fallback">This {fallbackNoun} is shown as plain text because its formatting exceeds the supported limit.</div>}<details className="remarkup-source"><summary>{sourceSummary}</summary><pre tabIndex={0} aria-label={sourceLabel}>{body}</pre><div className="remarkup-copy"><button className="button" type="button" onClick={() => void copy()}>Copy Source</button>{copyStatus && <span role="status">{copyStatus}</span>}</div></details></div>;
 }
