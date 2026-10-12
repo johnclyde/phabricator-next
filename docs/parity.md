@@ -248,6 +248,8 @@ The objective is to make useful automated work normal. A reviewer agent is a nam
 
 These are product contracts with only an initial implementation slice. The application has explicit hosted and local model adapters, with separate local/hosted review token scopes; current object/Space authorization applies to review requests and returned evidence. Isolated workers, evaluation datasets and automatic landing remain acceptance gaps. Configured real-provider success must be verified separately from deterministic checks and mocked adapter tests.
 
+O202a adds a native [audio inbox](audio.md) for offline recording, explicit raw-audio retention, playback and exact downloads. Local workspaces use mount/workspace-scoped IndexedDB; password sessions use memory only and retire clips at session end. Capture is bounded and foreground-oriented, with exclusive microphone ownership, cancellation of late permission grants and exportable temporary clips after storage failures. Required checks, both hosting builds, 76 browser checks and exact preview data preservation passed. This is a new capability beyond upstream, not full voice parity: offline transcription, trusted-device authenticated persistence, model lifecycle and source-bound transcript drafts remain open.
+
 ## Academic papers and LaTeX
 
 Paper projects should be normal repositories with domain-aware views. The same revision object can contain LaTeX, BibTeX, images, data and scripts. Review should answer what changed, why it is justified, what evidence supports it, and whether the result builds reproducibly.

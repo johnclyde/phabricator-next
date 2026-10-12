@@ -69,6 +69,11 @@ test('notification commands select a private inbox without marking messages read
   assert.deepEqual(parseCommand('open outbox'), { type: 'navigate', view: 'outbox' });
 });
 
+test('audio navigation never starts recording, retention or transcription', () => {
+  for (const command of ['Open audio.', 'show the audio inbox', 'go to recordings']) assert.deepEqual(parseCommand(command), { type: 'navigate', view: 'audio' });
+  for (const command of ['record audio', 'start recording', 'upload recordings', 'transcribe audio', 'open audio and start recording']) assert.equal(parseCommand(command).type, 'unknown');
+});
+
 test('finding commands navigate selected immutable evidence without requesting review or changing source', () => {
   for (const command of ['read findings', 'Read the review findings.']) assert.deepEqual(parseCommand(command), { type: 'findings' });
   for (const command of ['read finding', 'read current finding', 'read the selected finding', 'read this finding']) assert.deepEqual(parseCommand(command), { type: 'currentFinding' });

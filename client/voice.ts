@@ -8,7 +8,7 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
   return project.id.toLowerCase() === exact || project.name.toLowerCase() === exact || projectDisplayName(project).toLowerCase() === exact || Boolean(slug && (project.primarySlug === slug || (project.aliases || []).includes(slug)));
 }
 
-export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files' | 'pastes' | 'notifications';
+export type WorkspaceView = 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files' | 'pastes' | 'notifications' | 'audio';
 export type FindingVoiceAction = 'findings' | 'currentFinding' | 'nextFinding' | 'previousFinding' | 'findingSource';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
@@ -16,7 +16,7 @@ export type VoiceCommand = { type: 'notificationFilter'; filter: 'all' | 'unread
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
-  const aliases: Record<string, WorkspaceView> = { home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files', pastes: 'pastes', paste: 'pastes' };
+  const aliases: Record<string, WorkspaceView> = { audio: 'audio', 'audio inbox': 'audio', recordings: 'audio', home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files', pastes: 'pastes', paste: 'pastes' };
   const notifications = text.match(/^(?:(?:open|show|go to) (?:the )?(?:(all|unread|read) )?(?:notifications|notification inbox)|notifications|notification inbox)$/);
   if (notifications) return { type: 'notificationFilter', filter: (notifications[1] ?? 'all') as 'all' | 'unread' | 'read' };
   const destination = text.replace(/^(open|show|go to)\s+(the\s+)?/, '');

@@ -1,0 +1,41 @@
+# Audio inbox
+
+O202a provides an explicit audio inbox at `#audio` for recording thoughts, paper notes and drafting instructions. It keeps the original browser-produced audio bytes. It does not transcribe, interpret, upload, send audio to a model, create a task, or modify a document. Offline transcription and confirmed dictation into source remain separate work.
+
+## Capture and microphone ownership
+
+Choose **Record audio** to request microphone permission and begin capture with `getUserMedia` and `MediaRecorder`. The application never requests the microphone merely because this page opens. A pending request can be canceled; an eventual permission grant after cancellation, navigation or session retirement has all tracks stopped and cannot start a recorder.
+
+Audio capture owns a microphone lease in the current tab before requesting permission. It synchronously stops this tab's voice command recognition, closes the command panel and prevents another command recognizer or audio recorder in the tab from acquiring the microphone while permission or capture is active. Finishing, canceling and all failure paths release the lease. The lease does not control other tabs or applications. Command recognition has its own consent and browser-provider limitations; recording audio does not grant consent to it.
+
+The static application permits same-origin and Blob media in its content security policy so local playback works. Script and network connection permissions remain unchanged.
+
+**Stop recording** stops the microphone tracks and waits for the recorder's final audio event. Unsupported media APIs, denied permission, unavailable input, recorder failures, empty output and failure to finalize are explicit errors. No unsuccessful or partial container is presented as a completed recording. A track ending naturally produces a notice to check playback before saving. Native playback failure leaves the original bytes available to download.
+
+The complete clip is bounded to 25 MiB and ten minutes of observed capture time. Each delivered chunk, including the final one, is checked before retention. A chunk that would exceed the byte bound rejects the complete capture without clipping arbitrary bytes. The stop timer is scheduled at 9 minutes 59 seconds to allow ordinary scheduling jitter; actual elapsed time at track stop is recorded. A delayed stop beyond ten minutes is rejected rather than silently changing duration metadata. Duration is observed wall time, not a claim to have decoded and verified every encoded sample.
+
+The recorder requests chunks about once per second, but chunk delivery is not a reliable clock. Browser suspension, phone locks and media implementations may delay events or provide a large final chunk. The app stops capture when the page becomes hidden and makes no background-recording guarantee. The [MediaRecorder event documentation](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/dataavailable_event) describes these timing limitations. Actual microphone/device and mobile browser behavior still require physical-device verification.
+
+## Explicit retention and export
+
+A successful stop creates one **Temporary recording** with a title, approximate duration, size and playback controls. Choose **Save on this device** in local mode or **Keep for this session** in a password workspace to retain it. Download and discard are separate explicit actions. Download exports the original Blob without conversion or transcription; the filename uses a safe title and the recorded MIME type.
+
+The finished temporary clip stays in the active session's memory when navigating elsewhere in the app. Reopening Audio restores it. It is cleared on page exit, reload or session lock, and a browser unload guard warns while it exists. Leaving the audio page during an unfinished capture cancels and discards that capture; the page explains this before recording. Stop first to preserve a finished clip. A fresh recording cannot overwrite the current temporary clip.
+
+Local-mode saves use IndexedDB, logically namespaced by application mount and workspace. A saved clip contains an opaque ID, title, creation time, MIME type, observed duration, byte count and Blob. There is no audio server API or mutation outbox entry. A successful save is reported only after the storage transaction commits and the original session is still active. Browser quota failure or unavailable storage leaves the temporary Blob available for playback, download and explicit retry. Local browser data may be evicted or cleared; saving locally is not a backup.
+
+Password-mode retention uses the current verified tab session's memory. It never opens IndexedDB or falls back to browser persistence. It survives ordinary in-app navigation but is cleared when the session locks, the page reloads or closes, the account changes, or the user signs out. Download recordings separately before those events; the general draft JSON export does not contain audio. Session expiry is checked at action boundaries as well as by the session timer. Neither local mount namespacing nor account memory is isolation from scripts already executing in the same origin.
+
+The inbox permits at most 100 saved recordings and 200 MiB in total, in either retention mode. Each clip requires consistent MIME/Blob size metadata, a valid identity and creation time, a nonempty title of at most 200 UTF-16 code units, and the capture limits above. Saving serializes these inventory checks with the write. Malformed or unsupported stored records are reported and retained unchanged. Known valid recordings remain readable, but new saves are blocked when the inventory cannot be accounted for safely. The inbox does not silently repair, overwrite or delete unrecognized data.
+
+Saved recordings support playback, original-byte download and a title-specific delete confirmation. Deleting a clip removes only that chosen retained record. Object URLs are temporary and revoked when their view retires; page exit and session lock also pause playback and clear temporary UI references. A local page restored from the browser's page cache refreshes the saved inbox and cannot revive a discarded temporary recording.
+
+## Scope and verification
+
+This is a native extension beyond the pinned Phabricator feature set. The recognizably separate application, explicit actions and shared session boundaries follow the existing workspace interface. Core storage and microphone tests cover retention limits, malformed records, quota/atomic write behavior and session retirement. Browser tests use real `MediaRecorder` output from synthetic audio for the capture/export path, with controlled permission/error events for failure boundaries; they do not establish physical microphone quality or universal codec support.
+
+Verified for O202a: `npm run check`, `npm test` (1,653 total: 1,644 passed, nine optional TeX checks skipped), and production builds at `/` and `/workspace/`. The browser matrix passed 76 unique cases: eight audio workflows and eleven existing authentication, mount and discussion/voice cases in both desktop/mobile viewports at both mounts. It covers native synthetic-audio encoding and decoding, exact downloads, saved audio after offline reload and page-cache restoration, session retirement, late permissions, storage failures and microphone ownership. A pre-fix control failed the detached audio-source cleanup assertion; the final implementation passes it. Physical-device microphone/codec behavior remains unverified.
+
+The updated local preview was installed and restarted for the media policy change. Exact schema, rows, row IDs, foreign keys and integrity checks matched the preserved baseline, as did health/document responses; served application assets matched the candidate build. The schema remains 34.
+
+Not implemented: transcription, speech-to-source editing, uploaded audio import, waveform or trimming tools, resumable background capture, cross-device audio synchronization, durable authenticated audio retention, encrypted audio vaults, server uploads, provider integration and automatic retention policies. Raw audio stays private to the current browser retention mode until the user explicitly downloads it.

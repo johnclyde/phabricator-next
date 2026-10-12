@@ -162,6 +162,8 @@ test('static serving contains files and symlinks within the distribution directo
   try {
     const page = await fetch(`${app.base}/differential/D1`); assert.equal(page.status, 200); assert.match(await page.text(), /Workspace/);
     assert.match(page.headers.get('Content-Security-Policy')!, /frame-ancestors 'none'/);
+    assert.match(page.headers.get('Content-Security-Policy')!, /(?:^|; )media-src 'self' blob:;/);
+    assert.match(page.headers.get('Content-Security-Policy')!, /(?:^|; )connect-src 'self';/);
     assert.equal((await fetch(`${app.base}/escape.txt`)).status, 404);
     assert.equal((await fetch(`${app.base}/%2e%2e%2fsecret.txt`)).status, 404);
     assert.equal((await fetch(`${app.base}/.git/config`)).status, 404);
