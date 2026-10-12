@@ -1,3 +1,4 @@
+import { useDraftRetention } from './draft-retention';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Columns3, Move, Plus, RefreshCw } from 'lucide-react';
 import type { AppState, WorkboardDetail, WorkboardCard, WorkboardCardPage, WorkboardColumnView, WorkboardFilter, WorkboardHistory, WorkboardReceipt, MoveWorkboardCardInput, WorkboardColumnPosition, WorkboardImportPreview, ImportWorkboardColumnsInput, WorkboardBulkMovePreview, BulkMoveWorkboardCardsInput, WorkboardBulkMoveReceipt } from '../shared/types';
@@ -70,10 +71,11 @@ export default function WorkboardPage({ id, state, online, mutate, refreshWorksp
   };
   useEffect(() => { if (showHistory && detail && online && !snapshot) void historyPage(); }, [showHistory, detail?.board.version]);
   const configure = (enabled: boolean) => { if (!detail) return; setIntent({ method: 'PUT', path: `/api/projects/${id}/workboard`, body: { enabled, expectedBoardVersion: detail.board.version }, expectedBoardVersion: detail.board.version, explanation: enabled ? 'Enable this workboard. A new board starts with a single Backlog column; task status is unchanged.' : 'Disable this workboard. Columns and card positions are retained so it can be enabled again.' }); };
-  const beginMove = (card: WorkboardCard, column: WorkboardColumnView) => {
-    if (!detail) return; const key = `workboard-move:${id}:${card.id}`;
-    if (!client.draftIsHeld(key) && !readStored<MoveDraft | null>(key, null)) writeStored(key, { input: { taskId: card.id, columnId: column.id, expectedBoardVersion: detail.board.version, expectedTaskVersion: card.version, position: { edge: 'start' } }, taskTitle: card.title, columnName: column.name, proxyProjectId: column.proxyProjectId, referenceTitle: null, requestId: crypto.randomUUID() } satisfies MoveDraft);
-    setMoving(card.id);
+  const beginMove = async (card: WorkboardCard, column: WorkboardColumnView) => {
+    if (!detail) return; const key = `workboard-move:${id}:${card.id}`, epoch = client.session?.accessEpoch, ticket = sequence.current;
+    const current = () => mounted.current && client.isActive() && !client.unavailableObject(id) && ticket === sequence.current && epoch === client.session?.accessEpoch;
+    if (!client.draftIsHeld(key) && !readStored<MoveDraft | null>(key, null)) await client.retainDraft(key, { input: { taskId: card.id, columnId: column.id, expectedBoardVersion: detail.board.version, expectedTaskVersion: card.version, position: { edge: 'start' } }, taskTitle: card.title, columnName: column.name, proxyProjectId: column.proxyProjectId, referenceTitle: null, requestId: crypto.randomUUID() } satisfies MoveDraft, null, current);
+    if (current()) setMoving(card.id);
   };
   useEffect(() => { if (moving) document.querySelector('.workboard-move-editor')?.scrollIntoView({ block: 'start' }); }, [moving]);
   const [, redrawSubmitted] = useState(0); useEffect(() => client.onAccessChange(() => redrawSubmitted(value => value + 1)), []);
@@ -102,19 +104,26 @@ export default function WorkboardPage({ id, state, online, mutate, refreshWorksp
 }
 
 function MoveCardEditor({ id, taskId, detail, state, online, close, saved }: { id: string; taskId: string; detail: WorkboardDetail | null; state: AppState; online: boolean; close: () => void; saved: () => Promise<void> }) {
-  const { request, readStored, writeStored, removeStoredIfEqual, draftIsHeld, draftHasUnsavedMemory, durable, assertActive, onAccessChange } = useWorkspace(); const key = `workboard-move:${id}:${taskId}`;
+  const client = useWorkspace();
+  const { request, readStored, draftIsHeld, draftHasUnsavedMemory, durable, assertActive, onAccessChange } = client; const key = `workboard-move:${id}:${taskId}`;
   const [draft, setDraft] = useState<MoveDraft | null>(() => readStored(key, null)); const latest = useRef(draft); latest.current = draft;
   const [reviewing, setReviewing] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [persisted, setPersisted] = useState(() => !draftHasUnsavedMemory(key)); const [, changed] = useState(0);
+  const retainDraft = useDraftRetention(client, key, setPersisted);
   const mounted = useRef(true); useEffect(() => () => { mounted.current = false; }, []); useEffect(() => onAccessChange(() => changed(value => value + 1)), []);
   const held = draftIsHeld(key); const wasHeld = useRef(held); useEffect(() => { if (wasHeld.current && !held) { latest.current = null; setDraft(null); } wasHeld.current = held; }, [held]);
   const columns = detail?.columns || []; const target = columns.find(column => column.id === draft?.input.columnId); const source = columns.flatMap(column => column.cards.cards).find(card => card.id === taskId);
   const currentTask = state.tasks.find(task => task.id === taskId);
   const stale = Boolean(draft && detail && (draft.input.expectedBoardVersion !== detail.board.version || (currentTask && draft.input.expectedTaskVersion !== currentTask.version)));
-  const store = (next: MoveDraft) => { latest.current = next; setDraft(next); setPersisted(writeStored(key, next)); setReviewing(false); };
+  const store = (next: MoveDraft) => { latest.current = next; setDraft(next); retainDraft(next); setReviewing(false); };
   const reset = () => { if (!detail || !source || !source.canMove || held || (draft?.attempted && !window.confirm('The submitted move may already have been saved. Review the current board before replacing this draft with a new move. Start a new preview?'))) return; const column = columns.find(item => item.cards.cards.some(card => card.id === taskId))!; store({ input: { taskId, columnId: column.id, expectedBoardVersion: detail.board.version, expectedTaskVersion: source.version, position: { edge: 'start' } }, taskTitle: source.title, columnName: column.name, proxyProjectId: column.proxyProjectId, referenceTitle: null, requestId: crypto.randomUUID() }); };
   const submit = async () => {
-    if (!draft || (!reviewing && !draft.attempted) || busy || held || (stale && !draft.attempted) || !online) return; const original = draft; const submitted = { ...draft, attempted: true }; latest.current = submitted; setDraft(submitted); setPersisted(writeStored(key, submitted)); setBusy(true); setError('');
-    try { await request<WorkboardReceipt>(`/api/projects/${id}/workboard/moves`, { method: 'POST', body: submitted.input, id: submitted.requestId }); assertActive(); const cleared = removeStoredIfEqual(key, submitted); const originalCleared = removeStoredIfEqual(key, original); if (mounted.current && cleared && originalCleared && JSON.stringify(latest.current) === JSON.stringify(submitted)) close(); await saved(); }
+    if (!draft || (!reviewing && !draft.attempted) || busy || held || (stale && !draft.attempted) || !online) return; const original = draft; const submitted = { ...draft, attempted: true }; latest.current = submitted; setDraft(submitted); setBusy(true); setError('');
+    const epoch = client.session?.accessEpoch, snapshot = client.workboardSnapshotGeneration();
+    const current = () => mounted.current && client.isActive() && !client.unavailableObject(id) && !client.unavailableObject(taskId) && epoch === client.session?.accessEpoch && snapshot === client.workboardSnapshotGeneration();
+    try { const retained = await client.retainDraft(key, submitted, original, current); if (!current()) return; setPersisted(retained === 'saved'); if (retained === 'unavailable') throw new Error('The exact move could not be retained. Export the draft and reload access before saving.'); await request<WorkboardReceipt>(`/api/projects/${id}/workboard/moves`, { method: 'POST', body: submitted.input, id: submitted.requestId }); assertActive();
+      const cleanupEpoch = client.session?.accessEpoch, cleanupSnapshot = client.workboardSnapshotGeneration();
+      const cleanupCurrent = () => mounted.current && client.isActive() && !client.unavailableObject(id) && !client.unavailableObject(taskId) && cleanupEpoch === client.session?.accessEpoch && cleanupSnapshot === client.workboardSnapshotGeneration();
+      const cleared = await client.removeRetainedDraftIfEqual(key, submitted, cleanupCurrent); const originalCleared = await client.removeRetainedDraftIfEqual(key, original, cleanupCurrent); if (!cleanupCurrent()) return; if (mounted.current && cleared && originalCleared && JSON.stringify(latest.current) === JSON.stringify(submitted)) close(); await saved(); }
     catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not move this card. The reviewed move is retained.'); } finally { if (mounted.current) setBusy(false); }
   };
   const referenceId = draft?.input.position && 'beforeTaskId' in draft.input.position ? draft.input.position.beforeTaskId : draft?.input.position && 'afterTaskId' in draft.input.position ? draft.input.position.afterTaskId : null;

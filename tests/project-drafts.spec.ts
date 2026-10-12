@@ -9,6 +9,10 @@ test('a restored project creation draft lets unavailable initial members be remo
   await dialog.getByLabel('Name', { exact: true }).fill(name);
   await dialog.getByRole('textbox', { name: 'Description', exact: true }).fill('Keep the saved project description.');
   await dialog.getByLabel('Project color', { exact: true }).selectOption('checkered');
+  await expect.poll(() => page.evaluate(() => {
+    const key = Object.keys(localStorage).find(value => value.endsWith(':draft:project:new'));
+    return key ? JSON.parse(localStorage.getItem(key)!) as unknown : null;
+  })).toMatchObject({ name, description: 'Keep the saved project description.', colorKey: 'checkered' });
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.evaluate(() => {
     const key = Object.keys(localStorage).find(value => value.endsWith(':draft:project:new'));
@@ -16,6 +20,9 @@ test('a restored project creation draft lets unavailable initial members be remo
     const draft = JSON.parse(localStorage.getItem(key)!) as Record<string, string>;
     localStorage.setItem(key, JSON.stringify({ ...draft, memberIds: JSON.stringify(['unavailable-retained-member']) }));
   });
+  // A true reload restores the seeded durable draft; same-tab route changes
+  // deliberately retain this tab's own earlier recovery shadow.
+  page.once('dialog', dialog => void dialog.accept()); await page.reload();
   await page.getByRole('button', { name: 'Create Project', exact: true }).click();
   await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue(name);
   await expect(dialog.getByRole('textbox', { name: 'Description', exact: true })).toHaveValue('Keep the saved project description.');

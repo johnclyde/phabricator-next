@@ -13,6 +13,8 @@ export function uploadIntent(value: unknown): UploadIntent | null {
 }
 /** Reserve one immutable request slot without replacing another tab's unconfirmed intent. */
 export async function retainFileIntent<T extends { id: string }>(client: WorkspaceClient, key: string, intent: T): Promise<{ intent: T; accepted: boolean; persisted: boolean }> {
+  // The confirmed request cannot change while its writer lock is queued.
+  intent = JSON.parse(JSON.stringify(intent)) as T;
   const commit = () => {
     client.assertActive();
     const memory = client.readStored<T | null>(key, null);

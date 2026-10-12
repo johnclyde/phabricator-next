@@ -33,8 +33,11 @@ const notificationLifetimes = new WeakMap<WorkspaceSession, NotificationLifetime
 // Informational responses can advance the observed epoch without supplying the
 // workspace's visibility and capability snapshot needed by a subsequent write.
 const verifiedAuthorityEpochs = new WeakMap<WorkspaceSession, number>();
-interface TranscriptDraftRetention { baseline: string | null; latest: string; generation: number }
-const transcriptDraftRetentions = new WeakMap<WorkspaceSession, Map<string, TranscriptDraftRetention>>();
+interface DraftRetention { baseline: string | null; latest: string; generation: number }
+const draftRetentions = new WeakMap<WorkspaceSession, Map<string, DraftRetention>>();
+// Only a successful cleanup by this session permits an already mounted editor
+// to start over from an absent durable slot. Another tab deleting a draft does not.
+const clearedDraftBaselines = new WeakMap<WorkspaceSession, Map<string, string>>();
 function notificationLifetime(session: WorkspaceSession | null): NotificationLifetime | null {
   if (!session) return null;
   let lifetime = notificationLifetimes.get(session);
@@ -90,7 +93,14 @@ function queuedObject(item: PendingMutation): string | null {
 function objectFromKey(key: string): string | null { return /^(?:object-subscriptions|object-subscription-draft|object-subscription-request|task-mute|task-mute-draft|task-mute-request|revision-projects|revision-project-draft|revision-project-request|revision-subscriptions|revision-subscription-draft|revision-subscription-request|revision-metadata|revision-metadata-draft|revision-metadata-request|revision-reviewers|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle|revision-lifecycle-draft|revision-lifecycle-request|revision-authorship|revision-author-draft|revision-author-request|revision-stack|revision-dependencies|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|docx-selection|docx-comparison|paste|paste-version|paste-selection|paste-history|paste-draft|paste-comment|paste-request|paste-create|citation-draft|file|file-draft|repository|repository-import|revision-git-import|revision-source|revision|revision-comparison|review-findings|discussion-preferences|discussion-choice|wiki|task|project|workboard|workboard-move|project-draft|project-child|task-draft|task-comment|task-projects|version-draft|comment-source):([A-Z]+\d+)(?:[:]|$)/.exec(key)?.[1] || /^draft:document:([A-Z]+\d+):/.exec(key)?.[1] || null; }
 function isDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
 // Personal presentation choices retain quota-failed memory, but are purged on view loss rather than treated as content drafts.
-function isRetainedDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || key.startsWith('draft:document:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+function isRetainedDraftKey(key: string): boolean { return /^(?:object-subscription-draft|object-subscription-request|task-mute-draft|task-mute-request):/.test(key) || key.startsWith('notification-request:') || key.startsWith('draft:') || /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key === 'file-uploads:unsaved-memory' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || key.startsWith('version-draft:') || key.startsWith('comment-source:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('task-draft:') || key.startsWith('task-comment:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:'); }
+/** One lock for each scalar editor and its exact-value cleanup. Collections own their merge locks. */
+export function retainedDraftLockName(key: string): string | null {
+  const base = key.replace(/:unsaved-memory$/, '');
+  if (base.startsWith('discussion-choice:')) return `presentation-write:${base}`;
+  if (!isDraftKey(base) || base === 'file-uploads') return null;
+  return `${base.startsWith('transcript-edit-draft:') ? 'transcript-draft' : 'file-intent'}:${base}`;
+}
 function hasSavedWork(key: string, value: unknown): boolean { return !(key.startsWith('comment-source:') || key.startsWith('task-comment:')) || Boolean(value && typeof value === 'object' && (('body' in value && typeof value.body === 'string' && value.body.trim()) || ('suggestion' in value && value.suggestion))); }
 function hasProjectHierarchy(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -176,10 +186,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     // Keep failed task writes separately from durable bytes: another tab may
     // have saved a different draft, and both copies must remain recoverable.
     for (const [key, value] of session.memory) if (isRetainedDraftKey(key)) {
-      // Successful transcript saves keep a tab-local shadow so a later save in
+      // Successful saves keep a tab-local shadow so a later save in
       // another tab cannot displace the editor's exact bytes on navigation.
       // Equal physical copies need only one recovery entry.
-      if (key.startsWith('transcript-edit-draft:') && key.endsWith(':unsaved-memory') && entries.some(([savedKey, saved]) => savedKey === key.slice(0, -':unsaved-memory'.length) && saved === value)) continue;
+      if (key.endsWith(':unsaved-memory') && entries.some(([savedKey, saved]) => savedKey === key.slice(0, -':unsaved-memory'.length) && saved === value)) continue;
       entries.push([key, value]);
     }
     return entries;
@@ -264,7 +274,11 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   learnSavedRevisionSources();
   const rawOutbox = (): PendingMutation[] => { try { return JSON.parse(rawRead('outbox') || '[]') as PendingMutation[]; } catch { return []; } };
-  const recordKey = (key: string) => `quarantined-drafts:${encodeURIComponent(key)}`;
+  // Recovery records are immutable and independently addressable. The logical
+  // draft key is not an identity: two tabs may hold different work at that key.
+  const recordKey = (recoveryId: string) => `quarantined-drafts:${recoveryId}`;
+  const heldDrafts = (key: string) => [...(session?.quarantinedDrafts.values() || [])].filter(draft => draft.key === key);
+  const heldFamily = (key: string) => [...(session?.quarantinedDrafts.values() || [])].some(draft => draft.key.replace(/:unsaved-memory$/, '') === key.replace(/:unsaved-memory$/, ''));
   const quarantineChanged = () => { if (sessionIsActive(session)) for (const listener of session.accessListeners) listener([]); };
   const storageFailure = () => {
     if (!sessionIsActive(session)) return;
@@ -273,30 +287,47 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     rawRemove('quarantine-ready');
     session.quarantineWarning = 'Browser storage could not save every recovery copy. Original drafts and queued changes are retained and automatic submission is blocked. Export the drafts now, or free browser storage and retry saving them. Keep this page open until you have a copy.';
   };
-  const parseDraft = (json: string): QuarantinedDraft | null => {
-    try { const item: unknown = JSON.parse(json); return item && typeof item === 'object' && 'key' in item && typeof item.key === 'string' && 'objectId' in item && typeof item.objectId === 'string' && 'value' in item && 'reason' in item && typeof item.reason === 'string' ? item as QuarantinedDraft : null; } catch { return null; }
+  const parseDraft = (json: string, recoveryId: string): QuarantinedDraft | null => {
+    // The physical path supplies identity for both legacy and current records.
+    try { const item: unknown = JSON.parse(json); return item && typeof item === 'object' && 'key' in item && typeof item.key === 'string' && 'objectId' in item && typeof item.objectId === 'string' && 'value' in item && 'reason' in item && typeof item.reason === 'string' ? { ...item, recoveryId } as QuarantinedDraft : null; } catch { return null; }
   };
-  const recoverOriginals = () => {
-    if (!sessionIsActive(session)) return;
-    for (const [key, json] of savedEntries()) if (isDraftKey(key) && !session.quarantinedDrafts.has(key)) {
-      try { const value: unknown = JSON.parse(json); if (hasSavedWork(key, value)) { session.quarantinedDrafts.set(key, { key, objectId: objectFromKey(key) || 'Workspace', value, reason: 'Saved work held for explicit export or discard' }); session.quarantinePending.add(key); } } catch { /* Preserve unreadable original bytes. */ }
+  const addRecovery = (draft: Omit<QuarantinedDraft, 'recoveryId'>): boolean => {
+    if (!sessionIsActive(session)) return false;
+    const json = JSON.stringify(draft.value);
+    if (heldDrafts(draft.key).some(held => JSON.stringify(held.value) === json)) return false;
+    const recoveryId = `record:${crypto.randomUUID()}`;
+    session.quarantinedDrafts.set(recoveryId, { ...draft, value: JSON.parse(json) as unknown, recoveryId });
+    if (durable) session.quarantinePending.add(recoveryId);
+    return true;
+  };
+  const recoverOriginals = (all = true): boolean => {
+    if (!sessionIsActive(session)) return false;
+    let changed = false;
+    for (const [key, json] of savedEntries()) if (isDraftKey(key) && (all || heldFamily(key))) {
+      try { const value: unknown = JSON.parse(json); if (hasSavedWork(key, value)) changed = addRecovery({ key, objectId: objectFromKey(key) || 'Workspace', value, reason: 'Saved work held for explicit export or discard' }) || changed; } catch { /* Preserve unreadable original bytes. */ }
     }
-    for (const item of rawOutbox()) if (!session.quarantinedDrafts.has(`outbox:${item.id}`)) {
-      const key = `outbox:${item.id}`; session.quarantinedDrafts.set(key, { key, objectId: queuedObject(item) || 'Workspace', value: item, reason: 'Queued change held for explicit recovery; automatic submission stopped' }); session.quarantinePending.add(key);
+    for (const item of rawOutbox()) if (all || heldFamily(`outbox:${item.id}`)) {
+      const key = `outbox:${item.id}`; changed = addRecovery({ key, objectId: queuedObject(item) || 'Workspace', value: item, reason: 'Queued change held for explicit recovery; automatic submission stopped' }) || changed;
     }
+    return changed;
   };
   const syncDurableQuarantine = () => {
     if (!durable || !sessionIsActive(session)) return;
     const found = new Set<string>();
     for (const [key, json] of savedEntries()) if (key.startsWith('quarantined-drafts:')) {
-      const draft = parseDraft(json);
+      const draft = parseDraft(json, key.slice('quarantined-drafts:'.length));
       if (!draft) { storageFailure(); continue; }
-      found.add(draft.key);
-      if (!session.quarantinePending.has(draft.key)) session.quarantinedDrafts.set(draft.key, draft);
+      found.add(draft.recoveryId);
+      if (!session.quarantinePending.has(draft.recoveryId)) session.quarantinedDrafts.set(draft.recoveryId, draft);
     }
+    // Preserve a different original discovered in this tab before retiring a
+    // hold which another tab discarded. Otherwise its removal could silently
+    // turn those later bytes back into an ordinary, replayable draft.
+    const capturedOriginals = recoverOriginals(false);
     for (const key of session.quarantinePersisted) if (!found.has(key) && !session.quarantinePending.has(key)) session.quarantinedDrafts.delete(key);
     session.quarantinePersisted.clear(); for (const key of found) session.quarantinePersisted.add(key);
     if (rawRead('quarantine-format') === '2' && rawRead('quarantine-ready') !== '1') { recoverOriginals(); storageFailure(); }
+    else if (capturedOriginals) persistQuarantine();
   };
   const persistQuarantine = (): boolean => {
     if (!sessionIsActive(session)) return false;
@@ -315,10 +346,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     }
     storageFailure(); return saved;
   };
-  const quarantine = (draft: QuarantinedDraft): boolean => {
+  const quarantine = (draft: Omit<QuarantinedDraft, 'recoveryId'>): boolean => {
     if (!sessionIsActive(session)) return false;
-    syncDurableQuarantine(); session.quarantinedDrafts.set(draft.key, draft);
-    if (durable) session.quarantinePending.add(draft.key);
+    syncDurableQuarantine(); addRecovery(draft);
     const saved = persistQuarantine(); quarantineChanged(); return saved;
   };
   const invalidateRevisionStacks = (except?: AbortController, remove = true) => {
@@ -361,16 +391,16 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     holdingLegacy = true;
     try {
       const wikiState = (() => { try { return JSON.parse(rawRead('state') || 'null') as { documents?: { id: string; slug: string; version: number; location?: { path: string; status: string } }[] } | null; } catch { return null; } })();
-      for (const item of rawOutbox()) if ((item.path === '/api/documents' && item.method === 'POST' && (!canQueue(item.path, item.method, item.body) || !item.wikiAuthority)) || (/^\/api\/documents\/W\d+$/.test(item.path) && item.method === 'PUT' && (() => { const current = wikiState?.documents?.find(document => document.id === objectFromPath(item.path)); const input = item.body as { slug?: unknown; expectedVersion?: unknown }; if (!current) return false; try { return (current.location?.status !== undefined && current.location.status !== 'active' && input.expectedVersion !== current.version) || (typeof input?.slug === 'string' && canonicalWikiPath(input.slug) !== (current.location?.path || canonicalWikiPath(current.slug))); } catch { return true; } })())) if (!session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older wiki request needs a new path and parent review. Export it before preparing a separate change; it will not submit automatically.' });
-      for (const item of rawOutbox()) if ((item.path === '/api/projects' || /^\/api\/projects\/PROJ\d+$/.test(item.path)) && !canQueue(item.path, item.method, item.body) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older project change has no valid source version or includes an operation that requires an online review. Export and review it explicitly; automatic submission stopped.' });
-      for (const [key, json] of savedEntries()) if (key.startsWith('project-draft:') && !session.quarantinedDrafts.has(key)) { try { const draft = JSON.parse(json) as { expectedVersion?: unknown }; if (!Number.isSafeInteger(draft.expectedVersion) || Number(draft.expectedVersion) < 1) quarantine({ key, objectId: objectFromKey(key)!, value: draft, reason: 'This older project draft has no recorded source version. Export the entire draft and review it against the current project before saving.' }); } catch { /* Preserve unreadable original bytes. */ } }
-      for (const item of rawOutbox()) if (((item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path)) || (item.method === 'POST' && item.path === '/api/tasks')) && !session.quarantinedDrafts.has(`outbox:${item.id}`)) {
+      for (const item of rawOutbox()) if ((item.path === '/api/documents' && item.method === 'POST' && (!canQueue(item.path, item.method, item.body) || !item.wikiAuthority)) || (/^\/api\/documents\/W\d+$/.test(item.path) && item.method === 'PUT' && (() => { const current = wikiState?.documents?.find(document => document.id === objectFromPath(item.path)); const input = item.body as { slug?: unknown; expectedVersion?: unknown }; if (!current) return false; try { return (current.location?.status !== undefined && current.location.status !== 'active' && input.expectedVersion !== current.version) || (typeof input?.slug === 'string' && canonicalWikiPath(input.slug) !== (current.location?.path || canonicalWikiPath(current.slug))); } catch { return true; } })())) if (!heldFamily(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older wiki request needs a new path and parent review. Export it before preparing a separate change; it will not submit automatically.' });
+      for (const item of rawOutbox()) if ((item.path === '/api/projects' || /^\/api\/projects\/PROJ\d+$/.test(item.path)) && !canQueue(item.path, item.method, item.body) && !heldFamily(`outbox:${item.id}`)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older project change has no valid source version or includes an operation that requires an online review. Export and review it explicitly; automatic submission stopped.' });
+      for (const [key, json] of savedEntries()) if (key.startsWith('project-draft:') && !heldFamily(key)) { try { const draft = JSON.parse(json) as { expectedVersion?: unknown }; if (!Number.isSafeInteger(draft.expectedVersion) || Number(draft.expectedVersion) < 1) quarantine({ key, objectId: objectFromKey(key)!, value: draft, reason: 'This older project draft has no recorded source version. Export the entire draft and review it against the current project before saving.' }); } catch { /* Preserve unreadable original bytes. */ } }
+      for (const item of rawOutbox()) if (((item.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(item.path)) || (item.method === 'POST' && item.path === '/api/tasks')) && !heldFamily(`outbox:${item.id}`)) {
         const body = item.body as { expectedVersion?: unknown; ownerId?: unknown; projectId?: unknown; projectIds?: unknown } | null;
         if (item.method === 'PATCH' && body && ('projectId' in body || 'projectIds' in body)) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This saved field change uses an older project replacement format. Export the whole change, then review ordinary fields and project tags separately. Automatic submission is stopped.' }); continue; }
         if (body && 'ownerId' in body && (item.method === 'PATCH' || body.ownerId !== null)) { quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'Assignment changes require an online review of access effects. Export this saved change and assign the task explicitly. Automatic submission is stopped.' }); continue; }
         if (item.method === 'PATCH' && (!body || !Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 1)) quarantine({ key: `outbox:${item.id}`, objectId: queuedObject(item)!, value: item, reason: 'This older task change has no source version. Export it, inspect the current task, and make a new edit explicitly. Automatic submission is stopped.' });
       }
-      for (const [key, json] of savedEntries()) if (key.startsWith('task-draft:') && !session.quarantinedDrafts.has(key)) {
+      for (const [key, json] of savedEntries()) if (key.startsWith('task-draft:') && !heldFamily(key)) {
         try { const draft: unknown = JSON.parse(json); if (draft && typeof draft === 'object' && ((('changed' in draft && Array.isArray(draft.changed)) ? draft.changed.some(field => field === 'projectId' || field === 'projectIds') : 'projectId' in draft || 'projectIds' in draft))) quarantine({ key, objectId: objectFromKey(key)!, value: draft, reason: 'This field draft includes an older project replacement. Export the whole draft and review its fields and project tags separately before saving.' }); } catch { /* Keep unreadable drafts unchanged for explicit recovery. */ }
       }
     } finally { holdingLegacy = false; }
@@ -393,17 +423,14 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     }
   }
   const hasDraftHold = (key: string): boolean => {
-    if (session?.quarantinedDrafts.has(key)) return true;
-    if (!isRetainedDraftKey(key)) return false;
-    const base = key.replace(/:unsaved-memory$/, '');
-    return Boolean(session?.quarantinedDrafts.has(base) || session?.quarantinedDrafts.has(`${base}:unsaved-memory`));
+    return heldDrafts(key).length > 0 || (isRetainedDraftKey(key) && heldFamily(key));
   };
   const draftIsHeld = (key: string): boolean => { syncDurableQuarantine(); return sessionIsActive(session) && hasDraftHold(key); };
   const readStored = <T,>(key: string, fallback: T): T => {
     syncDurableQuarantine();
     if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id)) || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (key.startsWith('object-subscriptions:')) { const reading = objectSubscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('task-mute:')) { const reading = taskMuteReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('notifications:')) { const reading = notificationCache(parsed, session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.summary.accessEpoch < session.accessEpoch || reading.pages.some(page => page.items.some(item => session.unavailableObjects.has(item.event.objectId) || session.visibleObjects !== null && !session.visibleObjects.has(item.event.objectId)))) return fallback; } if ((key.startsWith('revision-stack:') && (!isRevisionStack(parsed, objectFromKey(key) || '') || parsed.nodes.some(node => session.unavailableObjects.has(node.id) || (session.visibleObjects !== null && !session.visibleObjects.has(node.id))))) || (key.startsWith('revision-projects:') && (!projectTagReading(parsed, objectFromKey(key) || '') || projectTagReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-subscriptions:') && (!subscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`) || subscriptionReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-metadata:') && (!metadataReading(parsed, objectFromKey(key) || '') || metadataReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-reviewers:') && (!reviewerReading(parsed, objectFromKey(key) || '') || reviewerReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-lifecycle:') && (!lifecycleReading(parsed, objectFromKey(key) || '') || lifecycleReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-authorship:') && (!authorReading(parsed, objectFromKey(key) || '') || authorReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-dependencies:') && !dependencySnapshot(parsed, objectFromKey(key) || '')) || !currentProjectCache(key, parsed) || !currentWikiSearchCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('revision-stack:') || key.startsWith('revision-projects:') || key.startsWith('object-subscriptions:') || key.startsWith('revision-subscriptions:') || key.startsWith('revision-metadata:') || key.startsWith('revision-reviewers:') || key.startsWith('revision-lifecycle:') || key.startsWith('revision-authorship:') || key.startsWith('revision-dependencies:') || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('wiki-search:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task-mute:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !session.quarantinedDrafts.has(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (key.startsWith('object-subscriptions:')) { const reading = objectSubscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('task-mute:')) { const reading = taskMuteReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('notifications:')) { const reading = notificationCache(parsed, session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.summary.accessEpoch < session.accessEpoch || reading.pages.some(page => page.items.some(item => session.unavailableObjects.has(item.event.objectId) || session.visibleObjects !== null && !session.visibleObjects.has(item.event.objectId)))) return fallback; } if ((key.startsWith('revision-stack:') && (!isRevisionStack(parsed, objectFromKey(key) || '') || parsed.nodes.some(node => session.unavailableObjects.has(node.id) || (session.visibleObjects !== null && !session.visibleObjects.has(node.id))))) || (key.startsWith('revision-projects:') && (!projectTagReading(parsed, objectFromKey(key) || '') || projectTagReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-subscriptions:') && (!subscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`) || subscriptionReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-metadata:') && (!metadataReading(parsed, objectFromKey(key) || '') || metadataReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-reviewers:') && (!reviewerReading(parsed, objectFromKey(key) || '') || reviewerReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-lifecycle:') && (!lifecycleReading(parsed, objectFromKey(key) || '') || lifecycleReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-authorship:') && (!authorReading(parsed, objectFromKey(key) || '') || authorReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-dependencies:') && !dependencySnapshot(parsed, objectFromKey(key) || '')) || !currentProjectCache(key, parsed) || !currentWikiSearchCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('revision-stack:') || key.startsWith('revision-projects:') || key.startsWith('object-subscriptions:') || key.startsWith('revision-subscriptions:') || key.startsWith('revision-metadata:') || key.startsWith('revision-reviewers:') || key.startsWith('revision-lifecycle:') || key.startsWith('revision-authorship:') || key.startsWith('revision-dependencies:') || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('wiki-search:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task-mute:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !heldFamily(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const writeStored = (key: string, value: unknown): boolean => {
     syncDurableQuarantine();
@@ -422,8 +449,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (blockedDraft(key, value)) { if (!hasSavedWork(key, value)) return true; return quarantine({ key, objectId: objectFromKey(key) || draftObjects(key, value)[0] || 'S1', value, reason: 'Permission to submit this draft changed' }); }
     if (hasDraftHold(key)) return false;
     if (key === 'outbox' && Array.isArray(value)) {
-      const held = rawOutbox().filter(item => session.quarantinePending.has(`outbox:${item.id}`));
-      value = [...held, ...(value as PendingMutation[]).filter(item => !held.some(saved => saved.id === item.id) && !session.quarantinedDrafts.has(`outbox:${item.id}`))];
+      const held = rawOutbox().filter(item => heldFamily(`outbox:${item.id}`));
+      value = [...held, ...(value as PendingMutation[]).filter(item => !held.some(saved => saved.id === item.id) && !heldFamily(`outbox:${item.id}`))];
     }
     return rawWrite(key, value);
   };
@@ -448,27 +475,38 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const draftHasUnsavedMemory = (key: string): boolean => {
     const shadow = durable ? session?.memory.get(`${key}:unsaved-memory`) : undefined;
     if (shadow === undefined) return false;
-    if (key.startsWith('transcript-edit-draft:')) try { return localStorage.getItem(contentKey(key)) !== shadow; } catch { return true; }
-    return true;
+    try { return localStorage.getItem(contentKey(key)) !== shadow; } catch { return true; }
   };
   /** Retain immediately, then compare-and-swap only this editor's durable baseline. */
-  const retainTranscriptEditDraft = async (key: string, value: unknown, expectedPrevious: unknown): Promise<'saved' | 'memory' | 'unavailable'> => {
-    if (!/^transcript-edit-draft:[DPL][1-9]\d{0,14}:[A-Za-z0-9_-]+$/.test(key)) return 'unavailable';
+  const retainDraft = async (key: string, value: unknown, expectedPrevious: unknown, isCurrent: () => boolean = () => true): Promise<'saved' | 'memory' | 'unavailable'> => {
+    const lock = retainedDraftLockName(key);
+    if (!lock || key.startsWith('discussion-choice:') || key.endsWith(':unsaved-memory')) return 'unavailable';
+    // Capture the caller's bytes before any asynchronous work or callback.
+    let json: string, expected: string | null, captured: unknown;
+    try {
+      json = JSON.stringify(value); expected = expectedPrevious === null ? null : JSON.stringify(expectedPrevious);
+      if (typeof json !== 'string' || (expected !== null && typeof expected !== 'string')) return 'unavailable';
+      captured = JSON.parse(json) as unknown;
+    } catch { return 'unavailable'; }
     syncDurableQuarantine();
     const allowed = () => {
-      try { assertSession(session); } catch { return false; }
-      return !hasDraftHold(key) && !blockedDraft(key, value) && !draftObjects(key, value).some(id => session!.unavailableObjects.has(id));
+      try { assertSession(session); if (!isCurrent()) return false; } catch { return false; }
+      return !hasDraftHold(key) && !blockedDraft(key, captured) && !draftObjects(key, captured).some(id => session!.unavailableObjects.has(id));
     };
     if (!allowed() || !session) return 'unavailable';
-    const json = JSON.stringify(value), expected = expectedPrevious === null ? null : JSON.stringify(expectedPrevious);
-    if (typeof json !== 'string' || (expected !== null && typeof expected !== 'string')) return 'unavailable';
-    if (!durable) return writeStored(key, value) ? 'saved' : 'unavailable';
-    let states = transcriptDraftRetentions.get(session);
-    if (!states) { states = new Map(); transcriptDraftRetentions.set(session, states); const owner = session; session.cleanupCallbacks.add(() => { states!.clear(); transcriptDraftRetentions.delete(owner); }); }
+    if (!durable) { session.memory.set(key, json); return 'saved'; }
+    let states = draftRetentions.get(session);
+    if (!states) {
+      states = new Map(); draftRetentions.set(session, states); const owner = session;
+      session.cleanupCallbacks.add(() => { states!.clear(); draftRetentions.delete(owner); clearedDraftBaselines.delete(owner); });
+    }
     const shadowKey = `${key}:unsaved-memory`, previousShadow = session.memory.get(shadowKey);
     let state = states.get(key);
-    if (!state || previousShadow !== state.latest) { state = { baseline: expected, latest: json, generation: 0 }; states.set(key, state); }
-    else if (expected !== state.latest && json !== state.latest) return 'unavailable';
+    if (!state || previousShadow !== state.latest) {
+      const cleared = clearedDraftBaselines.get(session);
+      state = { baseline: expected !== null && cleared?.get(key) === expected ? null : expected, latest: json, generation: 0 };
+      states.set(key, state); cleared?.delete(key);
+    } else if (expected !== state.latest && json !== state.latest) return 'unavailable';
     state.latest = json; const generation = ++state.generation;
     session.memory.set(shadowKey, json);
     const commit = () => {
@@ -482,12 +520,14 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
         return 'saved' as const;
       } catch { return 'memory' as const; }
     };
-    // No lock support means a recoverable tab-local draft, never an unsafe
-    // check-then-write that might overwrite a different tab's durable draft.
+    // Without a writer lock we retain a private recovery copy, never overwrite a
+    // physical draft after an uncoordinated check against another tab's work.
     if (typeof navigator === 'undefined' || !navigator.locks) return 'memory';
-    try { return await navigator.locks.request(contentKey(`transcript-draft:${key}`), commit); }
+    try { return await navigator.locks.request(contentKey(lock), commit); }
     catch { return allowed() && session.memory.get(shadowKey) === json ? 'memory' : 'unavailable'; }
   };
+  const retainTranscriptEditDraft = (key: string, value: unknown, expectedPrevious: unknown): Promise<'saved' | 'memory' | 'unavailable'> =>
+    /^transcript-edit-draft:[DPL][1-9]\d{0,14}:[A-Za-z0-9_-]+$/.test(key) ? retainDraft(key, value, expectedPrevious) : Promise.resolve('unavailable');
   const clearDiscussionChoice = async (key: string, expected: unknown, stillCurrent: () => boolean = () => true): Promise<boolean> => {
     if (!/^discussion-choice:[DPL]\d+:[^:]+$/.test(key)) return false;
     const commit = () => { if (!stillCurrent() || !sessionIsActive(session) || unavailableObject(objectFromKey(key)!)) return false; return removeStoredIfEqual(key, expected); };
@@ -495,7 +535,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     return commit();
   };
   const removeStored = (key: string): void => {
-    if (!sessionIsActive(session) || session.quarantinePending.has(key)) return;
+    if (!sessionIsActive(session) || heldFamily(key)) return;
     rawRemove(key);
   };
   const removeStoredIfEqual = (key: string, expected: unknown): boolean => {
@@ -503,36 +543,30 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     if (!sessionIsActive(session) || hasDraftHold(key)) return false;
     return rawRemoveMatching(key, expected);
   };
-  /** Coordinate transcript cleanup with the same locks used to retain each family. */
-  const removeTranscriptEditStoredIfEqual = async (key: string, expected: unknown, isCurrent: () => boolean = () => true): Promise<boolean> => {
-    const draft = /^transcript-edit-draft:[DPL][1-9]\d{0,14}:[A-Za-z0-9_-]+$/.test(key);
-    if (!draft && !/^transcript-edit-request:[DPL][1-9]\d{0,14}$/.test(key)) return false;
+  /** Cleanup shares the writer lock, pins each physical copy, and retires queued older writes. */
+  const removeRetainedDraftIfEqual = async (key: string, expected: unknown, isCurrent: () => boolean = () => true): Promise<boolean> => {
+    const lock = retainedDraftLockName(key);
+    if (!lock || key.startsWith('discussion-choice:') || key.endsWith(':unsaved-memory')) return false;
+    let json: string;
+    try { json = JSON.stringify(expected); if (typeof json !== 'string') return false; expected = JSON.parse(json) as unknown; } catch { return false; }
     syncDurableQuarantine();
     const allowed = () => {
       try { assertSession(session); if (!isCurrent()) return false; } catch { return false; }
       return !hasDraftHold(key) && !blockedDraft(key, expected) && !draftObjects(key, expected).some(id => session!.unavailableObjects.has(id));
     };
     if (!allowed() || !session) return false;
-    const json = JSON.stringify(expected);
-    if (typeof json !== 'string') return false;
     if (!durable) {
       const saved = session.memory.get(key);
       if (saved !== undefined && saved !== json) return false;
       session.memory.delete(key); return true;
     }
-    // Retire matching queued draft writes before awaiting a lock, but retain
-    // their recovery bytes until cleanup commits. Losing access or navigating
-    // while waiting must not erase a quota-only draft or uncertain request.
-    const shadowKey = `${key}:unsaved-memory`, states = transcriptDraftRetentions.get(session);
-    if (draft && states?.get(key)?.latest === json) states.delete(key);
+    // A retired write still has exportable bytes until cleanup actually commits.
+    const shadowKey = `${key}:unsaved-memory`, states = draftRetentions.get(session);
+    if (states?.get(key)?.latest === json) states.delete(key);
     const remainingState = states?.get(key), memory = session.memory.get(key), shadow = session.memory.get(shadowKey);
     const unchangedMemory = () => session.memory.get(key) === memory && session.memory.get(shadowKey) === shadow
       && (memory === undefined || memory === json) && (shadow === undefined || shadow === json)
-      && (!draft || transcriptDraftRetentions.get(session)?.get(key) === remainingState);
-    const removeMemory = () => {
-      if (memory === json) session.memory.delete(key);
-      if (shadow === json) session.memory.delete(shadowKey);
-    };
+      && draftRetentions.get(session)?.get(key) === remainingState;
     const commit = (canRemoveDurable: boolean) => {
       syncDurableQuarantine();
       if (!allowed() || !unchangedMemory()) return false;
@@ -542,15 +576,20 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
           if (!canRemoveDurable) return false;
           localStorage.removeItem(contentKey(key));
         } else if (saved !== null && memory !== json && shadow !== json) return false;
-        removeMemory(); return true;
+        if (memory === json) session.memory.delete(key);
+        if (shadow === json) session.memory.delete(shadowKey);
+        let cleared = clearedDraftBaselines.get(session);
+        if (!cleared) { cleared = new Map(); clearedDraftBaselines.set(session, cleared); }
+        cleared.set(key, json);
+        return true;
       } catch { return false; }
     };
-    // Without locks, a memory-only copy can still be discarded, but durable
-    // bytes never undergo an unsafe cross-tab compare-and-delete.
     if (typeof navigator === 'undefined' || !navigator.locks) return commit(false);
-    try { return await navigator.locks.request(contentKey(`${draft ? 'transcript-draft' : 'file-intent'}:${key}`), () => commit(true)); }
+    try { return await navigator.locks.request(contentKey(lock), () => commit(true)); }
     catch { return false; }
   };
+  const removeTranscriptEditStoredIfEqual = (key: string, expected: unknown, isCurrent: () => boolean = () => true): Promise<boolean> =>
+    /^transcript-edit-(?:draft:[DPL][1-9]\d{0,14}:[A-Za-z0-9_-]+|request:[DPL][1-9]\d{0,14})$/.test(key) ? removeRetainedDraftIfEqual(key, expected, isCurrent) : Promise.resolve(false);
   const unavailableObject = (id: string) => session?.unavailableObjects.has(id) ?? false;
   const onAccessChange = (listener: (ids: string[]) => void) => {
     session?.accessListeners.add(listener);
@@ -577,10 +616,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const objectId = objectFromKey(key) || draftObjects(key, value)[0];
       if (!objectId || (!draftObjects(key, value).some(id => changed.includes(id)) && !heldFamilies.has(key.replace(/:unsaved-memory$/, '')))) continue;
       if (isDraftKey(key)) {
-        if (hasSavedWork(key, value) && !quarantine({ key, objectId, value, reason: 'Object access changed' })) continue;
-        // The physical durable and failed-write copies may have different refs.
-        // Secure and remove only this exact copy, never its newer sibling.
-        rawRemoveMatching(key, value);
+        if (hasSavedWork(key, value)) quarantine({ key, objectId, value, reason: 'Object access changed' });
+        // A synchronous access notification cannot acquire the draft writer's
+        // lock. Hold originals immediately; explicit recovery removes them.
       } else removeStored(key);
     }
     const queued = readStored<PendingMutation[]>('outbox', []);
@@ -604,7 +642,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const draftEntries = savedEntries();
     const blockedFamilies = new Set(draftEntries.flatMap(([key, json]) => { try { return isRetainedDraftKey(key) && blockedDraft(key, JSON.parse(json)) ? [key.replace(/:unsaved-memory$/, '')] : []; } catch { return []; } }));
     for (const [key, json] of draftEntries) {
-      try { const value: unknown = JSON.parse(json); if (!blockedDraft(key, value) && !blockedFamilies.has(key.replace(/:unsaved-memory$/, ''))) continue; if (hasSavedWork(key, value)) { const saved = quarantine({ key, objectId: objectFromKey(key) || draftObjects(key, value)[0] || 'S1', value, reason: 'Permission to submit this draft changed' }); draftsChanged = true; if (!saved) continue; } rawRemoveMatching(key, value); } catch { /* Preserve unreadable draft bytes in place. */ }
+      try { const value: unknown = JSON.parse(json); if (!blockedDraft(key, value) && !blockedFamilies.has(key.replace(/:unsaved-memory$/, ''))) continue; if (hasSavedWork(key, value)) { quarantine({ key, objectId: objectFromKey(key) || draftObjects(key, value)[0] || 'S1', value, reason: 'Permission to submit this draft changed' }); draftsChanged = true; } } catch { /* Preserve unreadable draft bytes in place. */ }
     }
     const queue = readStored<PendingMutation[]>('outbox', []);
     const forbidden = queue.filter(item => { const id = queuedObject(item); if (item.wikiAuthority && (item.wikiAuthority.ancestorIds.some(ancestor => !visible.has(ancestor)) || (item.wikiAuthority.parentId && session.objectCapabilities.get(item.wikiAuthority.parentId)?.edit === false))) return true; if (id?.startsWith('S')) return !spaceIds.includes(id) || archivedSpaceIds.includes(id); const capabilities = id ? session.objectCapabilities.get(id) : null; return capabilities && !((item.path.endsWith('/comments') || item.path.endsWith('/replies')) ? capabilities.interact : capabilities.edit); });
@@ -619,48 +657,82 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   const quarantinedDrafts = () => { syncDurableQuarantine(); return sessionIsActive(session) ? [...session.quarantinedDrafts.values()] : []; };
   const quarantineWarning = () => sessionIsActive(session) ? session.quarantineWarning : '';
   const retryQuarantineStorage = () => { assertSession(session); syncDurableQuarantine(); const saved = persistQuarantine(); quarantineChanged(); return saved; };
-  const discardQuarantinedDraft = async (key: string): Promise<void> => {
+  const recoveryLock = (key: string): string | null => key.startsWith('outbox:') ? 'outbox-write' : key.replace(/:unsaved-memory$/, '') === 'file-uploads' ? 'file-uploads-write' : retainedDraftLockName(key);
+  const withRecoveryLock = async (key: string, commit: () => void): Promise<void> => {
+    if (!durable) { commit(); return; }
+    const lock = recoveryLock(key);
+    if (!lock || typeof navigator === 'undefined' || !navigator.locks) throw new Error('This browser cannot safely coordinate recovery cleanup between tabs. Your saved copies are unchanged. Export them or retry in a browser with Web Locks support.');
+    await navigator.locks.request(contentKey(lock), commit);
+  };
+  const sameRecovery = (left: QuarantinedDraft | undefined | null, right: QuarantinedDraft): boolean => Boolean(left && JSON.stringify(left) === JSON.stringify(right));
+  const removeRecoveryRecord = (recovery: QuarantinedDraft): void => {
     assertSession(session);
-    const commit = () => {
-      assertSession(session); syncDurableQuarantine();
-      const recovery = session.quarantinedDrafts.get(key);
-      if (!recovery) return;
-      // Use the same lock as normal outbox changes, then reread the latest queue.
-      // Quarantine itself never rewrites this shared aggregate.
-      const removed = key.startsWith('outbox:') ? rawWrite('outbox', rawOutbox().filter(item => `outbox:${item.id}` !== key)) : rawRemoveMatching(key, recovery.value);
-      if (!removed) throw new Error('Could not remove the original saved change. Export it and free browser storage before trying again.');
-      if (durable && !rawRemove(recordKey(key))) throw new Error('Could not discard the recovery copy. Export it before trying again.');
-      session.quarantinedDrafts.delete(key); session.quarantinePending.delete(key); session.quarantinePersisted.delete(key);
-      quarantineChanged();
+    if (!sameRecovery(session.quarantinedDrafts.get(recovery.recoveryId), recovery)) return;
+    if (durable) {
+      const physical = localStorage.getItem(contentKey(recordKey(recovery.recoveryId)));
+      if (physical !== null && !sameRecovery(parseDraft(physical, recovery.recoveryId), recovery)) throw new Error('This recovery copy changed. Review its current contents before discarding it.');
+      if (physical !== null) localStorage.removeItem(contentKey(recordKey(recovery.recoveryId)));
+    }
+    session.quarantinedDrafts.delete(recovery.recoveryId); session.quarantinePending.delete(recovery.recoveryId); session.quarantinePersisted.delete(recovery.recoveryId);
+  };
+  // Capture generations before waiting. A later edit with identical text is
+  // still a new edit, and must not be removed by an older receipt or click.
+  const matchingOriginalCleanup = (key: string, expected: unknown): (() => void) => {
+    assertSession(session);
+    const json = JSON.stringify(expected), base = key.replace(/:unsaved-memory$/, ''), states = draftRetentions.get(session);
+    if (states?.get(base)?.latest === json) states.delete(base);
+    const state = states?.get(base), generation = state?.generation, memory = session.memory.get(key), shadowKey = `${key}:unsaved-memory`, shadow = session.memory.get(shadowKey);
+    return () => {
+      assertSession(session);
+      if (draftRetentions.get(session)?.get(base) !== state || state?.generation !== generation) return;
+      if (key.startsWith('outbox:')) {
+        const existing = rawOutbox(), next = existing.filter(item => JSON.stringify(item) !== json);
+        if (next.length !== existing.length && !rawWrite('outbox', next)) throw new Error('The original queued change could not be removed. Export it before retrying.');
+      } else {
+        let removed = false;
+        if (durable && localStorage.getItem(contentKey(key)) === json) { localStorage.removeItem(contentKey(key)); removed = true; }
+        if (memory === json && session.memory.get(key) === memory) { session.memory.delete(key); removed = true; }
+        if (durable && !key.endsWith(':unsaved-memory') && shadow === json && session.memory.get(shadowKey) === shadow) { session.memory.delete(shadowKey); removed = true; }
+        // Like ordinary exact cleanup, this authorizes a still-mounted editor
+        // to restart from the absent slot after its acknowledged old value.
+        // A newer retained generation continues to own its own baseline.
+        if (durable && removed && !state) {
+          let cleared = clearedDraftBaselines.get(session);
+          if (!cleared) { cleared = new Map(); clearedDraftBaselines.set(session, cleared); }
+          cleared.set(base, json);
+        }
+      }
     };
-    if (durable && key.startsWith('outbox:') && typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request(contentKey('outbox-write'), commit);
-    else commit();
+  };
+  const discardQuarantinedDraft = async (selected: QuarantinedDraft | string): Promise<void> => {
+    assertSession(session); syncDurableQuarantine();
+    // Legacy callers resolve once, before the first await. UI callers pass the
+    // clicked record so another same-key recovery can never take its place.
+    const candidate = typeof selected === 'string' ? session.quarantinedDrafts.get(selected) || heldDrafts(selected)[0] : selected;
+    if (!candidate) return;
+    const recovery = JSON.parse(JSON.stringify(candidate)) as QuarantinedDraft;
+    if (!sameRecovery(session.quarantinedDrafts.get(recovery.recoveryId), recovery)) return;
+    const clearOriginal = matchingOriginalCleanup(recovery.key, recovery.value);
+    await withRecoveryLock(recovery.key, () => {
+      assertSession(session); syncDurableQuarantine();
+      if (!sameRecovery(session.quarantinedDrafts.get(recovery.recoveryId), recovery)) return;
+      clearOriginal(); removeRecoveryRecord(recovery); quarantineChanged();
+    });
   };
   /** Clear only confirmed copies; a newer draft in either storage tier survives. */
   const acknowledgeRevisionAuthorIntent = async (requestKey: string, intent: unknown, draftKey: string, draft: unknown): Promise<void> => {
     assertSession(session);
     const id = /^revision-author-request:([DPL][1-9]\d*)$/.exec(requestKey)?.[1];
     if (!id || draftKey !== `revision-author-draft:${id}`) throw new Error('Invalid authorship recovery keys.');
-    const commit = () => {
-      assertSession(session); syncDurableQuarantine();
-      for (const [key, expected] of [[requestKey, intent], [draftKey, draft]] as const) {
-        if (!rawRemoveMatching(key, expected)) throw new Error('The confirmed authorship request could not be cleared. Keep its receipt and retry cleanup.');
-        for (const copy of [key, `${key}:unsaved-memory`]) {
-          const held = session.quarantinedDrafts.get(copy);
-          if (!held || JSON.stringify(held.value) !== JSON.stringify(expected)) continue;
-          if (durable) {
-            let physical: QuarantinedDraft | null = null;
-            try { const json = localStorage.getItem(contentKey(recordKey(copy))); physical = json ? parseDraft(json) : null; }
-            catch { throw new Error('The confirmed authorship recovery copy could not be checked.'); }
-            if (physical && JSON.stringify(physical.value) === JSON.stringify(expected) && !rawRemove(recordKey(copy))) throw new Error('The confirmed authorship recovery copy could not be cleared.');
-          }
-          session.quarantinedDrafts.delete(copy); session.quarantinePending.delete(copy); session.quarantinePersisted.delete(copy);
-        }
-      }
+    syncDurableQuarantine();
+    const copies = ([[requestKey, intent], [draftKey, draft]] as const).map(([key, expected]) => ({ key, clearOriginal: matchingOriginalCleanup(key, expected), recoveries: [...session.quarantinedDrafts.values()].filter(held => held.key.replace(/:unsaved-memory$/, '') === key && JSON.stringify(held.value) === JSON.stringify(expected)).map(held => JSON.parse(JSON.stringify(held)) as QuarantinedDraft) }));
+    // Authorship handoff intentionally permits cleanup after view loss, but
+    // only for the verified submission in the still-active original session.
+    for (const copy of copies) await withRecoveryLock(copy.key, () => {
+      assertSession(session); syncDurableQuarantine(); copy.clearOriginal();
+      for (const recovery of copy.recoveries) removeRecoveryRecord(recovery);
       quarantineChanged();
-    };
-    if (durable && typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request(contentKey(`file-intent:${requestKey}`), commit);
-    else commit();
+    });
   };
   let initialTaskAccessVerification: Promise<unknown> | null = null;
   const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }, authorityIds: readonly string[] = []): Promise<T> => {
@@ -668,7 +740,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (options?.queued) { holdLegacyTaskUpdates(); if (!canQueue(path, options.method, options.body)) throw new RequestError('This operation requires an explicit online save and cannot submit from the outbox.', 403, 'ACTION_FORBIDDEN'); }
     if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
-    if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
+    if (options?.id && heldFamily(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     const childParent = path === '/api/projects' && options?.method === 'POST' && options.body && typeof options.body === 'object' && 'parentId' in options.body && typeof options.body.parentId === 'string' ? options.body.parentId : null;
     const notificationRequest = /^\/api\/notifications(?:[/?]|$)/.test(path);
     const stackRequest = !options && /^\/api\/revisions\/[DPL]\d+\/dependencies\/graph(?:[?]|$)/.test(path);
@@ -704,7 +776,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (options && !authorMutation && initialTarget && !session.visibleObjects!.has(initialTarget)) { invalidateObjects([initialTarget]); throw unavailable(); }
       syncDurableQuarantine();
       if (options?.queued && (!options.id || !readStored<PendingMutation[]>('outbox', []).some(item => item.id === options.id))) throw new RequestError('This queued change was removed or set aside and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
-      if (options?.id && session.quarantinedDrafts.has(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
+      if (options?.id && heldFamily(`outbox:${options.id}`)) throw new RequestError('This saved change is set aside for export or discard and cannot submit automatically.', 403, 'ACTION_FORBIDDEN');
     }
     const objectId = childParent || objectFromPath(path);
     const sourceRepository = objectId ? session.revisionRepositories.get(objectId) : undefined;
@@ -861,13 +933,14 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const draftRecords = (): { key: string; value: unknown }[] => {
     if (!sessionIsActive(session)) return [];
+    const held = quarantinedDrafts();
     const submitted = submittedBulkMoves().map(value => ({ key: `submitted-bulk:${value.requestId}`, value }));
-    if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory') && (!key.startsWith('transcript-edit-draft:') || draftHasUnsavedMemory(key.slice(0, -':unsaved-memory'.length)))).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
+    if (durable) return [...submitted, ...[...session.memory].filter(([key]) => isRetainedDraftKey(key) && key.endsWith(':unsaved-memory') && draftHasUnsavedMemory(key.slice(0, -':unsaved-memory'.length))).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }))];
     const ordinary = [...session.memory].filter(([key, value]) => {
       if (key.startsWith('comment-source:') || key.startsWith('task-comment:')) { try { return hasSavedWork(key, JSON.parse(value)); } catch { return false; } }
       return /^(?:revision-project-draft|revision-project-request|revision-subscription-draft|revision-subscription-request|revision-metadata-draft|revision-metadata-request|revision-reviewer-draft|revision-reviewer-request|revision-lifecycle-draft|revision-lifecycle-request|revision-author-draft|revision-author-request|revision-dependency-draft|revision-dependency-request|wiki-move|wiki-request|wiki-edit|wiki-action|wiki-action-request|transcript-edit-draft|transcript-edit-request|docx-draft|docx-request|paste-draft|paste-comment|paste-request|paste-create):/.test(key) || key.startsWith('citation-draft:') || key === 'file-uploads' || key.startsWith('file-draft:') || key.startsWith('discussion-choice:') || (key.startsWith('repository-import:') || key.startsWith('revision-git-import:')) || key.startsWith('draft:') || key.startsWith('version-draft:') || key.startsWith('task-draft:') || key.startsWith('task-projects:') || (key.startsWith('project-draft:') || key.startsWith('project-child:')) || key.startsWith('workboard-move:');
     }).map(([key, value]) => ({ key, value: JSON.parse(value) as unknown }));
-    return [...ordinary, ...quarantinedDrafts().map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
+    return [...ordinary.filter(row => !held.some(draft => draft.key === row.key && JSON.stringify(draft.value) === JSON.stringify(row.value))), ...held.map(draft => ({ key: draft.key, value: draft.value })), ...submitted];
   };
   const savedDraftRecords = (prefix: string): { key: string; value: unknown }[] => {
     if (!sessionIsActive(session)) return [];
@@ -876,7 +949,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
   };
   const onTaskSnapshotChange = (listener: () => void) => { session?.taskSnapshotListeners.add(listener); return () => { session?.taskSnapshotListeners.delete(listener); }; };
   const onRevisionStackChange = (listener: () => void) => { stacks?.listeners.add(listener); return () => { stacks?.listeners.delete(listener); }; };
-  return { session, durable, invalidateNotifications: () => invalidateNotifications(), notificationGeneration: () => notifications?.generation ?? -1, onNotificationChange: (listener: () => void) => { notifications?.listeners.add(listener); return () => { notifications?.listeners.delete(listener); }; }, acknowledgeRevisionAuthorIntent, invalidateRevisionStacks: () => invalidateRevisionStacks(), onRevisionStackChange, revisionStackGeneration: () => stacks?.generation ?? -1, retireUnavailableObject: (id: string) => { assertSession(session); invalidateObjects([id]); }, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory, retainTranscriptEditDraft, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, writeDiscussionChoice, clearDiscussionChoice, removeStored, removeStoredIfEqual, removeTranscriptEditStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
+  return { session, durable, invalidateNotifications: () => invalidateNotifications(), notificationGeneration: () => notifications?.generation ?? -1, onNotificationChange: (listener: () => void) => { notifications?.listeners.add(listener); return () => { notifications?.listeners.delete(listener); }; }, acknowledgeRevisionAuthorIntent, invalidateRevisionStacks: () => invalidateRevisionStacks(), onRevisionStackChange, revisionStackGeneration: () => stacks?.generation ?? -1, retireUnavailableObject: (id: string) => { assertSession(session); invalidateObjects([id]); }, savedDraftRecords, onRepositorySnapshotChange: onTaskSnapshotChange, repositorySnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, unavailableObject, onAccessChange, onWorkboardSnapshotChange: onTaskSnapshotChange, workboardSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onProjectSnapshotChange: onTaskSnapshotChange, projectSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, onTaskSnapshotChange, taskSnapshotGeneration: () => session?.taskSnapshotGeneration ?? -1, reconcileAccess, quarantinedDrafts, draftIsHeld, draftHasUnsavedMemory, retainDraft, removeRetainedDraftIfEqual, retainTranscriptEditDraft, quarantineWarning, retryQuarantineStorage, discardQuarantinedDraft, readStored, writeStored, writeDiscussionChoice, clearDiscussionChoice, removeStored, removeStoredIfEqual, removeTranscriptEditStoredIfEqual, request, changeOutbox, draftRecords, submittedBulkMoves, retainSubmittedBulkMove, clearSubmittedBulkMove, storageKey: contentKey, assertActive: () => assertSession(session), isActive: () => sessionIsActive(session) };
 }
 export type WorkspaceClient = ReturnType<typeof createWorkspaceClient>;
 // Non-React callers must explicitly establish a session before using these helpers.

@@ -1,3 +1,4 @@
+import { useDraftRetention } from './draft-retention';
 import { MentionPicker } from './PeopleMentions';
 import { DiscussionBody, RemarkupBody } from './Remarkup';
 import TaskNotifications from './TaskNotifications';
@@ -119,16 +120,24 @@ type EditableTaskField = Exclude<TaskField, 'ownerId' | 'projectId'>;
 type TaskDraft = { title: string; description: string; status: TaskStatus; priority: Priority; expectedVersion: number; changed: EditableTaskField[] };
 function fields(task: Task): TaskDraft { return { title: task.title, description: task.description, status: task.status, priority: task.priority, expectedVersion: task.version, changed: [] }; }
 function TaskEditor({ task, state, online, mutate, saved }: { task: Task; state: AppState; online: boolean; mutate: Mutate; saved: (close: boolean) => Promise<void> }) {
-  const { readStored, writeStored, removeStoredIfEqual, draftIsHeld, durable, assertActive } = useWorkspace();
+  const client = useWorkspace();
+  const { readStored, draftIsHeld, durable, assertActive } = client;
   const key = `task-draft:${task.id}`;
   const [draft, setDraft] = useState<TaskDraft>(() => readStored(key, fields(task)));
   const [persisted, setPersisted] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const retainDraft = useDraftRetention(client, key, setPersisted);
   const mounted = useRef(true); const latest = useRef(draft); latest.current = draft;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const held = draftIsHeld(key);
   const wasHeld = useRef(held);
   useEffect(() => { if (wasHeld.current && !held) { const next = fields(task); latest.current = next; setDraft(next); setError(''); } wasHeld.current = held; }, [held]);
-  const update = (patch: Partial<Pick<TaskDraft, EditableTaskField>>) => { const next = { ...latest.current, ...patch, changed: [...new Set([...(latest.current.changed || []), ...Object.keys(patch) as EditableTaskField[]])] }; latest.current = next; setDraft(next); setPersisted(writeStored(key, next)); };
+  const clearDraft = async (expected: unknown) => {
+    const epoch = client.session?.accessEpoch, snapshot = client.taskSnapshotGeneration();
+    const current = () => mounted.current && client.isActive() && !client.unavailableObject(task.id) && client.session?.accessEpoch === epoch && snapshot === client.taskSnapshotGeneration();
+    const cleared = await client.removeRetainedDraftIfEqual(key, expected, current);
+    return current() && cleared;
+  };
+  const update = (patch: Partial<Pick<TaskDraft, EditableTaskField>>) => { const next = { ...latest.current, ...patch, changed: [...new Set([...(latest.current.changed || []), ...Object.keys(patch) as EditableTaskField[]])] }; latest.current = next; setDraft(next); retainDraft(next); };
   const submit = async () => {
     if (held || busy || !draft.title.trim() || !draft.changed?.length || !Number.isSafeInteger(draft.expectedVersion)) return;
     const submitted = { ...draft }; setBusy(true); setError('');
@@ -136,29 +145,37 @@ function TaskEditor({ task, state, online, mutate, saved }: { task: Task; state:
       const payload: UpdateTaskInput = { expectedVersion: submitted.expectedVersion };
       for (const field of submitted.changed) Object.assign(payload, { [field]: submitted[field] });
       await mutate<Task>(`/api/tasks/${task.id}`, 'PATCH', payload, 'Task updated'); assertActive();
-      const cleared = removeStoredIfEqual(key, submitted);
+      const cleared = await clearDraft(submitted); if (!cleared) return;
       await saved(mounted.current && cleared && JSON.stringify(latest.current) === JSON.stringify(submitted));
     } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save this task.'); } finally { if (mounted.current) setBusy(false); }
   };
-  return <section className="panel task-editor"><div className="panel-heading"><h2>Edit task</h2><span>Based on version {draft.expectedVersion}</span></div><form onSubmit={event => { event.preventDefault(); void submit(); }}><div className="card-body">{draft.expectedVersion !== task.version && <p className="info-strip">This draft was written against version {draft.expectedVersion}; the task is now version {task.version}. Export or compare your draft before starting from the current task. Saving will never silently overwrite a newer version.</p>}{held && <p className="info-strip">This draft is set aside for export or discard. Clear its recovery copy before starting another edit here.</p>}<fieldset disabled={busy || held}><label className="field"><span>Task title</span><input aria-label="Task title" required maxLength={240} value={draft.title} onChange={event => update({ title: event.target.value })}/></label><label className="field"><span>Task description</span><textarea aria-label="Task description" rows={8} value={draft.description} onChange={event => update({ description: event.target.value })}/></label><div className="form-row"><label className="field"><span>Task status</span><select aria-label="Task status" value={draft.status} onChange={event => update({ status: event.target.value as TaskStatus })}>{['open', 'in_progress', 'resolved'].map(value => <option key={value} value={value}>{text(value)}</option>)}{(draft.status === 'duplicate' || task.status === 'duplicate') && <option value="duplicate" disabled={task.status !== 'duplicate'}>Duplicate</option>}</select></label><label className="field"><span>Task priority</span><select aria-label="Task priority" value={draft.priority} onChange={event => update({ priority: event.target.value as Priority })}>{['low', 'normal', 'high', 'urgent'].map(value => <option key={value} value={value}>{text(value)}</option>)}</select></label></div></fieldset>{error && <p className="error-text" role="alert">{error}</p>}<p className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Draft changes stay on this device with their original task version.' : 'Draft changes stay in this tab only.' : 'Browser storage could not save this draft. Keep it open or export it.'}</p><div className="task-form-actions"><button type="button" className="button" onClick={() => download(draft, `${task.id}-draft.json`)}>Export Draft</button><button type="button" className="button" disabled={busy || held} onClick={() => { if (!window.confirm('Discard this unsaved task draft and start from the current task? Export it first to keep a copy.')) return; if (!removeStoredIfEqual(key, draft)) { setError('Could not clear this draft. Export it before trying again.'); return; } const next = fields(task); latest.current = next; setDraft(next); setError(''); }}>Start from Current Task</button><button className="button primary" disabled={busy || held || (!online && !durable) || !draft.title.trim() || !draft.changed?.length || !Number.isSafeInteger(draft.expectedVersion)}>{busy ? 'Saving…' : 'Save Task'}</button></div></div></form></section>;
+  return <section className="panel task-editor"><div className="panel-heading"><h2>Edit task</h2><span>Based on version {draft.expectedVersion}</span></div><form onSubmit={event => { event.preventDefault(); void submit(); }}><div className="card-body">{draft.expectedVersion !== task.version && <p className="info-strip">This draft was written against version {draft.expectedVersion}; the task is now version {task.version}. Export or compare your draft before starting from the current task. Saving will never silently overwrite a newer version.</p>}{held && <p className="info-strip">This draft is set aside for export or discard. Clear its recovery copy before starting another edit here.</p>}<fieldset disabled={busy || held}><label className="field"><span>Task title</span><input aria-label="Task title" required maxLength={240} value={draft.title} onChange={event => update({ title: event.target.value })}/></label><label className="field"><span>Task description</span><textarea aria-label="Task description" rows={8} value={draft.description} onChange={event => update({ description: event.target.value })}/></label><div className="form-row"><label className="field"><span>Task status</span><select aria-label="Task status" value={draft.status} onChange={event => update({ status: event.target.value as TaskStatus })}>{['open', 'in_progress', 'resolved'].map(value => <option key={value} value={value}>{text(value)}</option>)}{(draft.status === 'duplicate' || task.status === 'duplicate') && <option value="duplicate" disabled={task.status !== 'duplicate'}>Duplicate</option>}</select></label><label className="field"><span>Task priority</span><select aria-label="Task priority" value={draft.priority} onChange={event => update({ priority: event.target.value as Priority })}>{['low', 'normal', 'high', 'urgent'].map(value => <option key={value} value={value}>{text(value)}</option>)}</select></label></div></fieldset>{error && <p className="error-text" role="alert">{error}</p>}<p className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Draft changes stay on this device with their original task version.' : 'Draft changes stay in this tab only.' : 'Browser storage could not save this draft. Keep it open or export it.'}</p><div className="task-form-actions"><button type="button" className="button" onClick={() => download(draft, `${task.id}-draft.json`)}>Export Draft</button><button type="button" className="button" disabled={busy || held} onClick={async () => { if (!window.confirm('Discard this unsaved task draft and start from the current task? Export it first to keep a copy.')) return; if (!await clearDraft(draft)) { setError('Could not clear this draft. Export it before trying again.'); return; } const next = fields(task); latest.current = next; setDraft(next); setError(''); }}>Start from Current Task</button><button className="button primary" disabled={busy || held || (!online && !durable) || !draft.title.trim() || !draft.changed?.length || !Number.isSafeInteger(draft.expectedVersion)}>{busy ? 'Saving…' : 'Save Task'}</button></div></div></form></section>;
 }
 function TaskComment({ principals, taskId, online, mutate, saved }: { principals: AppState['principals']; taskId: string; online: boolean; mutate: Mutate; saved: () => Promise<void> }) {
-  const { readStored, writeStored, removeStoredIfEqual, draftIsHeld, durable, assertActive } = useWorkspace();
+  const client = useWorkspace();
+  const { readStored, draftIsHeld, durable, assertActive } = client;
   const textarea = useRef<HTMLTextAreaElement>(null);
   const key = `task-comment:${taskId}`;
   const [body, setBody] = useState(() => readStored(key, { body: '' }).body); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [persisted, setPersisted] = useState(true);
+  const retainDraft = useDraftRetention(client, key, setPersisted);
   const latest = useRef(body); latest.current = body; const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const held = draftIsHeld(key);
   const wasHeld = useRef(held);
   useEffect(() => { if (wasHeld.current && !held) { latest.current = ''; setBody(''); setError(''); } wasHeld.current = held; }, [held]);
+  const clearDraft = async (expected: unknown) => {
+    const epoch = client.session?.accessEpoch, snapshot = client.taskSnapshotGeneration();
+    const current = () => mounted.current && client.isActive() && !client.unavailableObject(taskId) && client.session?.accessEpoch === epoch && snapshot === client.taskSnapshotGeneration();
+    const cleared = await client.removeRetainedDraftIfEqual(key, expected, current);
+    return current() && cleared;
+  };
   const submit = async () => {
     if (held || busy || !body.trim()) return;
     const submitted = { body }; setBusy(true); setError('');
-    try { await mutate<TaskTransaction>(`/api/tasks/${taskId}/comments`, 'POST', submitted, 'Task comment added'); assertActive(); const cleared = removeStoredIfEqual(key, submitted); if (mounted.current && cleared && latest.current === submitted.body) setBody(''); await saved(); }
+    try { await mutate<TaskTransaction>(`/api/tasks/${taskId}/comments`, 'POST', submitted, 'Task comment added'); assertActive(); const cleared = await clearDraft(submitted); if (!cleared) return; if (mounted.current && cleared && latest.current === submitted.body) setBody(''); await saved(); }
     catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save this comment.'); } finally { if (mounted.current) setBusy(false); }
   };
-  return <section className="panel task-comment-form"><div className="panel-heading"><h2><MessageSquare size={17}/>Add a comment</h2></div><form className="card-body" onSubmit={event => { event.preventDefault(); void submit(); }}><label className="field"><span>Task comment</span><textarea ref={textarea} aria-label="Task comment" required rows={4} maxLength={20000} value={body} disabled={busy || held} onChange={event => { const value = event.target.value; setBody(value); setPersisted(writeStored(key, { body: value })); }}/></label><MentionPicker textareaRef={textarea} value={body} principals={principals} disabled={busy || held} onChange={value => { setBody(value); setPersisted(writeStored(key, { body: value })); }}/>{held && <p className="info-strip">This comment is set aside for export or discard.</p>}{error && <p className="error-text" role="alert">{error}</p>}<p className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Comment draft stays on this device.' : 'Comment draft stays in this tab only.' : 'This comment is not stored. Keep it open or export it.'}</p><div className="task-form-actions">{body && <button type="button" className="button" onClick={() => download({ body }, `${taskId}-comment.json`)}>Export Comment</button>}<button className="button primary" disabled={busy || held || !body.trim() || (!online && !durable)}>{busy ? 'Saving…' : 'Add Task Comment'}</button></div></form></section>;
+  return <section className="panel task-comment-form"><div className="panel-heading"><h2><MessageSquare size={17}/>Add a comment</h2></div><form className="card-body" onSubmit={event => { event.preventDefault(); void submit(); }}><label className="field"><span>Task comment</span><textarea ref={textarea} aria-label="Task comment" required rows={4} maxLength={20000} value={body} disabled={busy || held} onChange={event => { const value = event.target.value; setBody(value); retainDraft({ body: value }); }}/></label><MentionPicker textareaRef={textarea} value={body} principals={principals} disabled={busy || held} onChange={value => { setBody(value); retainDraft({ body: value }); }}/>{held && <p className="info-strip">This comment is set aside for export or discard.</p>}{error && <p className="error-text" role="alert">{error}</p>}<p className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Comment draft stays on this device.' : 'Comment draft stays in this tab only.' : 'This comment is not stored. Keep it open or export it.'}</p><div className="task-form-actions">{body && <button type="button" className="button" onClick={() => download({ body }, `${taskId}-comment.json`)}>Export Comment</button>}<button className="button primary" disabled={busy || held || !body.trim() || (!online && !durable)}>{busy ? 'Saving…' : 'Add Task Comment'}</button></div></form></section>;
 }
 
 function Assignment({ detail, state, online, canEdit, mutate, saved }: { detail: TaskDetail; state: AppState; online: boolean; canEdit: boolean; mutate: Mutate; saved: () => Promise<void> }) {
@@ -272,26 +289,34 @@ function ProjectChips({ ids, state }: { ids: string[]; state: AppState }) {
   return projects.length ? <span className="task-project-chips">{projects.map(project => <ProjectTag key={project.id} project={project}/>)}</span> : <span className="muted small">No visible project tags</span>;
 }
 function TaskProjects({ task, state, online, mutate, saved }: { task: Task; state: AppState; online: boolean; mutate: Mutate; saved: () => Promise<void> }) {
-  const { readStored, writeStored, removeStoredIfEqual, draftIsHeld, durable, assertActive } = useWorkspace();
+  const client = useWorkspace();
+  const { readStored, draftIsHeld, durable, assertActive } = client;
   const key = `task-projects:${task.id}`;
   const [draft, setDraft] = useState<TaskProjectsInput | null>(() => readStored(key, null));
   const [reviewed, setReviewed] = useState(false); const [persisted, setPersisted] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const retainDraft = useDraftRetention(client, key, setPersisted);
   const latest = useRef(draft); latest.current = draft; const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const held = draftIsHeld(key); const wasHeld = useRef(held);
   useEffect(() => { if (wasHeld.current && !held) { latest.current = null; setDraft(null); setReviewed(false); setError(''); } wasHeld.current = held; }, [held]);
   const currentIds = taskProjectIds(task);
-  const update = (value: TaskProjectsInput) => { latest.current = value; setDraft(value); setReviewed(false); setPersisted(writeStored(key, value)); setError(''); };
+  const clearDraft = async (expected: unknown) => {
+    const epoch = client.session?.accessEpoch, snapshot = client.taskSnapshotGeneration();
+    const current = () => mounted.current && client.isActive() && !client.unavailableObject(task.id) && client.session?.accessEpoch === epoch && snapshot === client.taskSnapshotGeneration();
+    const cleared = await client.removeRetainedDraftIfEqual(key, expected, current);
+    return current() && cleared;
+  };
+  const update = (value: TaskProjectsInput) => { latest.current = value; setDraft(value); setReviewed(false); retainDraft(value); setError(''); };
   const start = (action: TaskProjectsInput['action']) => update({ action, projectIds: action === 'set' ? [...currentIds] : [], expectedVersion: task.version });
   const missing = draft?.projectIds.some(id => !state.projects.some(project => project.id === id)) || false;
   const selectable = state.projects.filter(project => draft?.action !== 'remove' || currentIds.includes(project.id) || draft.projectIds.includes(project.id));
-  const discard = () => { if (!draft || !window.confirm('Discard this project-tag draft? Export it first to keep a copy.')) return; if (!removeStoredIfEqual(key, draft)) { setError('This draft could not be cleared. Export it before retrying.'); return; } latest.current = null; setDraft(null); setReviewed(false); setError(''); };
+  const discard = async () => { if (!draft || !window.confirm('Discard this project-tag draft? Export it first to keep a copy.')) return; if (!await clearDraft(draft)) { setError('This draft could not be cleared. Export it before retrying.'); return; } latest.current = null; setDraft(null); setReviewed(false); setError(''); };
   const save = async () => {
     if (!draft || !reviewed || held || busy || missing || draft.projectIds.length > 100 || (!online && !durable)) return;
     const submitted = { ...draft, projectIds: [...draft.projectIds] }; setBusy(true); setError('');
     try {
       await mutate<TaskDetail>(`/api/tasks/${task.id}/projects`, 'POST', submitted, 'Project tags updated'); assertActive();
-      const cleared = removeStoredIfEqual(key, submitted);
+      const cleared = await clearDraft(submitted); if (!cleared) return;
       if (mounted.current && cleared && JSON.stringify(latest.current) === JSON.stringify(submitted)) { latest.current = null; setDraft(null); setReviewed(false); }
       await saved();
     } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save project tags.'); }

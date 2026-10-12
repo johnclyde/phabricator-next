@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { canQueue, createWorkspaceClient, RequestError } from '../client/offline.ts';
@@ -8,6 +8,9 @@ import { revisionAuthorInput, type RevisionAuthorInput } from '../shared/revisio
 import type { AuthorReading } from '../client/revision-authorship.ts';
 
 const path = '/api/revisions/D1/authorship', key = 'revision-authorship:D1', draftKey = 'revision-author-draft:D1', requestKey = 'revision-author-request:D1';
+let navigatorDescriptor: PropertyDescriptor | undefined;
+beforeEach(() => { navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator'); Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: async (_name: string, commit: () => unknown) => commit() } } }); });
+afterEach(() => { if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else Reflect.deleteProperty(globalThis, 'navigator'); });
 const input = revisionAuthorInput({ action: 'assign', authorId: 'U2', expectedAuthorVersion: 0, expectedVersion: 1, expectedVersionId: 'version-one', expectedContentHash: 'a'.repeat(64), expectedAccessEpoch: 1, message: 'Original exact message' });
 const hash = (body: RevisionAuthorInput) => createHash('sha256').update(JSON.stringify(revisionAuthorInput(body))).digest('hex');
 const intent = { id: '61eb8a98-0397-49d3-bf10-cf67fffcf83b', revisionId: 'D1', body: input, draft: input };

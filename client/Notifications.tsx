@@ -83,7 +83,10 @@ export function useNotifications(online: boolean, workspaceEpoch: number, refres
       const result = await client.request<unknown>('/api/notifications/read', { method: 'POST', body: intent.body, id: intent.id }, notificationIntentObjectId(intent) ? [notificationIntentObjectId(intent)!] : []);
       const generation = client.notificationGeneration(), receipt = await verifiedNotificationReceipt(result, intent);
       if (!client.isActive() || generation !== client.notificationGeneration() || receipt.accessEpoch !== client.session?.accessEpoch) return;
-      client.removeStoredIfEqual(requestKey, intent);
+      const cleanupSequence = sequence.current;
+      const cleanupCurrent = () => mounted.current && client.isActive() && sequence.current === cleanupSequence && generation === client.notificationGeneration() && receipt.accessEpoch === client.session?.accessEpoch;
+      await client.removeRetainedDraftIfEqual(requestKey, intent, cleanupCurrent);
+      if (!cleanupCurrent()) return;
       if (mounted.current) { setPending(notificationIntent(client.readStored(requestKey, null), principalId)); setNotice(receipt.changed ? 'Notification read state saved.' : 'The notification read state already matched this request.'); }
       client.invalidateNotifications();
     } catch (failure) { if (failure instanceof RequestError && client.isActive()) client.invalidateNotifications(); if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save notification read state.'); }
@@ -106,7 +109,12 @@ export function useNotifications(online: boolean, workspaceEpoch: number, refres
     // part of this opening, not a later focus/reconnect action.
     return observed || (mounted.current && onlineRef.current && client.isActive() ? await loadSummary() : null);
   };
-  return { cache, pending, busy, loading, error, notice, saved, online, writable: online && cache?.summary.accessEpoch === client.session?.accessEpoch && cache?.summary.accessEpoch === authorityEpoch.current, durable: client.durable, held: client.draftIsHeld(requestKey), loadPage, loadSummary, mark, opened, observeOpening, retry: () => pending && void send(pending), discard: () => { if (pending && window.confirm('Discard this retained notification request? Its server outcome may still be unknown.')) { client.removeStoredIfEqual(requestKey, pending); setPending(notificationIntent(client.readStored(requestKey, null), principalId)); } } };
+  return { cache, pending, busy, loading, error, notice, saved, online, writable: online && cache?.summary.accessEpoch === client.session?.accessEpoch && cache?.summary.accessEpoch === authorityEpoch.current, durable: client.durable, held: client.draftIsHeld(requestKey), loadPage, loadSummary, mark, opened, observeOpening, retry: () => pending && void send(pending), discard: async () => { if (pending && window.confirm('Discard this retained notification request? Its server outcome may still be unknown.')) {
+    const ticket = sequence.current, epoch = client.session?.accessEpoch;
+    const cleanupCurrent = () => mounted.current && client.isActive() && sequence.current === ticket && client.session?.accessEpoch === epoch;
+    const cleared = await client.removeRetainedDraftIfEqual(requestKey, pending, cleanupCurrent); if (!cleanupCurrent()) return;
+    if (!cleared) { setError('This request could not be cleared. Keep its recovery copy and retry.'); return; }
+    setPending(notificationIntent(client.readStored(requestKey, null), principalId)); } } };
 }
 export type NotificationController = ReturnType<typeof useNotifications>;
 function exportRequest(intent: NotificationIntent) { const url = URL.createObjectURL(new Blob([JSON.stringify(intent, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = `notification-request-${intent.id}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }

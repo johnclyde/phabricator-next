@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { canQueue, createWorkspaceClient, RequestError, type PendingMutation } from '../client/offline.ts';
 import { activateSession, lockSession } from '../client/session.ts';
@@ -8,6 +8,9 @@ import type { ObjectAccess } from '../shared/policy.ts';
 const identity = (name = 'alice'): SessionState => ({ mode: 'password', workspaceId: 'policy-test', account: { id: name, username: name, displayName: name, disabled: false }, sessionContext: `context-${name}`, csrfToken: `csrf-${name}`, expiresAt: null });
 const access = (id: string, edit = true, interact = true): ObjectAccess => ({ policy: { objectId: id, spaceId: 'S1', version: 1, rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit, interact, managePolicy: edit }, viewLabel: 'Workspace members', editLabel: 'Workspace members', interactLabel: 'Workspace members' });
 const withCode = (code: string) => (error: unknown) => error instanceof RequestError && error.code === code;
+let navigatorDescriptor: PropertyDescriptor | undefined;
+beforeEach(() => { navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator'); Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: async (_name: string, commit: () => unknown) => commit() } } }); });
+afterEach(() => { if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else Reflect.deleteProperty(globalThis, 'navigator'); });
 
 test('task writes verify initial access once before dispatch and retain guards for later epoch changes', async () => {
   const fetch = globalThis.fetch;
@@ -137,7 +140,7 @@ test('edit and interaction revocation preserve readable snapshots and unrelated 
     assert.equal(client.writeStored('comment-source:D1:V0', { body: '' }), true);
     assert.equal(client.quarantinedDrafts().length, 2);
     client.writeStored('version-draft:D1:1', { files: ['Late draft callback'] });
-    assert.deepEqual(client.quarantinedDrafts().find(draft => draft.key.startsWith('version-draft:'))?.value, { files: ['Late draft callback'] });
+    assert.deepEqual(client.quarantinedDrafts().filter(draft => draft.key.startsWith('version-draft:')).map(draft => draft.value), [{ files: ['Unsaved source'] }, { files: ['Late draft callback'] }], 'a late callback cannot replace earlier recoverable work');
     assert.deepEqual(client.readStored('draft:document:W1:v1', null), { content: 'Unrelated wiki work' });
     const otherAccount = createWorkspaceClient(activateSession(identity('bob')));
     assert.equal(client.quarantinedDrafts().length, 0);
@@ -538,9 +541,9 @@ test('discarding a task recovery record preserves a different draft subsequently
     const newer = { title: 'Newer bytes saved elsewhere', expectedVersion: 2 };
     storage.stored.set(client.storageKey(key), JSON.stringify(newer));
     await client.discardQuarantinedDraft(key);
-    assert.deepEqual(client.readStored(key, null), newer);
+    assert.equal(client.readStored(key, null), null, 'later originals in a held family remain blocked until explicit recovery');
     assert.deepEqual(JSON.parse(storage.stored.get(client.storageKey(key))!), newer);
-    assert.equal(client.quarantinedDrafts().length, 0);
+    assert.deepEqual(client.quarantinedDrafts().map(record => record.value), [newer]);
   } finally { storage.close(); }
 });
 

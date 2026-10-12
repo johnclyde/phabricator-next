@@ -34,12 +34,20 @@ test('discarding in another tab retains newer offline edits', async ({ page, con
   await expect(page.getByText(first, { exact: true })).toHaveCount(0);
 });
 
-test('inline comment draft keeps the original version and location after reload', async ({ page }) => {
+test('inline comment draft keeps the original version and location after reload', async ({ page, request, baseURL }) => {
+  const response = await request.get(new URL('api/revisions/L3', baseURL).href);
+  expect(response.ok()).toBe(true);
+  const detail = await response.json() as import('../shared/types').RevisionDetail;
+  const versionId = detail.versions.find(version => version.number === 1)!.id;
   await page.goto('./#L3');
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('1');
   await page.getByRole('button', { name: 'Source', exact: true }).click();
   await page.getByRole('button', { name: 'Comment on line 7', exact: true }).click();
   await page.getByRole('textbox', { name: 'Review comment', exact: true }).fill('This passage needs a precise duration.');
+  await expect.poll(() => page.evaluate(key => {
+    const storage = Object.keys(localStorage).find(value => value.endsWith(`:${key}`));
+    return storage ? JSON.parse(localStorage.getItem(storage)!) as unknown : null;
+  }, `comment-source:L3:${versionId}`)).toEqual({ body: 'This passage needs a precise duration.', versionId, filePath: 'motion.md', line: 7 });
   await page.reload();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
   await expect(page.getByRole('textbox', { name: 'Review comment', exact: true })).toHaveValue('This passage needs a precise duration.');
@@ -64,7 +72,7 @@ test('storage failures keep draft text visible and offer export', async ({ page 
   await page.getByRole('button', { name: 'Create Task', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox', { name: 'Title', exact: true }).fill('Keep this unsaved text');
-  await expect(dialog.getByText('Storage unavailable. Keep this draft open.', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('This draft is only in this tab. Keep it open or export it.', { exact: true })).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Export Draft', exact: true })).toBeVisible();
   await expect(dialog.getByRole('textbox', { name: 'Title', exact: true })).toHaveValue('Keep this unsaved text');
   await expect(dialog.getByText('Draft saved on this device', { exact: true })).not.toBeVisible();

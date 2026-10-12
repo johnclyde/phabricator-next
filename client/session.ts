@@ -5,7 +5,7 @@ export class SessionChangedError extends Error {
   constructor() { super('Your session changed. Reconnect or sign in before continuing.'); this.name = 'SessionChangedError'; }
 }
 export class RequestError extends Error { constructor(message: string, public status: number, public code?: string) { super(message); } }
-export interface QuarantinedDraft { key: string; objectId: string; value: unknown; reason: string }
+export interface QuarantinedDraft { recoveryId: string; key: string; objectId: string; value: unknown; reason: string }
 export interface WorkspaceSession {
   readonly generation: number;
   readonly state: SessionState;

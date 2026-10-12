@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseGitVersionIntent } from '../client/GitVersionImport.tsx';
 import { canQueue, createWorkspaceClient, RequestError } from '../client/offline.ts';
@@ -9,6 +9,9 @@ import type { ObjectAccess } from '../shared/policy.ts';
 const state = (mode: 'local' | 'password' = 'password', account = 'alice'): SessionState => ({ mode, workspaceId: 'git-version-tests', account: mode === 'local' ? null : { id: account, username: account, displayName: account, disabled: false }, sessionContext: account, csrfToken: 'csrf', expiresAt: null });
 const policy: ObjectAccess = { policy: { objectId: 'D1', spaceId: 'S1', version: 1, rules: { view: { kind: 'workspace' }, edit: { kind: 'workspace' }, interact: { kind: 'workspace' } } }, capabilities: { view: true, edit: true, interact: true, managePolicy: true }, viewLabel: 'Workspace', editLabel: 'Workspace', interactLabel: 'Workspace' };
 const source = { ...policy, capabilities: { view: true, edit: false, interact: false, managePolicy: false } };
+let navigatorDescriptor: PropertyDescriptor | undefined;
+beforeEach(() => { navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator'); Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request: async (_name: string, commit: () => unknown) => commit() } } }); });
+afterEach(() => { if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else Reflect.deleteProperty(globalThis, 'navigator'); });
 const draft = { revisionId: 'D1', repositoryId: 'R1', requestId: 'exact-request', attempted: true, input: { commitId: 'a'.repeat(40), expectedVersion: 1, expectedVersionId: 'immutable-v1', expectedContentHash: 'hash-1', message: 'Import the pinned tree' } };
 
 test('Git version intent preserves exact retry pins and incomplete unsubmitted entry without copying extra source', () => {

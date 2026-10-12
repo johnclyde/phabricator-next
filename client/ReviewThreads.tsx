@@ -1,3 +1,4 @@
+import { useDraftRetention } from './draft-retention';
 import { MentionPicker } from './PeopleMentions';
 import { DiscussionBody } from './Remarkup';
 import type { PublicAccount } from '../shared/auth';
@@ -184,24 +185,30 @@ function Comment({ comment, versions }: { comment: ReviewComment; versions: Revi
   return <div className="comment" data-comment-id={comment.id}><span className="avatar small-avatar">{comment.author.slice(0, 1).toUpperCase()}</span><div><div className="comment-meta"><strong>{comment.author}</strong><span>{timestamp(comment.createdAt)}</span><span>v{original?.number ?? '?'}{comment.filePath ? ` · ${comment.filePath}:${comment.line || 'passage'}` : ''}</span>{viewed && viewed.id !== comment.versionId && <span>Replied while viewing v{viewed.number}</span>}</div><DiscussionBody body={comment.body} mentions={comment.mentions}/></div></div>;
 }
 function ReplyComposer({ principals, revisionId, threadId, version, originalNumber, mutate, saved }: { revisionId: string; threadId: string; version: RevisionVersion; originalNumber?: number; mutate: Mutate; saved: () => Promise<void>; principals: PublicAccount[] }) {
-  const { readStored, writeStored, removeStoredIfEqual, durable, assertActive, draftIsHeld, draftHasUnsavedMemory } = useWorkspace();
+  const client = useWorkspace(); const { readStored, durable, assertActive, draftIsHeld, draftHasUnsavedMemory } = client;
   const textarea = useRef<HTMLTextAreaElement>(null);
   const key = `comment-source:${revisionId}:reply:${threadId}:${version.id}`;
   const [body, setBody] = useState(() => readStored<{ body: string }>(key, { body: '' }).body);
   const mounted = useRef(true); const latestBody = useRef(body); latestBody.current = body;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [persisted, setPersisted] = useState(() => !draftHasUnsavedMemory(key)); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const retain = useDraftRetention(client, key, setPersisted);
+  useEffect(() => { if (latestBody.current) retain({ body: latestBody.current, viewedVersionId: version.id, threadId }); }, [key, retain]);
   const held = draftIsHeld(key);
   const submit = async () => {
     if (held || !body.trim()) return;
-    const submitted = { body, viewedVersionId: version.id, threadId };
+    const submitted = { body, viewedVersionId: version.id, threadId }; let epoch = client.session?.accessEpoch;
+    const authorized = () => client.isActive() && client.session?.accessEpoch === epoch && !client.unavailableObject(revisionId);
+    const currentContext = () => mounted.current && authorized();
     setBusy(true); setError('');
     try {
       await mutate(`/api/revisions/${revisionId}/threads/${threadId}/replies`, 'POST', { body: submitted.body, viewedVersionId: submitted.viewedVersionId }, 'Reply added'); assertActive();
-      removeStoredIfEqual(key, submitted);
-      if (mounted.current && latestBody.current === submitted.body) setBody('');
-      await saved();
+      epoch = client.session?.accessEpoch; const cleared = await client.removeRetainedDraftIfEqual(key, submitted, currentContext);
+      if (currentContext() && cleared && latestBody.current === submitted.body) { latestBody.current = ''; setBody(''); }
+      // A version switch remounts this composer, but the parent discussion still
+      // needs the committed reply. Its reload has its own route and read fences.
+      if (authorized()) await saved();
     } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : 'Could not save reply.'); } finally { if (mounted.current) setBusy(false); }
   };
-  return <form className="thread-reply" onSubmit={event => { event.preventDefault(); void submit(); }}><label className="field"><span>Reply to this thread</span><textarea ref={textarea} maxLength={20000} required rows={3} disabled={held || busy} value={body} onChange={event => { const value = event.target.value; setBody(value); setPersisted(writeStored(key, { body: value, viewedVersionId: version.id, threadId })); }}/></label><MentionPicker textareaRef={textarea} value={body} principals={principals} disabled={held || busy} onChange={value => { setBody(value); setPersisted(writeStored(key, { body: value, viewedVersionId: version.id, threadId })); }}/><p className="muted small">Replying while viewing version {version.number}. The original version {originalNumber ?? ''} and location stay with the thread. A reply does not reopen a resolved thread.</p>{error && <div className="banner error" role="alert">{error}</div>}{held && <p className="info-strip">This reply draft is set aside for export or discard. Clear that recovery copy before starting another reply here.</p>}<div className="comment-form-footer"><span className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Reply draft stays on this device.' : 'Reply draft stays in this tab only.' : 'This reply is not saved. Keep it open or export it.'}</span>{body && (!persisted || !durable) && <button type="button" className="button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify({ body, viewedVersionId: version.id, threadId }, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = 'reply-draft.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}>Export Draft</button>}<button className="button primary" disabled={held || busy || !body.trim()}>{busy ? 'Saving…' : 'Add Reply'}</button></div></form>;
+  return <form className="thread-reply" onSubmit={event => { event.preventDefault(); void submit(); }}><label className="field"><span>Reply to this thread</span><textarea ref={textarea} maxLength={20000} required rows={3} disabled={held || busy} value={body} onChange={event => { const value = event.target.value; latestBody.current = value; setBody(value); retain({ body: value, viewedVersionId: version.id, threadId }); }}/></label><MentionPicker textareaRef={textarea} value={body} principals={principals} disabled={held || busy} onChange={value => { latestBody.current = value; setBody(value); retain({ body: value, viewedVersionId: version.id, threadId }); }}/><p className="muted small">Replying while viewing version {version.number}. The original version {originalNumber ?? ''} and location stay with the thread. A reply does not reopen a resolved thread.</p>{error && <div className="banner error" role="alert">{error}</div>}{held && <p className="info-strip">This reply draft is set aside for export or discard. Clear that recovery copy before starting another reply here.</p>}<div className="comment-form-footer"><span className={persisted ? 'muted small' : 'error-text small'}>{persisted ? durable ? 'Reply draft stays on this device.' : 'Reply draft stays in this tab only.' : 'This reply is only in this tab. Keep it open or export it.'}</span>{body && (!persisted || !durable) && <button type="button" className="button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify({ body, viewedVersionId: version.id, threadId }, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = 'reply-draft.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }}>Export Draft</button>}<button className="button primary" disabled={held || busy || !body.trim()}>{busy ? 'Saving…' : 'Add Reply'}</button></div></form>;
 }
