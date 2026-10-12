@@ -2,7 +2,8 @@ import type { NotificationPublisher } from './notifications.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
-import type { ActorAttribution } from '../shared/types.ts';
+import type { ActorAttribution, ReviewComment } from '../shared/types.ts';
+import { isStoredMentionProof } from './mentions.ts';
 import { isRevisionId } from '../shared/revision-dependencies.ts';
 import { isRevisionAuthor, isRevisionAuthorId, isRevisionAuthorTransaction, type RevisionAuthor } from '../shared/revision-authorship.ts';
 import { isRevisionMetadataAttribution } from '../shared/revision-metadata.ts';
@@ -91,6 +92,11 @@ export class RevisionSubscriptionStore {
       if (this.automatic(roles, principalId).length) throw invalid();
       const comment = this.database.prepare("SELECT revision_id,json_extract(data,'$.id') AS id,json_extract(data,'$.revisionId') AS stored_revision,json_type(data,'$.attribution') AS actor_type,substr(json_extract(data,'$.attribution'),1,4097) AS actor,json_extract(data,'$.createdAt') AS created_at FROM comments WHERE id=?").get(t.commentId) as Record<string, unknown> | undefined;
       if (!comment || comment.revision_id !== id || comment.id !== t.commentId || comment.stored_revision !== id || comment.actor_type !== 'object' || typeof comment.actor !== 'string' || !isDeepStrictEqual(decode(comment.actor), t.attribution) || comment.created_at !== t.createdAt) throw invalid();
+    }
+    if (t.reason === 'mention') {
+      if (this.automatic(roles, principalId).length) throw invalid();
+      const comment = this.mentionComment(id, t.mentionCommentId!);
+      if (!isDeepStrictEqual(comment.attribution, t.attribution) || comment.createdAt !== t.createdAt || !comment.mentions!.tokens.some(token => token.principalId === principalId && token.displayName === t.displayName)) throw invalid();
     }
     return t;
   }
@@ -237,6 +243,32 @@ export class RevisionSubscriptionStore {
       if (capacity.count >= REVISION_SUBSCRIPTION_LIMITS.people) return;
       const sequence = this.publicVersion(id) + 1; if (!Number.isSafeInteger(sequence)) throw limited();
       this.append({ id: randomUUID(), revisionId: id, operationId: null, subscriptionVersion: sequence, principalId: actor.principalId, displayName: actor.displayName, version: 1, before: null, after: 'subscribed', reason: 'comment', commentId, authorVersion: roles.authorVersion, reviewerVersion: roles.reviewerVersion, attribution: { ...actor }, createdAt: row.created_at });
+    }, true);
+  }
+  private mentionComment(id: string, commentId: string): ReviewComment {
+    const row = this.database.prepare('SELECT revision_id,version_id,data FROM comments WHERE id=?').get(commentId) as { revision_id: string; version_id: string; data: string } | undefined;
+    if (!row) throw invalid(); const comment = decode<ReviewComment>(row.data);
+    if (!comment || row.revision_id !== id || comment.revisionId !== id || comment.id !== commentId || comment.versionId !== row.version_id || !isRevisionMetadataAttribution(comment.attribution) || typeof comment.body !== 'string' || !isStoredMentionProof(comment.mentions, comment.body) || !Number.isFinite(Date.parse(comment.createdAt))) throw invalid();
+    return comment;
+  }
+  /** Original-comment insertion hook only. HTTP retries return the saved comment
+   * and never reinterpret its username resolutions or repeat these effects. */
+  mentioned(value: ReviewComment): void {
+    if (value.mentions === undefined) return;
+    scope(this.database, () => {
+      const id = value.revisionId, comment = this.mentionComment(id, value.id);
+      if (!isDeepStrictEqual(comment, value)) throw invalid();
+      const roles = this.roles(id), people = new Map<string, string>();
+      for (const token of comment.mentions!.tokens) if (token.principalId !== null) people.set(token.principalId, token.displayName!);
+      for (const [principalId, displayName] of people) {
+        if (this.automatic(roles, principalId).length) continue;
+        const before = this.explicit(id, principalId);
+        if (before.state === 'subscribed' || this.database.prepare("SELECT 1 FROM revision_subscription_transactions WHERE revision_id=? AND principal_id=? AND json_extract(data,'$.mentionCommentId')=?").get(id, principalId, comment.id)) continue;
+        this.checkNewPerson(id, before);
+        const sequence = this.publicVersion(id) + 1, version = before.version + 1;
+        if (!Number.isSafeInteger(sequence) || !Number.isSafeInteger(version)) throw limited();
+        this.append({ id: randomUUID(), revisionId: id, operationId: null, subscriptionVersion: sequence, principalId, displayName, version, before: before.state, after: 'subscribed', reason: 'mention', commentId: null, mentionCommentId: comment.id, authorVersion: roles.authorVersion, reviewerVersion: roles.reviewerVersion, attribution: { ...comment.attribution! }, createdAt: comment.createdAt });
+      }
     }, true);
   }
   operationRevisionId(id: string): string { if (!uuid(id)) throw invalid(); const row = this.database.prepare('SELECT revision_id FROM revision_subscription_operations WHERE id=?').get(id) as { revision_id: string } | undefined; if (!row || !isRevisionId(row.revision_id)) throw invalid(); return row.revision_id; }

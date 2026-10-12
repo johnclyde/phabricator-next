@@ -2,7 +2,7 @@
 
 NOTIFY-02 adds task events to the shared [notification inbox](notifications.md).
 Task notifications follow the pinned Maniphest recipient and transaction rules.
-This is a bounded in-app delivery slice; email, live push, mentions, Herald and
+This is a bounded in-app delivery slice; email, live push, mentions outside comments, Herald and
 the remaining task workflows are still separate parity targets.
 
 ## Recipients and causes
@@ -18,12 +18,14 @@ an explicit watch.
 Delivery uses the final recipients and current task/Space View permission. It
 does not include the mail-specific union with recipients removed by the change.
 Disabled people, the acting person and people who privately muted the task are
-excluded. Creation policy is applied before queued delivery commits.
+excluded. Creation policy is applied before queued delivery commits. New
+[comment mentions](mentions.md) may add explicit followers before that one event;
+they do not create a separate subscriber notification or bypass mute/access.
 
 | Change | Inbox behavior |
 | --- | --- |
 | Creation; effective title, description, status, priority or owner edit | One event for the logical change |
-| Public comment | One event, grouping implicit author subscription |
+| Public comment | One event, grouping implicit author subscription and explicit mention additions |
 | Another person's explicit subscription change | One event for current recipients |
 | Project tag edit | One event after final tags, grouping individual tag transactions |
 | Explicit dependency add/remove | One event on each endpoint |

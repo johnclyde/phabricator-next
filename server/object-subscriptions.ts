@@ -8,6 +8,7 @@ import { isRevisionAuthor, isRevisionAuthorId, type RevisionAuthor } from '../sh
 import { isRevisionMetadataAttribution } from '../shared/revision-metadata.ts';
 import { OBJECT_SUBSCRIPTION_LIMITS, isObjectMuteState, isObjectMuteTransaction, isObjectSubscriptionStatus, isSubscriptionObjectId, isObjectSubscriptionTransaction, objectSubscriptionInput, validObjectSubscriptionResult, type ObjectMuteHistory, type ObjectMuteState, type ObjectMuteTransaction, type ObjectSubscriptionExplicitState, type ObjectSubscriptionHistory, type ObjectSubscriptionInput, type ObjectSubscriptionPerson, type ObjectSubscriptionReceipt, type ObjectSubscriptionSnapshot, type ObjectSubscriptionStatus, type ObjectSubscriptionTransaction } from '../shared/object-subscriptions.ts';
 import { HttpError, object } from './validation.ts';
+import { isStoredMentionProof } from './mentions.ts';
 
 type Explicit = { objectId: string; principalId: string; displayName: string | null; version: number; state: ObjectSubscriptionExplicitState | null; updatedAt: string | null };
 export interface ObjectSubscriptionOperation { retryKeySha256: string | null; id: string; objectId: string; input: ObjectSubscriptionInput; inputSha256: string; attribution: ActorAttribution; author: RevisionAuthor | null; before: Explicit | ObjectMuteState; subscriptionVersion: number | null; createdAt: string; receipt: ObjectSubscriptionReceipt }
@@ -82,6 +83,11 @@ export class ObjectSubscriptionStore {
       if (this.automatic(this.author(id), principalId).length) throw invalid();
       const comment = this.comment(t.commentId!);
       if (comment.pasteId !== id || !isDeepStrictEqual(comment.attribution, t.attribution) || comment.createdAt !== t.createdAt) throw invalid();
+    }
+    if (t.reason === 'mention') {
+      if (this.automatic(this.author(id), principalId).length) throw invalid();
+      const comment = this.comment(t.mentionCommentId!);
+      if (comment.pasteId !== id || typeof comment.comment !== 'string' || !isStoredMentionProof(comment.mentions, comment.comment) || !isDeepStrictEqual(comment.attribution, t.attribution) || comment.createdAt !== t.createdAt || !comment.mentions.tokens.some(token => token.principalId === principalId && token.displayName === t.displayName)) throw invalid();
     }
     return t;
   }
@@ -233,6 +239,25 @@ export class ObjectSubscriptionStore {
       if (capacity.count >= OBJECT_SUBSCRIPTION_LIMITS.people) return;
       const sequence = this.publicVersion(id) + 1; if (!Number.isSafeInteger(sequence)) throw limited();
       this.append({ id: randomUUID(), objectId: id, operationId: null, subscriptionVersion: sequence, principalId: actor.principalId, displayName: actor.displayName, version: 1, before: null, after: 'subscribed', reason: 'comment', commentId: comment.id, attribution: { ...actor }, createdAt: comment.createdAt });
+    }, true);
+  }
+  /** Called only while inserting the original immutable Paste comment. */
+  mentioned(value: PasteTransaction): void {
+    if (value.mentions === undefined) return;
+    scope(this.database, () => {
+      const comment = this.comment(value.id);
+      if (!isDeepStrictEqual(comment, value) || typeof comment.comment !== 'string' || !isStoredMentionProof(comment.mentions, comment.comment)) throw invalid();
+      const id = comment.pasteId, author = this.author(id), people = new Map<string, string>();
+      for (const token of comment.mentions.tokens) if (token.principalId !== null) people.set(token.principalId, token.displayName!);
+      for (const [principalId, displayName] of people) {
+        if (this.automatic(author, principalId).length) continue;
+        const before = this.explicit(id, principalId);
+        if (before.state === 'subscribed' || this.database.prepare("SELECT 1 FROM object_subscription_transactions WHERE object_id=? AND principal_id=? AND json_extract(data,'$.mentionCommentId')=?").get(id, principalId, comment.id)) continue;
+        this.checkNewPerson(id, before);
+        const sequence = this.publicVersion(id) + 1, version = before.version + 1;
+        if (!Number.isSafeInteger(sequence) || !Number.isSafeInteger(version)) throw limited();
+        this.append({ id: randomUUID(), objectId: id, operationId: null, subscriptionVersion: sequence, principalId, displayName, version, before: before.state, after: 'subscribed', reason: 'mention', commentId: null, mentionCommentId: comment.id, attribution: { ...comment.attribution }, createdAt: comment.createdAt });
+      }
     }, true);
   }
   operationPrincipalId(id: string): string { if (!uuid(id)) throw invalid(); const row = this.database.prepare('SELECT principal_id FROM object_subscription_operations WHERE id=?').get(id) as { principal_id: string } | undefined; if (!row || !isRevisionAuthorId(row.principal_id)) throw invalid(); return row.principal_id; }

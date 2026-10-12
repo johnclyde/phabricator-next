@@ -992,3 +992,11 @@
 @media(max-width:700px){.object-subscriptions .button,.object-subscriptions summary{min-height:44px}.object-subscriptions .panel-heading{align-items:flex-start}.object-subscriptions .file-actions{flex-direction:column;align-items:stretch}.object-subscriptions .file-actions>.button{flex:0 0 auto}.object-subscriber-list>li{align-items:flex-start;flex-wrap:wrap}.object-subscriptions select{font-size:16px;min-height:44px}}
 
 .object-following-disclosure>summary{padding:12px 16px;cursor:pointer;font-weight:600;line-height:1.5;color:var(--text);overflow-wrap:anywhere}.object-following-disclosure>summary>small{font-size:11px;font-weight:400;margin-left:12px}.object-following-disclosure[open]>summary{border-bottom:1px solid var(--border)}
+.person-mention { display: inline; color: #245574; background: #e7f0f8; border: 1px solid #c9dce9; border-radius: 3px; padding: 0 3px; overflow-wrap: anywhere; }
+.mention-picker { margin: 8px 0 12px; }
+.mention-picker > summary { cursor: pointer; min-height: 44px; padding: 12px 0; color: #285d83; }
+.mention-picker-fields { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; }
+.mention-picker-fields label { display: flex; flex: 1 1 200px; flex-direction: column; gap: 5px; min-width: 0; }
+.mention-picker-fields input, .mention-picker-fields select { width: 100%; min-height: 44px; min-width: 0; }
+.mention-picker-fields .button { min-height: 44px; }
+@media (max-width: 600px) { .mention-picker-fields { align-items: stretch; flex-direction: column; } .mention-picker-fields label { flex-basis: auto; } }

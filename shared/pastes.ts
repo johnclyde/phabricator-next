@@ -1,3 +1,4 @@
+import type { MentionProof } from './mentions';
 import type { ActorAttribution } from './types';
 import type { NewObjectAccessInput, ObjectAccess } from './policy';
 
@@ -32,7 +33,7 @@ export interface PasteTransaction {
   kind: 'create' | 'edit' | 'comment'; createdAt: string; attribution: ActorAttribution;
   snapshot?: PasteRecord; changes?: PasteFieldChange[];
   contentChange?: { from: number; to: number; fromHash: string; toHash: string };
-  comment?: string;
+  comment?: string; mentions?: MentionProof;
 }
 export interface PasteHistory { transactions: PasteTransaction[]; nextBefore: number | null; accessEpoch?: number }
 export interface PasteDetail { paste: PasteRecord; version: PasteVersion; history: PasteHistory; access?: ObjectAccess; accessEpoch?: number }

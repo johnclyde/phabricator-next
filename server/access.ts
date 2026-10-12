@@ -1,3 +1,4 @@
+import { isStoredMentionProof } from './mentions.ts';
 import type { AuthContext } from '../shared/auth.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { revisionDependencyInputHash } from './revision-dependencies.ts';
@@ -995,7 +996,7 @@ export class AccessLayer {
     return false;
   }
   /** Replayed bodies are evidence of an old write, never evidence of current access. */
-  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false, mutationInput?: unknown): MutationResponse {
+  present(method: string, path: string, response: MutationResponse, freshTaskOwnershipChange = false, freshProjectChange = false, mutationInput?: unknown, mentionRequestSha256?: string): MutationResponse {
     let target = this.target(method, path);
     const body = record(response.body);
     const gitImport = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
@@ -1147,6 +1148,34 @@ export class AccessLayer {
         }
       }
       // Package evidence is immutable; only authorization is refreshed on replay.
+    }
+    const discussionComment = method === 'POST' && /^\/api\/(?:revisions\/[DPL][1-9]\d*(?:\/comments|\/threads\/[^/]+\/replies)|tasks\/T[1-9]\d*\/comments|pastes\/PA[1-9]\d*\/comments)$/.test(path);
+    if (discussionComment && target) {
+      const invalid = (): never => { throw new HttpError(409, 'This saved comment does not match its recorded mention identities.', 'MENTION_INVALID_RECEIPT'); };
+      const task = target.id.startsWith('T'), paste = target.id.startsWith('PA');
+      const ownerField = task ? 'taskId' : paste ? 'pasteId' : 'revisionId';
+      if (!body || response.status !== 201 || typeof body.id !== 'string' || body[ownerField] !== target.id) return invalid();
+      // Scope by owner before loading immutable source evidence. No account
+      // lookup or mention resolution occurs while presenting a saved receipt.
+      const table = task ? 'task_transactions' : paste ? 'paste_transactions' : 'comments';
+      const ownerColumn = task ? 'task_id' : paste ? 'paste_id' : 'revision_id';
+      const row = this.store.database.prepare(`SELECT data FROM ${table} WHERE id=? AND ${ownerColumn}=?`).get(body.id, target.id) as { data: string } | undefined;
+      if (!row) return invalid();
+      const expected = record(JSON.parse(row.data));
+      if (!expected) return invalid();
+      if (expected.mentions !== undefined || body.mentions !== undefined) {
+        const text = expected[task || paste ? 'comment' : 'body'];
+        const input = record(mutationInput), supplied = input?.body;
+        const { accessEpoch: _epoch, ...saved } = body;
+        if (typeof text !== 'string' || typeof supplied !== 'string' || text !== (paste ? supplied.trim() : supplied)
+          || record(expected.attribution)?.principalId !== this.principal
+          || !isStoredMentionProof(expected.mentions, text) || !mentionRequestSha256 || expected.mentions.requestSha256 !== mentionRequestSha256
+          || !isDeepStrictEqual(saved, expected)) return invalid();
+      } else if (mentionRequestSha256 && this.store.database.prepare(`SELECT 1 FROM ${table} WHERE ${ownerColumn}=? AND json_extract(data,'$.mentions.requestSha256')=? LIMIT 1`).get(target.id, mentionRequestSha256)) {
+        // An old proof-free comment cannot replace a request which has new
+        // immutable mention evidence. Genuine historical receipts stay literal.
+        return invalid();
+      }
     }
     if (/^\/api\/pastes(?:\/PA[1-9]\d{0,14}(?:\/comments)?)?$/.test(path)) {
       const invalid = () => new HttpError(409, 'This saved Paste receipt does not match the original request.');

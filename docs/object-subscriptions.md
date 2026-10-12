@@ -17,7 +17,10 @@ absent, subscribed or unsubscribed; unsubscribed is a durable opt-out. A new hum
 Paste comment opts its author in only when no preference exists and automatic
 following does not already apply. Existing comments are never replayed to create
 new subscriptions. Enabled workspace accounts and the exact local identity are
-recognized as people; arbitrary attributed actors do not opt in implicitly.
+recognized as people; arbitrary attributed actors do not opt in implicitly. New
+[Paste comment mentions](mentions.md) are a separate explicit addition: eligible
+mentioned people can be subscribed despite a prior opt-out, while the automatic
+author and private mute remain unchanged.
 
 Self follow/unfollow requires View and a write-scoped credential. Adding another
 person requires Interact or Edit; removing another person requires Edit. A Paste
@@ -57,7 +60,8 @@ no source text, draft titles, comment bodies, private preference state or relate
 object identifiers. Current permitted titles are resolved when reading the inbox.
 
 Native Wiki/Paste project tags are not implemented, so this slice does not invent
-project watcher routing. Standalone policy-change events, mail, live push, mentions, Herald, service/group
+project watcher routing. Standalone policy-change events, mail, live push, Wiki
+body mentions, Herald, service/group
 subscribers, configurable notification settings and upstream interchange remain
 separate gaps.
 
@@ -124,7 +128,10 @@ Schema 33 adds five tables for preferences and immutable evidence. Existing
 source, history, notification events, read operations and retry receipts remain
 unchanged; migration does not backfill subscriptions or delivery. Explicit
 preferences are bounded to 1,000 people per object. An incidental comment opt-in
-at capacity is skipped without discarding the valid comment.
+at capacity is skipped without discarding the valid comment. An explicit mention
+which needs a new person at capacity instead rejects the entire comment and all
+its effects atomically. Schema 34 adds the mention format fence without changing
+these tables or any historical rows.
 
 ## Upstream basis
 

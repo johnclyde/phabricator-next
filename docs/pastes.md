@@ -30,6 +30,9 @@ NOTIFY-03 adds people following, automatic author delivery, human comment opt-in
 private mute and version-pinned inbox events. The controls preserve historical
 content selections and exact offline request recovery. See [Wiki/Paste following](object-subscriptions.md)
 for permissions, recipient rules, history, limits and remaining notification gaps.
+New [comment mentions](mentions.md) retain exact identities against the trimmed
+stored comment, can explicitly follow eligible people despite a previous opt-out,
+and remain part of its one version-pinned inbox event. They do not override mute.
 
 ## API
 

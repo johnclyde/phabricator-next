@@ -8,6 +8,12 @@ changes create durable events and recipient records in the same transaction as
 the change. A failed source or policy write cannot leave a notification behind.
 Exact retries reuse the original change rather than sending it again.
 
+New [people mentions](mentions.md) in revision/task/Paste comments add eligible
+explicit followers before the same grouped comment event. They can override a
+following opt-out, but cannot bypass current access, private mute, acting-person
+suppression or revision draft broadcast rules. Stored comments are never replayed
+to deliver a mention retrospectively.
+
 ## Revision delivery
 
 Code, paper and Word revisions share the inbox. Notification events name a
@@ -152,7 +158,9 @@ saved receipts remain unchanged. Schema 32 adds private task mute storage and
 generic task delivery without rewriting any schema-31 event, read proof or saved
 receipt. Legacy cache rows are strictly projected while pending legacy request
 bodies remain unchanged. Schema 33 adds Wiki/Paste preferences and target contexts
-without rewriting existing events, operations or pending read inputs.
+without rewriting existing events, operations or pending read inputs. Schema 34
+is a mention-format fence with no DDL or historical-row rewrites; existing event
+and read-receipt shapes remain unchanged.
 
 Upstream comparison uses Phabricator
 [`5720a38`](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04):
@@ -164,7 +172,8 @@ Upstream comparison uses Phabricator
 - [Panel controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/notification/controller/PhabricatorNotificationPanelController.php) and [clear controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/notification/controller/PhabricatorNotificationClearController.php): recent menu, unread count and clearing through an observed boundary.
 
 Mail, live Aphlict-style push transport, mobile system notifications, notification
-settings, project/package reviewer expansion, mentions, Herald, delivery for
+settings, project/package reviewer expansion, mentions outside the implemented
+discussion surfaces, Herald, delivery for
 other applications and background build jobs, global Feed/Conduit compatibility,
 upstream history import and unbounded scale remain gaps. This does not establish
 full Notifications, Maniphest or Differential parity.

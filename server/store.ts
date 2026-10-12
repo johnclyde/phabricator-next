@@ -37,6 +37,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ActorAttribution, Activity, AppState, PassageAnchor, Project, Repository, Revision, RevisionDetail, RevisionVersion, ReviewAnalysis, ReviewComment, ReviewRun, ReviewThread, ReviewThreadEvent, SourceFile, SuggestedReplacement, SuggestionApplication, Task, TaskDetail, TaskField, TaskFieldChange, TaskHistory, TaskReference, TaskSubscriptionPage, TaskSubscriptionState, TaskSubscriptionStatus, TaskTransaction, WikiDetail, WikiDocument, WikiHistory, WikiVersion, WikiVersionSummary } from '../shared/types.ts';
 import { choice, files, HttpError, integer, object, optionalString, remoteUrl, string } from './validation.ts';
+import { createCommentMentionProof, isStoredMentionProof, mentionRequestHash } from './mentions.ts';
+import type { MentionProof } from '../shared/mentions.ts';
 import { initializePolicies, registerDefaultPolicy, upgradeProjectPolicies } from './policy.ts';
 import { initializeProjects, ProjectStore } from './projects.ts';
 import { initializeProjectHierarchy, ancestorIds } from './project-graph.ts';
@@ -55,6 +57,7 @@ type Kind = 'project' | 'repository' | 'revision' | 'task' | 'document' | 'file'
 export interface MutationResponse { status: number; body: unknown }
 export interface StoredResponse extends MutationResponse { fingerprint: string }
 export interface StoreOptions { path?: string; revisionLifecycle?: Partial<RevisionLifecycleConfig>; revisionReviewers?: Partial<RevisionReviewerConfig>; revisionMetadata?: Partial<RevisionMetadataConfig> }
+export interface MentionOptions { resolve: (objectId: string, username: string, actor: ActorAttribution) => { principalId: string; displayName: string } | null }
 type JsonRow = { data: string };
 
 export function parseRevisionDependencyInput(input: unknown): RevisionDependencyInput {
@@ -193,13 +196,15 @@ export class Store {
   private wikiSearch?:WikiSearchStore;
   private projects: ProjectStore;
   private workboards?: WorkboardStore;
+  private mentions?: MentionOptions;
+  private mentionRequestSha256?: string;
   constructor(options: StoreOptions = {}) {
     const path = options.path ?? '.data/phabricator.sqlite';
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 33) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 34) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -480,6 +485,11 @@ export class Store {
       try { this.transaction(() => { initializeNotificationTargets(this.database); initializeObjectSubscriptions(this.database); this.database.exec('PRAGMA user_version = 33'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    // Format fence only: older binaries cannot interpret mention-caused history.
+    if (version < 34) {
+      try { this.transaction(() => this.database.exec('PRAGMA user_version = 34')); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.objectSubscriptions = new ObjectSubscriptionStore(this.database);
     this.taskNotifications = new TaskNotificationsStore(this.database);
     this.revisionProjects = new RevisionProjectStore(this.database);
@@ -526,8 +536,9 @@ export class Store {
     this.pastes = new PasteStore(this.database, {
       nextId: () => this.nextId('paste', 'PA'), event: (id, action, detail, actor) => this.event(id, action, detail, actor),
       batch: work => this.notifications.batch(work),
+      mentions: (id, body, actor) => this.commentMentions(id, body, actor),
       notify: transaction => {
-        if (transaction.kind === 'comment') this.objectSubscriptions.implicitComment(transaction);
+        if (transaction.kind === 'comment') { this.objectSubscriptions.mentioned(transaction); this.objectSubscriptions.implicitComment(transaction); }
         const status = transaction.changes?.find(change => change.field === 'status');
         const kind: NotificationKind = transaction.kind === 'create' ? 'created' : transaction.kind === 'comment' ? 'paste_commented' : status ? status.newValue === 'archived' ? 'paste_archived' : 'paste_reactivated' : 'paste_updated';
         this.notifications.emit({ objectId: transaction.pasteId, kind, cause: { type: 'paste_transaction', id: transaction.id }, attribution: transaction.attribution, createdAt: transaction.createdAt,
@@ -541,6 +552,15 @@ export class Store {
   }
 
   close(): void { this.database.close(); }
+  configureMentions(options: MentionOptions): void {
+    if (this.mentions) throw new Error('Mention resolution is already configured.');
+    this.mentions = options;
+  }
+  private commentMentions(id: string, body: string, actor?: ActorAttribution): MentionProof | undefined {
+    if (!this.mentions || !actor) return undefined;
+    try { return createCommentMentionProof(body, username => this.mentions!.resolve(id, username, actor), this.mentionRequestSha256); }
+    catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message, 'MENTION_LIMIT'); throw error; }
+  }
   read<T>(work: () => T): T {
     this.database.exec('SAVEPOINT read_snapshot');
     try { const result = work(); this.database.exec('RELEASE read_snapshot'); return result; }
@@ -560,7 +580,11 @@ export class Store {
         const existing = this.replay(key, fingerprint);
         if (existing) return present ? present(existing, true) : existing;
       }
-      const response = work();
+      const previousMentionRequestSha256 = this.mentionRequestSha256;
+      let response: MutationResponse;
+      this.mentionRequestSha256 = mentionRequestHash(key, fingerprint);
+      try { response = work(); }
+      finally { this.mentionRequestSha256 = previousMentionRequestSha256; }
       this.notifications.flush();
       if (key) {
         this.revisionProjects.captureResponse(key, fingerprint, response);
@@ -699,7 +723,7 @@ export class Store {
     if (!Number.isSafeInteger(task.version) || task.version < 1 || !Number.isSafeInteger(task.version + 1)) throw new HttpError(409, 'This task has reached the supported version limit.');
     return { ...task, version: task.version + 1, updatedAt: now };
   }
-  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge' | 'project' | 'column'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
+  private appendTaskTransaction(task: Task, data: Pick<TaskTransaction, 'kind' | 'snapshot' | 'changes' | 'comment' | 'mentions' | 'dependency' | 'dependencyStatus' | 'subscription' | 'merge' | 'project' | 'column'>, attribution?: ActorAttribution, now = new Date().toISOString()): TaskTransaction {
     const last = this.database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_transactions WHERE task_id = ?').get(task.id) as { sequence: number };
     const sequence = last.sequence + 1;
     if (!Number.isSafeInteger(sequence) || sequence < 1) throw new HttpError(409, 'This task has reached the supported history limit.');
@@ -849,6 +873,7 @@ export class Store {
     const available: TaskTransaction[] = [];
     for (const row of rows) {
       const item = JSON.parse((row as JsonRow).data) as TaskTransaction;
+      if (item.subscription?.reason === 'mentioned') this.verifyTaskMention(item);
       if (canSee(item)) available.push(item);
       if (available.length > size) break;
     }
@@ -964,12 +989,14 @@ export class Store {
     return this.taskMutation(() => {
       const data = object(input, ['body']); const body = string(data.body, 'Comment', 20_000);
       const task = this.get<Task>('task', id);
+      const mentions = this.commentMentions(id, body, attribution);
       if (attribution && attribution.principalId !== task.ownerId) {
         const principalId = this.taskPrincipal(attribution.principalId);
         const membership = this.subscriptionForTask(task, principalId);
         if (membership.state === null) this.changeTaskSubscription(task, principalId, 'subscribed', 'commented', attribution);
       }
-      const transaction = this.appendTaskTransaction(task, { kind: 'comment', comment: body }, attribution);
+      const transaction = this.appendTaskTransaction(task, { kind: 'comment', comment: body, ...(mentions ? { mentions } : {}) }, attribution);
+      this.mentionedTask(task, transaction);
       this.event(id, 'commented', 'Commented on this task.', attribution);
       this.notifications.emit({ objectId: id, kind: 'task_commented', cause: { type: 'task_transaction', id: transaction.id }, attribution, createdAt: transaction.createdAt });
       return transaction;
@@ -979,6 +1006,45 @@ export class Store {
     const principalId = string(value, 'Principal ID', 128);
     if (!/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(principalId)) throw new HttpError(400, 'Choose a valid workspace principal.');
     return principalId;
+  }
+  private mentionTaskComment(taskId: string, commentId: string): TaskTransaction {
+    const row = this.database.prepare('SELECT task_id,sequence,task_version,data FROM task_transactions WHERE id=?').get(commentId) as { task_id: string; sequence: number; task_version: number; data: string } | undefined;
+    const fail = () => new HttpError(409, 'Task mention evidence cannot be verified.', 'MENTION_INVALID');
+    if (!row) throw fail(); const comment = JSON.parse(row.data) as TaskTransaction;
+    if (!comment || row.task_id !== taskId || comment.taskId !== taskId || comment.id !== commentId || comment.sequence !== row.sequence || comment.taskVersion !== row.task_version || comment.kind !== 'comment' || typeof comment.comment !== 'string' || !comment.attribution || comment.actor !== comment.attribution.displayName || !isStoredMentionProof(comment.mentions, comment.comment) || !Number.isFinite(Date.parse(comment.createdAt))) throw fail();
+    return comment;
+  }
+  private taskOwnerAtComment(comment: TaskTransaction): string | null {
+    const row = this.database.prepare(`SELECT owner FROM (
+      SELECT sequence,json_extract(data,'$.snapshot.ownerId') AS owner FROM task_transactions WHERE task_id=? AND sequence<=? AND json_type(data,'$.snapshot')='object'
+      UNION ALL SELECT t.sequence,json_extract(c.value,'$.newValue') AS owner FROM task_transactions t,json_each(t.data,'$.changes') c WHERE t.task_id=? AND t.sequence<=? AND json_extract(c.value,'$.field')='ownerId'
+    ) ORDER BY sequence DESC LIMIT 1`).get(comment.taskId, comment.sequence, comment.taskId, comment.sequence) as { owner: unknown } | undefined;
+    if (!row || row.owner !== null && (typeof row.owner !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/.test(row.owner))) throw new HttpError(409, 'Task mention owner evidence cannot be verified.', 'MENTION_INVALID');
+    return row.owner as string | null;
+  }
+  private verifyTaskMention(transaction: TaskTransaction): void {
+    const fail = () => new HttpError(409, 'Task mention subscription evidence cannot be verified.', 'MENTION_INVALID');
+    const subscription = transaction.subscription;
+    if (!subscription || subscription.reason !== 'mentioned' || typeof subscription.commentId !== 'string' || transaction.kind !== 'subscription' || subscription.newState !== 'subscribed' || ![null, 'unsubscribed'].includes(subscription.oldState) || !Number.isSafeInteger(subscription.membershipVersion) || subscription.membershipVersion < 1) throw fail();
+    const comment = this.mentionTaskComment(transaction.taskId, subscription.commentId);
+    if (comment.sequence >= transaction.sequence || comment.taskVersion !== transaction.taskVersion || comment.createdAt !== transaction.createdAt || !isDeepStrictEqual(comment.attribution, transaction.attribution) || transaction.actor !== comment.actor || this.taskOwnerAtComment(comment) === subscription.principalId || !comment.mentions!.tokens.some(token => token.principalId === subscription.principalId)) throw fail();
+    const previous = this.database.prepare("SELECT data FROM task_transactions WHERE task_id=? AND sequence<? AND json_extract(data,'$.subscription.principalId')=? ORDER BY sequence DESC LIMIT 1").get(transaction.taskId, transaction.sequence, subscription.principalId) as JsonRow | undefined;
+    const before = previous ? (JSON.parse(previous.data) as TaskTransaction).subscription : undefined;
+    if ((before?.newState ?? null) !== subscription.oldState || (before?.membershipVersion ?? 0) + 1 !== subscription.membershipVersion) throw fail();
+  }
+  /** Original insertion only; saved HTTP retries do not call this hook. */
+  private mentionedTask(task: Task, value: TaskTransaction): void {
+    if (value.mentions === undefined) return;
+    const comment = this.mentionTaskComment(task.id, value.id);
+    if (!isDeepStrictEqual(comment, value) || this.taskOwnerAtComment(comment) !== task.ownerId) throw new HttpError(409, 'Task mention evidence cannot be verified.', 'MENTION_INVALID');
+    const people = new Set(comment.mentions!.tokens.flatMap(token => token.principalId === null ? [] : [token.principalId]));
+    for (const principalId of people) {
+      if (this.subscriptionForTask(task, principalId).subscribed) continue;
+      if (this.database.prepare("SELECT 1 FROM task_transactions WHERE task_id=? AND json_extract(data,'$.subscription.principalId')=? AND json_extract(data,'$.subscription.commentId')=?").get(task.id, principalId, comment.id)) continue;
+      const count = this.database.prepare("SELECT count(*) AS n FROM task_subscriptions WHERE task_id=? AND state='subscribed'").get(task.id) as { n: number };
+      if (count.n >= NOTIFICATION_LIMITS.recipients) throw new HttpError(422, 'Task mentions exceed the complete following limit.', 'MENTION_LIMIT');
+      this.changeTaskSubscription(task, principalId, 'subscribed', 'mentioned', comment.attribution, comment.createdAt, comment.id);
+    }
   }
   private subscriptionForTask(task: Task, principalId: string): TaskSubscriptionStatus {
     const row = this.database.prepare('SELECT state, version, updated_at FROM task_subscriptions WHERE task_id = ? AND principal_id = ?').get(task.id, principalId) as { state: TaskSubscriptionState; version: number; updated_at: string } | undefined;
@@ -999,14 +1065,15 @@ export class Store {
     const subscribers = rows.slice(0, size).map(row => this.subscriptionForTask(task, row.principal_id));
     return { subscribers, nextAfter: rows.length > size ? subscribers[subscribers.length - 1]!.principalId : null, viewer };
   }
-  private changeTaskSubscription(task: Task, principalId: string, state: TaskSubscriptionState, reason: NonNullable<TaskTransaction['subscription']>['reason'], attribution?: ActorAttribution, now = new Date().toISOString()): TaskSubscriptionStatus {
+  private changeTaskSubscription(task: Task, principalId: string, state: TaskSubscriptionState, reason: NonNullable<TaskTransaction['subscription']>['reason'], attribution?: ActorAttribution, now = new Date().toISOString(), commentId?: string): TaskSubscriptionStatus {
     const current = this.subscriptionForTask(task, principalId);
     if (current.state === state) return current;
     const version = current.version + 1;
     if (!Number.isSafeInteger(version) || version < 1) throw new HttpError(409, 'This membership has reached the supported version limit.');
     this.database.prepare(`INSERT INTO task_subscriptions (task_id, principal_id, state, version, updated_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(task_id, principal_id) DO UPDATE SET state = excluded.state, version = excluded.version, updated_at = excluded.updated_at`).run(task.id, principalId, state, version, now);
-    const transaction = this.appendTaskTransaction(task, { kind: 'subscription', subscription: { principalId, oldState: current.state, newState: state, membershipVersion: version, reason } }, attribution, now);
+    const transaction = this.appendTaskTransaction(task, { kind: 'subscription', subscription: { principalId, oldState: current.state, newState: state, membershipVersion: version, reason, ...(commentId ? { commentId } : {}) } }, attribution, now);
+    if (reason === 'mentioned') this.verifyTaskMention(transaction);
     this.event(task.id, 'subscription_changed', 'Updated task subscription preferences.', attribution);
     if (reason === 'explicit' && attribution?.principalId !== principalId) this.notifications.emit({ objectId: task.id, kind: 'task_subscribers_changed', cause: { type: 'task_transaction', id: transaction.id }, attribution, createdAt: now });
     return this.subscriptionForTask(task, principalId);
@@ -1716,12 +1783,12 @@ export class Store {
         try { suggestion = validateSuggestion(anchor, { replacement: string(proposed.replacement, 'Suggested replacement', 20_000, true) }); }
         catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
       }
-      const commentId = randomUUID();
-      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), ...(docxAnchor ? { docxAnchor } : {}), ...(suggestion ? { suggestion } : {}), body: string(data.body, 'Comment', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      const commentId = randomUUID(), body = string(data.body, 'Comment', 20_000), mentions = this.commentMentions(id, body, attribution);
+      const comment: ReviewComment = { id: commentId, threadId: commentId, revisionId: id, versionId: version.id, filePath, line, ...(anchor ? { anchor } : {}), ...(docxAnchor ? { docxAnchor } : {}), ...(suggestion ? { suggestion } : {}), body, ...(mentions ? { mentions } : {}), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       this.insertComment(comment);
       const thread: ReviewThread = { id: commentId, revisionId: id, rootCommentId: commentId, status: 'open', version: 1, createdAt: comment.createdAt, updatedAt: comment.createdAt };
       this.database.prepare('INSERT INTO review_threads (id, revision_id, root_comment_id, data) VALUES (?, ?, ?, ?)').run(thread.id, id, commentId, JSON.stringify(thread));
-      this.revisionSubscriptions.commented(id, comment.id, attribution);
+      this.revisionSubscriptions.mentioned(comment); this.revisionSubscriptions.commented(id, comment.id, attribution);
       this.event(id, 'commented', `Commented on version ${version.number}${filePath ? `, ${filePath}${line ? `:${line}` : ''}` : ''}.`, attribution); this.notifications.emit({ revisionId: id, kind: 'commented', cause: { type: 'comment', id: comment.id }, attribution, createdAt: comment.createdAt, head: { versionId: version.id, number: version.number, contentHash: version.contentHash } }); return comment;
     });
   }
@@ -1794,10 +1861,11 @@ export class Store {
       const row = this.database.prepare('SELECT data FROM comments WHERE revision_id = ? AND id = ?').get(id, thread.rootCommentId) as JsonRow | undefined;
       if (!row) throw new HttpError(404, 'Discussion thread was not found.', 'THREAD_UNAVAILABLE');
       const root = JSON.parse(row.data) as ReviewComment;
-      const comment: ReviewComment = { id: randomUUID(), threadId, revisionId: id, versionId: root.versionId, viewedVersionId: viewedVersion.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), ...(root.docxAnchor ? { docxAnchor: root.docxAnchor } : {}), body: string(data.body, 'Reply', 20_000), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
+      const body = string(data.body, 'Reply', 20_000), mentions = this.commentMentions(id, body, attribution);
+      const comment: ReviewComment = { id: randomUUID(), threadId, revisionId: id, versionId: root.versionId, viewedVersionId: viewedVersion.id, filePath: root.filePath, line: root.line, ...(root.anchor ? { anchor: root.anchor } : {}), ...(root.docxAnchor ? { docxAnchor: root.docxAnchor } : {}), body, ...(mentions ? { mentions } : {}), author: attribution?.displayName ?? 'You', ...(attribution ? { attribution } : {}), createdAt: new Date().toISOString() };
       const updated = this.advanceThread(thread, comment.createdAt);
       this.insertComment(comment); this.saveThread(updated);
-      this.revisionSubscriptions.commented(id, comment.id, attribution);
+      this.revisionSubscriptions.mentioned(comment); this.revisionSubscriptions.commented(id, comment.id, attribution);
       this.event(id, 'replied', `Replied to a discussion while viewing version ${viewedVersion.number}.`, attribution); this.notifications.emit({ revisionId: id, kind: 'replied', cause: { type: 'comment', id: comment.id }, attribution, createdAt: comment.createdAt, head: this.notificationVersionHead(id, comment.versionId) });
       return comment;
     });

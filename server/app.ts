@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
+import { mentionRequestHash } from './mentions.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
@@ -168,6 +169,20 @@ export function createApp(options: AppOptions = {}): App {
     eligible: principalId => auth.mode === 'local' && principalId === `local:${auth.workspaceId}` || Boolean(store.database.prepare('SELECT 1 FROM auth_accounts WHERE id=? AND disabled=0').get(principalId)),
     canView: (revisionId, principalId) => policies.access(revisionId, principalId).view,
   });
+  store.configureMentions({ resolve: (objectId, username, actor) => {
+    const localId = `local:${auth.workspaceId}`;
+    const eligibleActor = auth.mode === 'local' && actor.principalId === localId
+      || Boolean(store.database.prepare('SELECT 1 FROM auth_accounts WHERE id=? AND disabled=0').get(actor.principalId));
+    if (!eligibleActor || !policies.access(objectId, actor.principalId).view) return null;
+    const account = store.database.prepare('SELECT id,display_name FROM auth_accounts WHERE username=? AND disabled=0').get(username) as { id: string; display_name: string } | undefined;
+    const local = auth.mode === 'local' && username === 'local';
+    // A real account and the local workspace may share this spelling. Never
+    // bind an ambiguous token to a different person than the writer intended.
+    if (account && local) return null;
+    const target = account ? { principalId: account.id, displayName: account.display_name }
+      : local ? { principalId: localId, displayName: 'You' } : null;
+    return target && policies.access(objectId, target.principalId).view ? target : null;
+  } });
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null);
@@ -463,7 +478,7 @@ export function createApp(options: AppOptions = {}): App {
     };
     const ownerMutation = method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && input !== null && typeof input === 'object' && Object.hasOwn(input, 'ownerId');
     const projectMutation = /^\/api\/projects\/PROJ\d+(?:\/(?:membership|members|watchers|silence))?$/.test(path) || (method === 'POST' && path === '/api/projects' && input !== null && typeof input === 'object' && 'parentId' in input && typeof input.parentId === 'string');
-    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed, input);
+    const present = (response: MutationResponse, replayed = true) => access.present(method, path, response, ownerMutation && !replayed, projectMutation && !replayed, input, mentionRequestHash(key, fingerprint));
     store.read(authorize);
     const attribution: ActorAttribution = { principalId: context.principalId, displayName: context.displayName, credentialId: context.credentialId, requestId: randomUUID() };
     // Preserve legacy local retries, while every authenticated principal has a

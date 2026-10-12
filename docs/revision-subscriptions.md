@@ -15,7 +15,10 @@ when no preference exists and they do not already follow automatically. Historic
 comments are not replayed to manufacture subscription events. The current native
 account model has no separate service-account kind; implicit following recognizes
 enabled workspace accounts and the exact local workspace identity, rather than
-assuming an arbitrary attributed name is a person.
+assuming an arbitrary attributed name is a person. [Discussion mentions](mentions.md)
+are separate explicit additions: a new mention can override the mentioned
+person's prior opt-out, but skips automatic/current followers and never changes
+private mute. The following history records its immutable comment cause.
 
 Self subscribe/unsubscribe requires current View and a write-scoped credential.
 Adding another person requires Interact or Edit; removing another requires Edit.
@@ -108,9 +111,11 @@ Automatic following is derived from the existing author/reviewer records.
 
 Each revision supports 1,000 stored explicit person preferences, including opt-out
 tombstones. Automatic roles are additional. At that bound, existing preferences
-can still change and personal mute remains available. A new comment still saves,
-but it does not implicitly add another preference. New explicit preferences
-return a capacity error. This native bound is a recorded difference from the
+can still change and personal mute remains available. A new comment can still
+save without its author's incidental opt-in. An explicit mention requiring a new
+preference instead returns a capacity error and rolls back the whole comment,
+including any earlier following additions. New explicit preferences also return
+a capacity error. This native bound is a recorded difference from the
 upstream edge store, not a claim of unlimited subscription parity.
 
 ## Upstream behavior
@@ -150,7 +155,7 @@ comments are not backfilled into invented subscription history.
 
 NOTIFY-01 adds revision inbox delivery for people followers and tagged-project
 watchers. Activity-feed publication, inbound/outbound mail, service account kinds,
-project/package subscribers, mentions, Herald, subscription-driven policies,
+project/package subscribers, mentions outside discussion, Herald, subscription-driven policies,
 Conduit subscription edits, bulk set/import and upstream history import remain
 separate parity gaps. See [the internal tracker](roadmap.md) and
 [parity inventory](parity.md).

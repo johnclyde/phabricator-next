@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page, type Request } from '@playwright/test';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, mkdir } from 'node:fs/promises';
 import type { AppState, RevisionDetail, RevisionVersion, ReviewComment } from '../shared/types';
@@ -6,6 +6,7 @@ import type { FileRecord, FileDetail } from '../shared/files';
 import type { DocxInspection } from '../shared/docx';
 import type { DocxDiscussionExport } from '../shared/docx-discussion';
 import { normalizeBasePath } from '../shared/mount';
+import { notificationInput } from '../shared/notifications';
 import { authAccounts } from './auth-fixture';
 
 const fixture = 'tests/fixtures/docx/roundtrip.docx';
@@ -61,9 +62,10 @@ test.describe('Word discussion export retirement', () => {
   test.use({ serviceWorkers: 'block' });
   test('initial Word document read recovers once after startup authority retires its pending snapshot', async ({ page, request, baseURL }) => {
     const detail = await create(request, baseURL!), id = detail.revision.id;
-    let releaseState!: () => void, releaseDetail!: () => void, captured!: () => void, reads = 0, writes = 0;
+    let releaseState!: () => void, releaseDetail!: () => void, captured!: () => void, reads = 0;
+    const writes: Request[] = [];
     const stateHeld = new Promise<void>(resolve => { releaseState = resolve; }), detailHeld = new Promise<void>(resolve => { releaseDetail = resolve; }), reached = new Promise<void>(resolve => { captured = resolve; });
-    page.on('request', event => { if (event.method() !== 'GET') writes++; });
+    page.on('request', event => { if (event.method() !== 'GET') writes.push(event); });
     await page.route('**/api/state', async route => { await stateHeld; await route.continue(); });
     await page.route(`**/api/revisions/${id}`, async route => {
       reads++;
@@ -73,8 +75,16 @@ test.describe('Word discussion export retirement', () => {
     try {
       await page.goto(`./#${id}`); await reached; releaseState();
       await expect(page.getByLabel('Word document text')).toContainText('The original result is clear.');
-      expect(reads).toBe(2); expect(writes).toBe(0); await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
+      expect(reads).toBe(2); await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
     } finally { releaseState(); releaseDetail(); await page.unrouteAll({ behavior: 'wait' }); }
+    // Retiring initial authority can also retire the observed inbox horizon.
+    // A valid foreground mark is allowed; source and discussion writes are not.
+    expect(writes.length).toBeLessThanOrEqual(1);
+    for (const mark of writes) {
+      expect(mark.method()).toBe('POST'); expect(mark.url()).toBe(new URL('api/notifications/read', baseURL!).href);
+      expect(notificationInput(mark.postDataJSON())).toMatchObject({ action: 'read_object', objectId: id, expectedAccessEpoch: expect.any(Number), horizon: expect.any(String) });
+      expect(mark.headers()['idempotency-key']).toMatch(/^[a-f0-9-]{36}$/);
+    }
   });
   test('late export bytes and later thread snapshots cannot enable an obsolete download', async ({ page, request, baseURL }) => {
     const detail = await create(request, baseURL!), id = detail.revision.id; await addThread(request, baseURL!, detail); const next = await changedVersion(request, baseURL!, detail), original = detail.versions[0]!, latest = next.versions.at(-1)!; await page.goto(`./#${id}`); await chooseVersion(page, original); await exportPanel(page).getByRole('checkbox').check();

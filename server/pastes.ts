@@ -1,13 +1,14 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ActorAttribution } from '../shared/types.ts';
+import type { MentionProof } from '../shared/mentions.ts';
 import type { CreatePasteInput, UpdatePasteInput, PasteCommentInput, PasteDetail, PasteFieldChange, PasteHistory, PasteListQuery, PastePage, PasteRecord, PasteTransaction, PasteVersion, PasteVersionsPage, PasteVersionSummary } from '../shared/pastes.ts';
 import { PASTE_MAX_TITLE, PASTE_MAX_LANGUAGE, PASTE_MAX_COMMENT, PASTE_SNIPPET_LENGTH, PASTE_LIST_MAX_SCAN, PASTE_LIST_MAX_SOURCE_BYTES, validatePasteContent } from '../shared/pastes.ts';
 import { registerDefaultPolicy } from './policy.ts';
 import { choice, HttpError, integer, object, string } from './validation.ts';
 
 type JsonRow = { data: string };
-type Callbacks = { nextId: () => string; event: (id: string, action: string, detail: string, actor: ActorAttribution) => void; batch?: <T>(work: () => T) => T; notify?: (transaction: PasteTransaction) => void };
+type Callbacks = { nextId: () => string; event: (id: string, action: string, detail: string, actor: ActorAttribution) => void; batch?: <T>(work: () => T) => T; mentions?: (id: string, body: string, actor: ActorAttribution) => MentionProof | undefined; notify?: (transaction: PasteTransaction) => void };
 const hash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex');
 const unavailable = () => new HttpError(404, 'Paste was not found.', 'PASTE_UNAVAILABLE');
 const corrupt = () => new HttpError(409, 'Stored paste integrity could not be verified.', 'PASTE_INTEGRITY');
@@ -164,7 +165,8 @@ export class PasteStore {
     const data = parsePasteCommentInput(input); principal(actor.principalId);
     return this.mutation(() => {
       const record = this.get(pasteId); const version = this.version(pasteId, data.contentVersion);
-      const transaction = this.append(record, actor, { kind: 'comment', contentVersion: version.number, contentHash: version.sha256, comment: data.body });
+      const mentions = this.callbacks.mentions?.(pasteId, data.body, actor);
+      const transaction = this.append(record, actor, { kind: 'comment', contentVersion: version.number, contentHash: version.sha256, comment: data.body, ...(mentions ? { mentions } : {}) });
       this.callbacks.event(pasteId, 'commented', 'commented on this paste', actor); this.callbacks.notify?.(transaction); return transaction;
     });
   }
