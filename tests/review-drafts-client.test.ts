@@ -129,7 +129,7 @@ test('protected multi-passage drafts retain unfinished explanations only in the 
   } finally { f.close(); }
 });
 
-test('a private proposal edited beyond the publication budget survives reopening without replacing it with its saved version', async () => {
+test('a large private proposal remains valid and survives reopening with every original edit', async () => {
   const f = fixture(); try {
     const payload = multiPassagePayload();
     if (payload.kind !== 'comment' || !payload.suggestion?.additionalEdits) throw new Error('fixture');
@@ -138,10 +138,30 @@ test('a private proposal edited beyond the publication budget survives reopening
     payload.body = 'b'.repeat(15_000); payload.suggestion.replacement = 'r'.repeat(19_000);
     for (const edit of payload.suggestion.additionalEdits) { edit.replacement = 'e'.repeat(19_000); edit.explanation = 'x'.repeat(15_000); }
     const oversized = { ...draft, payload };
-    assert.throws(() => reviewDraftPayload(payload), 'publication keeps the aggregate limit');
+    assert.deepEqual(reviewDraftPayload(payload), payload, 'the former suggestion-specific aggregate budget does not reject valid proposals');
     assert.deepEqual(editValue(oversized), oversized, 'raw authored text remains a recoverable editor draft');
     assert.equal(await f.client.retainDraft(key, oversized, saved), 'saved');
     assert.deepEqual(createWorkspaceClient(f.session).readStored(key, null), oversized);
     assert.deepEqual(f.client.savedDraftRecords('review-draft-edit:L1:').find(item => item.key === key)?.value, oversized);
+  } finally { f.close(); }
+});
+
+test('private drafts and pending save recovery retain every passage beyond the former edit-count limit', async () => {
+  const f = fixture(); try {
+    const payload = multiPassagePayload();
+    if (payload.kind !== 'comment' || !payload.suggestion) throw new Error('fixture');
+    const lines = Array.from({ length: 64 }, (_, index) => `Passage ${index + 1}.`), source = lines.join('\r\n');
+    const version: RevisionVersion = { id: payload.versionId, contentHash: payload.contentHash, revisionId: 'L1', number: 1, createdAt: '2026-10-12T00:00:00Z', message: 'Original', files: [{ path: 'appendix.tex', content: source }] };
+    payload.suggestion.additionalEdits = lines.map((quote, index) => {
+      const start = source.indexOf(quote);
+      return { anchor: createPassageAnchor(version, 'appendix.tex', { start, end: start + quote.length, quote }), replacement: `Revised passage ${index + 1}.`, explanation: `Explanation ${index + 1}.` };
+    });
+    const complete = { ...draft, payload }, intent: Intent = { ...f.intent, input: { expectedEntryVersion: 0, expectedAccessEpoch: 1, payload }, cleanup: { key, value: complete } };
+    assert.deepEqual(editValue(complete), complete); assert.deepEqual(intentValue(intent, 'L1', f.principalId), intent);
+    assert.equal(await f.client.retainDraft(key, complete, null), 'saved'); assert.equal(f.client.writeStored(requestKey, intent), true);
+    const reopened = createWorkspaceClient(f.session);
+    assert.deepEqual(reopened.readStored(key, null), complete); assert.deepEqual(reopened.readStored(requestKey, null), intent);
+    f.client.reconcileAccess({ L1: access('L1', false) }, 2, ['S1']);
+    assert.ok(f.client.quarantinedDrafts().some(item => item.key === requestKey && JSON.stringify(item.value) === JSON.stringify(intent)));
   } finally { f.close(); }
 });

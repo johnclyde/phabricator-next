@@ -13,6 +13,7 @@ import { createPassageAnchor } from '../shared/anchors.ts';
 import type { Audience, ObjectAccess } from '../shared/policy.ts';
 import type { RevisionAuthorshipSnapshot } from '../shared/revision-authorship.ts';
 import type { RevisionLifecycleSnapshot } from '../shared/revision-lifecycle.ts';
+import type { ReviewDraftChangeReceipt, ReviewDraftPreview, ReviewDraftPublicationReceipt } from '../shared/review-drafts.ts';
 import type { ApplySuggestionInput, RevisionDetail, ReviewComment } from '../shared/types.ts';
 
 type ErrorBody = { error: string; code?: string };
@@ -231,5 +232,66 @@ test('an exact multi-passage proposal never rebases when source identity advance
     const saved = app.store.detail(before.revision.id);
     for (const input of [app.input(before), app.input(newer)]) assert.equal((await app.request('alice', `${path}/suggestions/${root.id}/apply`, 'POST', input)).status, 409);
     assert.deepEqual(app.store.detail(before.revision.id), saved);
+  } finally { await app.close(); }
+});
+
+test('large proposals publish directly or privately and apply every edit exactly once, while late invalid edits leave no effects', async () => {
+  const app = await start();
+  const evidence = () => Object.fromEntries(['entities', 'versions', 'comments', 'review_threads', 'thread_events', 'suggestion_applications', 'activity', 'notification_events', 'notification_deliveries', 'review_draft_sets', 'review_draft_entries', 'review_draft_operations', 'idempotency'].map(table => [table, app.store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+  try {
+    for (const mode of ['direct', 'private'] as const) {
+      const count = 128, perFile = 32;
+      const original = Array.from({ length: count }, (_, index) => `Claim ${String(index).padStart(3, '0')}.`);
+      const replacement = original.map((_, index) => index % 3 === 0 ? '' : `Qualified claim ${index} 🧪.`);
+      const files = Array.from({ length: count / perFile }, (_, index) => ({ path: `part-${index}.tex`, content: original.slice(index * perFile, (index + 1) * perFile).join('\r\n') + '\r\n' }));
+      const before = await app.create<RevisionDetail>('alice', '/api/revisions', { ...createInput, files });
+      const version = before.versions[0]!, path = `/api/revisions/${before.revision.id}`;
+      const edits = original.map((quote, index) => {
+        const file = files[Math.floor(index / perFile)]!, start = file.content.indexOf(quote);
+        return { anchor: createPassageAnchor(version, file.path, { start, end: start + quote.length, quote }), replacement: replacement[index]!, explanation: `Explanation ${index}: ${'Precise retained reasoning. '.repeat(40)}` };
+      });
+      const first = edits[0]!, suggestion = { replacement: first.replacement, additionalEdits: edits.slice(1).reverse() };
+      assert.ok(edits.reduce((total, edit) => total + edit.anchor.quote.length + edit.replacement.length + edit.explanation.length, 0) > 100_000);
+      const proposed = { body: first.explanation, versionId: version.id, filePath: first.anchor.filePath, passage: { start: first.anchor.start, end: first.anchor.end, quote: first.anchor.quote }, suggestion };
+      const invalid = { ...proposed, suggestion: { ...suggestion, additionalEdits: [...suggestion.additionalEdits.slice(0, -1), { ...edits[1]!, anchor: { ...edits[1]!.anchor, suffix: 'Forged final context' } }] } };
+      const pristine = evidence();
+      let root: ReviewComment;
+      if (mode === 'direct') {
+        assert.equal((await app.request('bob', `${path}/comments`, 'POST', invalid, 'large-invalid-direct')).status, 400);
+        assert.deepEqual(evidence(), pristine);
+        root = await app.create<ReviewComment>('bob', `${path}/comments`, proposed, 'large-direct-proposal');
+        assert.deepEqual(await app.create('bob', `${path}/comments`, proposed, 'large-direct-proposal'), root);
+      } else {
+        const entryPath = `${path}/review-drafts/${crypto.randomUUID()}`;
+        const input = { expectedEntryVersion: 0, expectedAccessEpoch: app.policies.epoch(), payload: { kind: 'comment', ...proposed, contentHash: version.contentHash, line: 1 } };
+        assert.equal((await app.request('bob', entryPath, 'PUT', { ...input, payload: { ...input.payload, suggestion: invalid.suggestion } }, 'large-invalid-private')).status, 400);
+        assert.deepEqual(evidence(), pristine);
+        const saved = await app.request<ReviewDraftChangeReceipt>('bob', entryPath, 'PUT', input, 'large-private-save');
+        assert.equal(saved.status, 200, JSON.stringify(saved.body));
+        assert.deepEqual(saved.body.entry.payload, input.payload);
+        assert.deepEqual(await app.request('bob', entryPath, 'PUT', input, 'large-private-save'), saved);
+        const preview = await app.request<ReviewDraftPreview>('bob', `${path}/review-drafts/preview`);
+        assert.equal(preview.status, 200); assert.deepEqual(preview.body.entries[0]!.payload, input.payload);
+        const publication = await app.request<ReviewDraftPublicationReceipt>('bob', `${path}/review-drafts/publish`, 'POST', { manifest: preview.body.manifest }, 'large-private-publish');
+        assert.equal(publication.status, 200, JSON.stringify(publication.body));
+        assert.equal(publication.body.published.length, 1);
+        root = publication.body.published[0]!.comment;
+        assert.deepEqual(await app.request('bob', `${path}/review-drafts/publish`, 'POST', { manifest: preview.body.manifest }, 'large-private-publish'), publication);
+      }
+      assert.deepEqual(root.suggestion, suggestion);
+      const published = app.store.detail(before.revision.id);
+      assert.equal(published.versions.length, 1); assert.equal(published.comments.length, 1);
+      const endpoint = `${path}/suggestions/${root.id}/apply`, input = app.input(before);
+      const applied = await app.create<RevisionDetail>('alice', endpoint, input, `large-${mode}-apply`);
+      assert.deepEqual(applied.versions[0], version);
+      assert.deepEqual(applied.versions[1]!.files, files.map((file, index) => ({ path: file.path, content: replacement.slice(index * perFile, (index + 1) * perFile).join('\r\n') + '\r\n' })));
+      assert.equal(applied.versions.length, 2); assert.equal(applied.suggestionApplications.length, 1);
+      assert.equal(applied.threads[0]!.version, 2); assert.deepEqual(applied.comments, [root]);
+      const final = evidence();
+      assert.deepEqual(await app.create('alice', endpoint, input, `large-${mode}-apply`), applied);
+      assert.deepEqual(evidence(), final);
+      assert.equal((await app.request('alice', endpoint, 'POST', input, `large-${mode}-again`)).status, 409);
+      assert.deepEqual(evidence(), final);
+    }
   } finally { await app.close(); }
 });

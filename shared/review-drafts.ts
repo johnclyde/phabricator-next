@@ -64,9 +64,15 @@ export function reviewDraftPayload(v: unknown): ReviewDraftPayload {
     try { suggestion = validateSuggestion(p, v.suggestion as SuggestedReplacement, v.body); } catch { return fail(); }
     const edits = [{ filePath: v.filePath, ...p }, ...(suggestion.additionalEdits ?? []).map(edit => edit.anchor)];
     if (suggestion.additionalEdits?.some(edit => edit.anchor.versionId !== v.versionId || edit.anchor.contentHash !== v.contentHash)) return fail();
-    for (let index = 0; index < edits.length; index++) for (let other = index + 1; other < edits.length; other++) {
-      const left = edits[index]!, right = edits[other]!;
-      if (left.filePath === right.filePath && left.start < right.end && right.start < left.end) return fail();
+    const byFile = new Map<string | null, typeof edits>();
+    for (const edit of edits) {
+      const ranges = byFile.get(edit.filePath) ?? [];
+      ranges.push(edit);
+      byFile.set(edit.filePath, ranges);
+    }
+    for (const ranges of byFile.values()) {
+      ranges.sort((left, right) => left.start - right.start);
+      for (let index = 1; index < ranges.length; index++) if (ranges[index]!.start < ranges[index - 1]!.end) return fail();
     }
   }
   return { kind: 'comment', body: v.body, versionId: v.versionId, contentHash: v.contentHash, filePath: v.filePath, line: v.line, ...(p ? { passage: p } : {}), ...(d ? { docxPassage: d } : {}), ...(suggestion ? { suggestion } : {}) };

@@ -1337,7 +1337,7 @@
   .paragraph-reorder button { font-size: 12px; }
 }
 
-/* Exact multi-passage proposals keep every original quotation visible for review. */
+/* Exact multi-passage proposals retain every original quotation across display pages. */
 .additional-suggested-edits, .suggestion-set-preview, .suggestion-passage-editor, .suggestion-passage-picker, .suggestion-passage-preview { min-width: 0; }
 .suggestion-passage-editor, .suggestion-passage-picker, .suggestion-passage-preview { border-top: 1px solid #ccd9e2; padding-top: 14px; margin-top: 16px; }
 .suggestion-passage-heading { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
@@ -1350,6 +1350,11 @@
 .suggestion-explanation { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.65; }
 .suggestion-selected-passage pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: 10px; background: white; border: 1px solid #d8e1e8; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .suggestion-selection-source { max-height: 400px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.suggestion-pages { min-width: 0; padding: 10px 0; }
+.suggestion-page-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.suggestion-page-controls button, .suggestion-page-jump input { min-height: 44px; }
+.suggestion-page-jump { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.suggestion-page-jump input { width: 76px; max-width: 100%; }
 @media (max-width: 640px) {
   .additional-suggested-edits .thread-actions { flex-direction: column; }
   .additional-suggested-edits .thread-actions > button { width: 100%; }

@@ -50,7 +50,9 @@ test('an exact suggested replacement creates a new version and resets acceptance
   const thread = await suggest(page, 2, replacement, 'The schedule requires three weeks.');
   await expect(thread.locator('.suggestion-original')).toHaveText('The requested extension is fourteen days.');
   await expect(thread.locator('.suggestion-replacement')).toHaveText(replacement);
+  await expect(thread.getByLabel('Suggested edit diff', { exact: true })).toHaveCount(0);
   await thread.getByText('Show exact text diff', { exact: true }).click();
+  await expect(thread.getByLabel('Suggested edit diff', { exact: true })).toBeVisible();
   await expect(thread.locator('.suggestion-diff del')).toContainText('fourteen');
   await expect(thread.locator('.suggestion-diff ins')).toContainText('twenty-one');
   await thread.getByRole('button', { name: 'Review Suggested Edit', exact: true }).click();
