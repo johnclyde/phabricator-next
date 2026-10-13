@@ -1,3 +1,4 @@
+import { Automation, type AutomationConfiguration } from './automation.ts';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { mentionRequestHash } from './mentions.ts';
@@ -19,7 +20,7 @@ import { exportDocxDiscussion, inspectDocx, replaceDocx } from './docx-package.t
 import { DOCX_LIMITS, type DocxFileIdentity } from '../shared/docx.ts';
 import { docxDiscussionFilename, type DocxDiscussionExport } from '../shared/docx-discussion.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
-import { choice, HttpError, integer, object } from './validation.ts';
+import { choice, HttpError, integer, object, string } from './validation.ts';
 import { seedDemo } from './seed.ts';
 import { PolicyStore, registerFilePolicy } from './policy.ts';
 import type { FileListQuery } from '../shared/files.ts';
@@ -48,6 +49,7 @@ import { revisionViewInput, type RevisionViewAction, type RevisionViewInput } fr
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
+  automation?: AutomationConfiguration;
   store?: Store;
   databasePath?: string;
   seed?: boolean;
@@ -69,7 +71,7 @@ export interface AppOptions {
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
-export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; close: () => Promise<void> }
+export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; automation: Automation; close: () => Promise<void> }
 
 function security(req: IncomingMessage, res: ServerResponse, configuredPort: number, hosting: HostedOrigin | undefined, basePath: string): void {
   assertHostingRequest(req, configuredPort, hosting, basePath);
@@ -190,6 +192,8 @@ export function createApp(options: AppOptions = {}): App {
       : local ? { principalId: localId, displayName: 'You' } : null;
     return target && policies.access(objectId, target.principalId).view ? target : null;
   } });
+  const automation = new Automation(store, auth, policies, options.automation);
+  automation.start();
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null);
@@ -318,6 +322,17 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/')) {
+      let commit;
+      if (method === 'POST' && path === '/api/harbormaster/builds' && input && typeof input === 'object' && 'repositoryId' in input) {
+        const data = object(input, ['repositoryId', 'commitId', 'planId', 'planVersion']);
+        const id = string(data.repositoryId, 'Repository ID', 100), commitId = string(data.commitId, 'Commit ID', 64);
+        const authorize = () => { auth.revalidate(context, 'write'); access.require(id, 'edit'); };
+        store.read(authorize);
+        try { commit = await git.commit(id, commitId, signal); } finally { store.read(authorize); }
+      }
+      return automation.mutate(method, path, input, rawKey, context, commit);
+    }
     const savedView = /^\/api\/revision-views\/([^/]+)(\/delete)?$/.exec(path);
     if (method === 'POST' && path === '/api/revision-views' || savedView && (method === 'PUT' && !savedView[2] || method === 'POST' && savedView[2])) {
       const action: RevisionViewAction = !savedView ? 'create' : savedView[2] ? 'delete' : 'edit', id = savedView?.[1] ?? null;
@@ -813,8 +828,8 @@ export function createApp(options: AppOptions = {}): App {
         await serveTranscriptionModel(req, res, path, transcriptionDirectory); return;
       }
       if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath, auth.providers().google); return; }
-      if (path.startsWith('/api/phriction.')) {
-        send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath, hosting?.origin)); return;
+      if (path.startsWith('/api/phriction.') || path.startsWith('/api/harbormaster.')) {
+        send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath, hosting?.origin, automation)); return;
       }
       if (req.method === 'GET' && path === '/api/health') { send(res, 200, { ok: true }); return; }
       if (req.method === 'GET' && path === '/api/auth/providers') {
@@ -888,6 +903,7 @@ export function createApp(options: AppOptions = {}): App {
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
+          if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
           if (path === '/api/revision-views') {
             if (url.search) throw new HttpError(400, 'Saved revision view lists do not accept query parameters.');
@@ -1324,7 +1340,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (/^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
+      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
@@ -1345,8 +1361,9 @@ export function createApp(options: AppOptions = {}): App {
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   let closing: Promise<void> | undefined;
-  return { server, store, auth, policies, paperBuilds, close: () => closing ??= (async () => {
+  return { server, store, auth, policies, paperBuilds, automation, close: () => closing ??= (async () => {
     for (const controller of gitReads) controller.abort();
+    await automation.close();
     await paperBuilds.close();
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
     await Promise.allSettled([...docxWork]);

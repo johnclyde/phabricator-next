@@ -8,6 +8,8 @@ import { canonicalWikiPath, type WikiStatus } from '../shared/wiki.ts';
 import type { WikiVersion } from '../shared/types.ts';
 import type { WikiContentSearchItem, WikiContentSearchQuery, WikiDocumentSearchQuery } from '../shared/wiki-search.ts';
 import { executeConduitWrite } from './conduit-writes.ts';
+import type { Automation } from './automation.ts';
+import { AUTOMATION_CONDUIT_METHODS, AUTOMATION_CONDUIT_WRITES, executeAutomationConduit } from './automation-conduit.ts';
 
 const MAX_BODY = 2_000_000;
 const HISTORY_LIMIT = 1000;
@@ -27,7 +29,7 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
 function json(value: string): unknown {
   try { return JSON.parse(value) as unknown; } catch { throw invalid('Parameters must contain valid JSON.'); }
 }
-function plainForm(form: URLSearchParams): Record<string, unknown> {
+function plainForm(form: URLSearchParams, nativeBuildIds = false): Record<string, unknown> {
   const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const arrays = new Map<string, { values: string[]; indexes: Set<string>; append: boolean }>();
   for (const [name, value] of form) {
@@ -51,14 +53,15 @@ function plainForm(form: URLSearchParams): Record<string, unknown> {
       }
       continue;
     }
-    if (!['slug', 'title', 'content', 'description', 'queryKey', 'order', 'before', 'after', 'limit', 'constraints', 'attachments', 'api.token', '__conduit__'].includes(name) || name in result) throw invalid('Unsupported or duplicate form field.');
+    if (!['slug', 'title', 'content', 'description', 'queryKey', 'order', 'before', 'after', 'limit', 'constraints', 'attachments', 'api.token', '__conduit__', 'buildTargetPHID', 'type', 'leaseToken', 'reportId', 'log', 'unit', 'lint', 'artifactKey', 'artifactType', 'artifactData', 'objectIdentifier', 'transactions', 'expectedVersion'].includes(name) || name in result) throw invalid('Unsupported or duplicate form field.');
     result[name] = value;
   }
-  for (const name of ['constraints', 'attachments', '__conduit__']) if (typeof result[name] === 'string') result[name] = json(result[name] as string);
+  for (const name of ['constraints', 'attachments', '__conduit__', 'unit', 'lint', 'artifactData', 'transactions']) if (typeof result[name] === 'string') result[name] = json(result[name] as string);
   if (typeof result.limit === 'string') result.limit = formInteger(result.limit);
+  if (typeof result.expectedVersion === 'string') result.expectedVersion = formInteger(result.expectedVersion);
   if (result.constraints !== undefined) {
     const constraints = record(result.constraints);
-    for (const name of ['ids', 'versions', 'version']) if (Array.isArray(constraints[name])) constraints[name] = (constraints[name] as unknown[]).map(value => typeof value === 'string' ? formInteger(value) : value);
+    for (const name of nativeBuildIds ? [] : ['ids', 'versions', 'version']) if (Array.isArray(constraints[name])) constraints[name] = (constraints[name] as unknown[]).map(value => typeof value === 'string' ? formInteger(value) : value);
   }
   if (result.attachments !== undefined) {
     const attachments = record(result.attachments);
@@ -73,7 +76,7 @@ function formInteger(value: string): number {
   if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) throw invalid('Numeric parameters require positive integers.');
   return Number(value);
 }
-async function parameters(req: IncomingMessage): Promise<{ params: Record<string, unknown>; token: unknown }> {
+async function parameters(req: IncomingMessage, method: string): Promise<{ params: Record<string, unknown>; token: unknown }> {
   const contentType = req.headers['content-type'] ?? '';
   const isJSON = /^application\/json(?:\s*;|$)/i.test(contentType);
   if (!isJSON && !/^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(contentType)) throw invalid('Use form-encoded parameters or an application/json object.');
@@ -95,7 +98,7 @@ async function parameters(req: IncomingMessage): Promise<{ params: Record<string
       if (form.has('output') && form.get('output') !== 'json') throw invalid('Only JSON responses are supported.');
       params = record(json(form.get('params')!));
       if (form.has('api.token')) { if ('api.token' in params) throw invalid('Use one authentication method per request.'); params['api.token'] = form.get('api.token'); }
-    } else params = plainForm(form);
+    } else params = plainForm(form, method.startsWith('harbormaster.'));
   }
   const tokens: unknown[] = [];
   if ('api.token' in params) { tokens.push(params['api.token']); delete params['api.token']; }
@@ -175,14 +178,21 @@ function execute(method: string, params: Record<string, unknown>, store: Store, 
 }
 export interface ConduitEnvelope { result: unknown; error_code: string | null; error_info: string | null }
 /** Errors never echo supplied tokens, field names, values, or internal exception messages. */
-export async function conduitRequest(req: IncomingMessage, method: string, url: URL, store: Store, auth: Auth, policies: PolicyStore, basePath: string, publicOrigin?: string): Promise<ConduitEnvelope> {
+export async function conduitRequest(req: IncomingMessage, method: string, url: URL, store: Store, auth: Auth, policies: PolicyStore, basePath: string, publicOrigin?: string, automation?: Automation): Promise<ConduitEnvelope> {
   try {
     if (req.method !== 'POST' || url.search) throw invalid('Conduit methods require POST without URL query parameters.');
-    const { params, token } = await parameters(req);
-    const write = method === 'phriction.create' || method === 'phriction.edit';
+    const { params, token } = await parameters(req, method);
+    const write = method === 'phriction.create' || method === 'phriction.edit' || AUTOMATION_CONDUIT_WRITES.has(method);
     let context;
     try { context = auth.authenticateConduit(req, token, write ? 'write' : 'read'); } catch { throw new ConduitError('ERR-INVALID-AUTH', `A valid ${write ? 'write' : 'read'} credential is required. Browser sessions also require their current context and CSRF headers.`); }
-    if (write) {
+    if (AUTOMATION_CONDUIT_METHODS.has(method)) {
+      if (!automation) throw new ConduitError('ERR-UNKNOWN-METHOD', 'Automation Conduit methods are unavailable.');
+      const key = req.headers['idempotency-key']; if (key !== undefined && typeof key !== 'string') throw invalid('Use one valid Idempotency-Key.');
+      const execute = () => executeAutomationConduit(method, params, context, automation, key);
+      const result = write ? execute() : store.read(() => { auth.revalidate(context, 'read'); return execute(); });
+      return { result, error_code: null, error_info: null };
+    }
+    if (method === 'phriction.create' || method === 'phriction.edit') {
       const selected = executeConduitWrite(req, method, params, store, auth, policies, context);
       return { result: legacyDictionary({ phid: selected.phid, status: selected.receipt.snapshot.location.status }, selected.content, `${publicOrigin ?? `http://${req.headers.host}`}${basePath}`), error_code: null, error_info: null };
     }

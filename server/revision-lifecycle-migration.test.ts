@@ -27,7 +27,7 @@ test('schema26 preserves every schema25 row, definition and sequence with truthf
     }
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('historical-lifecycle', 'exact', 200, '{"status":"accepted","literal":"  old receipt  "}', '2026-01-01T00:00:00Z');
     drop(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 36); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 37); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     for (const id of ids) {
@@ -52,7 +52,7 @@ test('schema26 collisions and malformed legacy status roll back all new schema a
       const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|column|verified/);
       db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 25); assert.deepEqual(snapshot(db), before);
       if (collision) db.exec('DROP TABLE revision_lifecycle_operations'); else db.prepare("UPDATE entities SET data=json_set(data,'$.status','needs_review') WHERE id=?").run(id);
-      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 36);
+      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 37);
     } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
   }
 });

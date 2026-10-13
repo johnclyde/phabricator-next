@@ -1,3 +1,5 @@
+import { initializeHerald } from './herald.ts';
+import { initializeHarbormaster } from './harbormaster.ts';
 import { initializeNotifications, initializeNotificationTargets, NotificationStore } from './notifications.ts';
 import { initializeTaskNotifications, TaskNotificationsStore } from './task-notifications.ts';
 import { initializeObjectSubscriptions, ObjectSubscriptionStore } from './object-subscriptions.ts';
@@ -218,13 +220,15 @@ export class Store {
   private workboards?: WorkboardStore;
   private mentions?: MentionOptions;
   private mentionRequestSha256?: string;
+  private automation?: (events: Activity[]) => void;
+  configureAutomation(handler: (events: Activity[]) => void): void { this.automation = handler; }
   constructor(options: StoreOptions = {}) {
     const path = options.path ?? '.data/phabricator.sqlite';
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 36) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 37) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -518,6 +522,10 @@ export class Store {
       try { this.transaction(() => { initializeRevisionViews(this.database); this.database.exec('PRAGMA user_version = 36'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 37) {
+      try { this.transaction(() => { initializeHerald(this.database); initializeHarbormaster(this.database); this.database.exec('PRAGMA user_version = 37'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.revisionViews = new RevisionViewStore(this.database);
     this.objectSubscriptions = new ObjectSubscriptionStore(this.database);
     this.taskNotifications = new TaskNotificationsStore(this.database);
@@ -622,11 +630,16 @@ export class Store {
         const existing = this.replay(key, fingerprint);
         if (existing) return present ? present(existing, true) : existing;
       }
+      const eventSequence = this.automation ? (this.database.prepare('SELECT coalesce(max(sequence),0) AS n FROM activity').get() as { n: number }).n : 0;
       const previousMentionRequestSha256 = this.mentionRequestSha256;
       let response: MutationResponse;
       this.mentionRequestSha256 = mentionRequestHash(key, fingerprint);
       try { response = work(); }
       finally { this.mentionRequestSha256 = previousMentionRequestSha256; }
+      if (this.automation) {
+        const events = (this.database.prepare('SELECT data FROM activity WHERE sequence>? ORDER BY sequence').all(eventSequence) as { data: string }[]).map(row => JSON.parse(row.data) as Activity);
+        this.automation(events);
+      }
       this.notifications.flush();
       if (key) {
         this.revisionProjects.captureResponse(key, fingerprint, response);

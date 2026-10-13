@@ -36,6 +36,8 @@ The server intentionally binds to loopback. Password sign-in is available with `
 
 ## What works
 
+- [Herald and Harbormaster](docs/automation.md): versioned rules with test transcripts, automatic scoped actions, immutable build plans and sources, dependent steps, external worker leases and results, configured HTTP dispatch, and mobile rule/build controls. Remaining upstream adapters and execution capabilities are tracked explicitly.
+
 - Code, paper and prose/legal revisions with immutable source snapshots, content hashes and activity history. [Comparison controls](docs/comparisons.md) keep an exact version pair and file selected, support reverse comparisons and deleted files, and connect bounded literal word/line differences with touch, keyboard and spoken change/file navigation. An optional space/tab navigation filter retains the full literal diff and reports skipped passages. [Passage review threads](docs/review-threads.md) preserve exact source quotations, replies and resolve/reopen history across versions, with explicit uncertainty when text cannot be located uniquely.
 - New versions reset acceptance. Review evidence records its exact version, provider and model. Acceptance is a deliberate action based on current-version evidence or exact-version named reviewer decisions, subject to blocking reviews and error findings; it never merges or files anything.
 - [Finding navigation](docs/comparisons.md#review-finding-navigation) keeps an exact historical review selected across newer runs, with shared touch, keyboard and voice controls, original source jumps and authorized offline reading. Deterministic checks, local AI, hosted AI and unrecorded on-device results retain distinct provenance.

@@ -1,0 +1,81 @@
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { RefreshCw } from 'lucide-react';
+import { useWorkspace } from './SessionGate';
+import { isNetworkError, type MutationMethod } from './offline';
+import { onSessionLocked } from './session';
+import './automation.css';
+
+export function automationError(error: unknown): string { return error instanceof Error ? error.message : 'The operation could not be confirmed.'; }
+export function AutomationPanel({ title, children, actions, className = '' }: { title: string; children: ReactNode; actions?: ReactNode; className?: string }) {
+  return <section className={`panel automation-panel ${className}`}><div className="panel-heading"><h2>{title}</h2>{actions}</div><div className="card-body">{children}</div></section>;
+}
+export function AutomationStatus({ value }: { value: string }) { return <span className={`badge automation-status automation-status-${value}`}>{value.replaceAll('_', ' ')}</span>; }
+export function AutomationRefresh({ busy, online, refresh }: { busy: boolean; online: boolean; refresh: () => void }) { return <button type="button" className="button" disabled={busy || !online} onClick={refresh}><RefreshCw size={15}/>{busy ? 'Refreshing…' : 'Refresh'}</button>; }
+export function exportAutomation(value: unknown, name: string): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a'); link.href = url; link.download = `${name}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Automation reads stay in this session and retire together when access changes. */
+export function useAutomationRead<T extends { accessEpoch: number }>(path: string | null, online: boolean) {
+  const client = useWorkspace(), [data, setData] = useState<T | null>(null), [error, setError] = useState(''), [loading, setLoading] = useState(false);
+  const mounted = useRef(true), generation = useRef(0);
+  const load = useCallback(async () => {
+    if (!path || !online || !client.isActive()) return;
+    const ticket = ++generation.current; setLoading(true); setError('');
+    try {
+      const result = await client.request<T>(path);
+      if (!mounted.current || ticket !== generation.current || !client.isActive()) return;
+      if (result.accessEpoch !== client.session?.accessEpoch) throw new Error('Access changed while loading. Refresh to inspect the current authorized result.');
+      setData(result);
+    } catch (failure) { if (mounted.current && ticket === generation.current && client.isActive()) { setData(null); setError(isNetworkError(failure) ? 'Reconnect and refresh to load automation.' : automationError(failure)); } }
+    finally { if (mounted.current && ticket === generation.current) setLoading(false); }
+  }, [client, path, online]);
+  useEffect(() => {
+    mounted.current = true;
+    const clear = () => { generation.current++; setData(null); setLoading(false); };
+    const access = client.onAccessChange(clear), locked = onSessionLocked(clear);
+    return () => { mounted.current = false; generation.current++; access(); locked(); };
+  }, [client]);
+  useEffect(() => { setData(null); void load(); return () => { generation.current++; }; }, [load]);
+  return { data, error, loading, reload: load, setData };
+}
+
+export interface AutomationIntent { id: string; path: string; method: MutationMethod; body: unknown; label: string }
+function readIntent(value: unknown): AutomationIntent | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+  return typeof input.id === 'string' && typeof input.path === 'string' && /^\/api\/(herald|harbormaster)\//.test(input.path) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
+}
+
+/** Retain one immutable request before sending it; recovery is always explicit. */
+export function useAutomationMutation(scope: 'herald' | 'harbormaster', online: boolean) {
+  const client = useWorkspace(), key = `draft:automation:${scope}:request`;
+  const [pending, setPending] = useState(() => readIntent(client.readStored(key, null))), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const mounted = useRef(true), sending = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const send = async <T,>(intent: AutomationIntent): Promise<T | null> => {
+    if (sending.current || !online || !client.isActive()) return null;
+    sending.current = true; setBusy(true); setError('');
+    try {
+      if (pending && JSON.stringify(pending) !== JSON.stringify(intent)) throw new Error('Resolve or export the existing unconfirmed request before starting another operation.');
+      const result = await client.retainDraft(key, intent, pending);
+      if (result === 'unavailable') throw new Error('This request could not be retained safely. Export the draft and refresh before submitting.');
+      if (!mounted.current || !client.isActive()) return null;
+      setPending(intent);
+      const receipt = await client.request<T>(intent.path, { method: intent.method, id: intent.id, body: intent.body });
+      if (!mounted.current || !client.isActive()) return null;
+      await client.removeRetainedDraftIfEqual(key, intent);
+      if (!mounted.current || !client.isActive()) return null;
+      setPending(null); return receipt;
+    } catch (failure) { if (mounted.current && client.isActive()) setError(isNetworkError(failure) ? 'The outcome is unknown. Retry the exact request to recover its result without duplicating it.' : automationError(failure)); return null; }
+    finally { sending.current = false; if (mounted.current) setBusy(false); }
+  };
+  const forget = async () => { if (!pending || busy) return; if (await client.removeRetainedDraftIfEqual(key, pending)) { setPending(null); setError(''); } };
+  return { pending, busy, error, send, forget, clearError: () => setError('') };
+}
+
+export function AutomationRecovery({ pending, busy, online, retry, forget }: { pending: AutomationIntent | null; busy: boolean; online: boolean; retry: () => void; forget: () => void }) {
+  if (!pending) return null;
+  return <section className="automation-recovery" aria-label="Unconfirmed automation request"><h3>Unconfirmed request: {pending.label}</h3><p>Its original inputs and request ID are retained. Reconnecting never sends it automatically.</p><div className="automation-actions"><button type="button" className="button" disabled={busy || !online} onClick={retry}>Retry Exact Request</button><button type="button" className="button" onClick={() => exportAutomation(pending, 'automation-request')}>Export Request</button><button type="button" className="button" disabled={busy} onClick={() => { if (window.confirm('Forget this request? Any completed server operation remains recorded.')) forget(); }}>Forget Request</button></div></section>;
+}
