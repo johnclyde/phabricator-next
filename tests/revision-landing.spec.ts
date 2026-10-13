@@ -69,3 +69,24 @@ test('landing drafts stay offline and a changed reviewed source blocks the prepa
   await landing(page).getByRole('button', { name: 'Refresh', exact: true }).click(); await expect(landing(page).getByRole('button', { name: 'Recover Landing Result', exact: true })).toBeEnabled(); await expect(landing(page).getByRole('button', { name: 'Land Prepared Commit', exact: true })).toHaveCount(0); await expect(landing(page).getByRole('button', { name: 'Cancel Prepared Landing', exact: true })).toHaveCount(0); await expect(landing(page)).toContainText('without changing the branch again');
   await page.unroute(operationPath); await landing(page).getByRole('button', { name: 'Refresh', exact: true }).click(); await landing(page).getByRole('button', { name: 'Cancel Prepared Landing', exact: true }).click(); await expect(landing(page).getByRole('button', { name: 'Cancel Prepared Landing', exact: true })).toHaveCount(0); await screenshot(page, 'stale landing', info.outputPath('stale-landing.png'));
 });
+
+test('blocked native landing links directly to its Herald push decision and exact build evidence', async ({ page, request, baseURL }, info) => {
+  const base = baseURL!, { detail } = await revision(request, base, `Rejected landing evidence ${info.project.name} ${Date.now()}`), id = detail.revision.id;
+  await accept(request, base, detail); const { source, branch } = await openLanding(page, request, base, detail, `${info.project.name}-retry`);
+  const prepared = mutation(page, `/api/revisions/${id}/landings`); await landing(page).getByRole('button', { name: 'Prepare Landing', exact: true }).click();
+  const response = await prepared; expect(response.ok(), await response.text()).toBe(true); const operation = (await response.json() as RevisionLandingDetail).operation;
+  const { plan } = await api<{ plan: BuildPlan }>(request, base, '/harbormaster/plans', { name: `Required landing evidence ${info.project.name}`, description: 'This plan is deliberately not run for the rejected landing.', enabled: true, steps: [{ key: 'checks', name: 'Local checks', kind: 'local-checks', dependsOn: [], worker: null }] });
+  await api(request, base, '/herald/rules', { name: `Reject unbuilt landing ${info.project.name}`, contentType: 'push-content', ruleType: 'object', objectId: 'R1', enabled: true, match: 'all', repetition: 'every', conditions: [{ field: 'commitId', operator: 'is', value: operation.prepared.commitId }], actions: [{ type: 'require-build-plans', targets: [plan.id] }] });
+  const rejected = mutation(page, `/api/landings/${operation.id}/commands`); await landing(page).getByRole('button', { name: 'Land Prepared Commit', exact: true }).click();
+  const result = await rejected; expect(result.ok(), await result.text()).toBe(true); const rejectedOperation = (await result.json() as RevisionLandingDetail).operation;
+  expect(rejectedOperation.state).toBe('conflict'); expect(rejectedOperation.rejectedReceiveId).toMatch(/^GREC-[a-f0-9]{64}$/); expect(await git(source.barePath, ['rev-parse', branch])).toBe(source.importCommit);
+  const link = landing(page).getByRole('link', { name: 'View Herald Push Decision', exact: true }); await expect(link).toHaveAttribute('href', `#herald/receives/${rejectedOperation.rejectedReceiveId}`); await link.click();
+  await expect(page.getByRole('heading', { name: `${rejectedOperation.rejectedReceiveId} Push Receipt`, exact: true })).toBeVisible(); await expect(page.getByRole('region', { name: 'Push rejection reasons', exact: true })).toContainText('missing');
+  await page.reload(); await expect(page.getByRole('heading', { name: `${rejectedOperation.rejectedReceiveId} Push Receipt`, exact: true })).toBeVisible();
+  await page.evaluate(() => { location.hash = 'herald'; }); await expect(page.getByRole('heading', { name: 'Herald Rules', exact: true })).toBeVisible();
+  await page.evaluate(receiveId => { location.hash = `herald/receives/${receiveId}`; }, rejectedOperation.rejectedReceiveId!); await expect(page.getByRole('heading', { name: `${rejectedOperation.rejectedReceiveId} Push Receipt`, exact: true })).toBeVisible();
+  const transcripts = page.locator('.automation-panel').filter({ has: page.getByRole('heading', { name: `${rejectedOperation.rejectedReceiveId} Push Receipt`, exact: true }) }).getByRole('button').filter({ hasText: /^HT-/ });
+  // The native pre-receive records a ref transcript followed by the exact commit transcript.
+  await transcripts.last().click(); const evidence = page.getByRole('region', { name: 'Reviewed source and build evidence', exact: true }); await expect(evidence).toContainText('missing'); await expect(evidence.getByRole('link', { name: id, exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true); await page.screenshot({ path: info.outputPath('rejected-landing-herald-decision.png'), fullPage: true });
+});

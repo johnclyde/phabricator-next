@@ -51,6 +51,8 @@ export interface RevisionLandingOperation {
   attribution: ActorAttribution;
   reviewIds: string[];
   gateProof: LandingGateProof | null;
+  /** Present only when a recorded pre-receive decision rejected this landing. */
+  rejectedReceiveId?: string;
   createdAt: string;
   updatedAt: string;
   landedAt: string | null;

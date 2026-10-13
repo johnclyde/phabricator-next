@@ -11,6 +11,7 @@ import { aggregateBuildableStatus, buildPlanInput, buildReportInput, type BuildD
 import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
 import type { RevisionVersion } from '../shared/types.ts';
 import type { GitCommitResult } from '../shared/repositories.ts';
+import type { GitReviewRevision } from '../shared/git-review-gates.ts';
 
 const alice: BuildActor = { principalId: 'alice', workspaceId: 'workspace', displayName: 'Alice' };
 const bob: BuildActor = { principalId: 'bob', workspaceId: 'workspace', displayName: 'Bob' };
@@ -38,6 +39,37 @@ function fixture(options: { path?: string; source?: RevisionVersion; http?: bool
   const claim = (detail: BuildDetail, key = 'test', actor: BuildAuthority = ci) => { const target = detail.targets.find(item => item.stepKey === key)!; return service.claim({ targetId: target.id, expectedVersion: target.version, worker: detail.build.plan.steps.find(item => item.key === key)!.worker }, actor); };
   return { db, service, hooks, revoked, hidden, denied, run, claim, version: () => version, replaceSource: (value: RevisionVersion) => { version = value; }, advance: (milliseconds: number) => { now += milliseconds; }, close: () => db.close() };
 }
+
+test('push build gates require exact revision versions, current enabled plans, and all independent runs', () => {
+  const f = fixture(); try {
+    const commit: GitCommitResult = { repositoryId: 'R1', objectFormat: 'sha1', commit: { id: 'a'.repeat(40), treeId: 'b'.repeat(40), parentIds: [], author: { name: 'A', email: 'a@example.test', timestamp: '2026-01-01T00:00:00Z' }, committer: { name: 'A', email: 'a@example.test', timestamp: '2026-01-01T00:00:00Z' }, message: 'Commit', messageTruncated: false } };
+    const revision: GitReviewRevision = { revisionId: 'D1', versionId: f.version().id, versionNumber: 1, contentHash: f.version().contentHash, targetTreeId: commit.commit.treeId, accepted: true, lifecycleVersion: 1, reviewerVersion: 1, evidenceSha256: 'f'.repeat(64) };
+    const initial = f.service.createPlan(planInput(), alice), gate = () => f.service.reviewGateBuilds(commit, revision).find(plan => plan.planId === initial.id)!;
+    assert.equal(gate().status, 'missing'); const passed = f.run(initial); assert.equal(gate().status, 'passed'); assert.deepEqual(gate().builds.map(build => build.id), [passed.build.id]);
+    assert.equal(f.service.reviewGateBuilds(commit, { ...revision, versionId: 'newer-version' })[0]!.status, 'missing');
+    assert.equal(f.service.reviewGateBuilds(commit, { ...revision, contentHash: 'e'.repeat(64) })[0]!.status, 'missing');
+    const changed = f.service.updatePlan(initial.id, { ...planInput([external()]), expectedVersion: 1 }, alice);
+    assert.equal(gate().status, 'stale'); const pending = f.run(changed); assert.equal(gate().status, 'pending');
+    const claim = f.claim(pending); assert.equal(gate().status, 'building');
+    f.service.report(claim.target.id, { leaseToken: claim.leaseToken, reportId: 'failed', type: 'fail' }, ci); assert.equal(gate().status, 'failed');
+    const independent = f.run(changed), independentClaim = f.claim(independent);
+    f.service.report(independentClaim.target.id, { leaseToken: independentClaim.leaseToken, reportId: 'passed', type: 'pass' }, ci); assert.equal(gate().status, 'failed', 'an independent pass cannot erase the failed run');
+    const current = f.service.detail(pending.build.id, alice);
+    const restarted = f.service.command(current.build.id, { command: 'restart', expectedVersion: current.build.version }, alice), retry = f.claim(restarted);
+    f.service.report(retry.target.id, { leaseToken: retry.leaseToken, reportId: 'retry-pass', type: 'pass' }, ci); assert.equal(gate().status, 'passed'); assert.equal(gate().builds.length, 2);
+    f.service.updatePlan(initial.id, { ...planInput([external()]), enabled: false, expectedVersion: 2 }, alice); assert.equal(gate().status, 'disabled');
+  } finally { f.close(); }
+});
+
+test('push build gates distinguish exact commits from same-tree commits in other repositories or histories', () => {
+  const f = fixture(); try {
+    const commit: GitCommitResult = { repositoryId: 'R1', objectFormat: 'sha1', commit: { id: 'a'.repeat(40), treeId: 'b'.repeat(40), parentIds: [], author: { name: 'A', email: 'a@example.test', timestamp: '2026-01-01T00:00:00Z' }, committer: { name: 'A', email: 'a@example.test', timestamp: '2026-01-01T00:00:00Z' }, message: 'Commit', messageTruncated: false } };
+    const plan = f.service.createPlan(planInput([external()]), alice), build = f.service.runCommit(commit, { planId: plan.id, planVersion: plan.version }, alice), claim = f.claim(build);
+    f.service.report(claim.target.id, { leaseToken: claim.leaseToken, reportId: 'commit-pass', type: 'pass' }, ci);
+    const exact = f.service.reviewGateBuilds(commit, null)[0]!; assert.equal(exact.status, 'passed'); assert.equal(exact.builds[0]!.sourceKind, 'commit');
+    for (const wrong of [{ ...commit, repositoryId: 'R2' }, { ...commit, commit: { ...commit.commit, id: 'c'.repeat(40) } }, { ...commit, commit: { ...commit.commit, treeId: 'c'.repeat(40) } }]) assert.equal(f.service.reviewGateBuilds(wrong, null)[0]!.status, 'missing');
+  } finally { f.close(); }
+});
 
 test('build plan validation rejects duplicate, missing and cyclic dependencies without recursive graph traversal', () => {
   assert.deepEqual(buildPlanInput(planInput()), planInput());

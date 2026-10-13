@@ -333,7 +333,7 @@ export function createApp(options: AppOptions = {}): App {
     }
     const landingCommand = /^\/api\/landings\/(LAND-[a-f0-9-]+)\/commands$/.exec(path);
     if (method === 'POST' && landingCommand) return landing.command(landingCommand[1]!, input, rawKey, context);
-    if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/')) {
+    if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/') || path.startsWith('/api/audit/')) {
       let commit;
       if (method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases') && input && typeof input === 'object' && 'repositoryId' in input) {
         const data = object(input, path === '/api/drydock/leases' ? ['repositoryId', 'commitId', 'blueprintId', 'blueprintVersion', 'durationSeconds'] : ['repositoryId', 'commitId', 'planId', 'planVersion']);
@@ -928,7 +928,7 @@ export function createApp(options: AppOptions = {}): App {
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
-          if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
+          if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/') || path.startsWith('/api/audit/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
           if (path === '/api/revision-views') {
             if (url.search) throw new HttpError(400, 'Saved revision view lists do not accept query parameters.');

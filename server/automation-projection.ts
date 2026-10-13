@@ -4,12 +4,12 @@ import type { HeraldStore } from './herald.ts';
 import type { PolicyStore } from './policy.ts';
 import { HttpError } from './validation.ts';
 
-const objectReference = (value: string): boolean => /^(?:PROJ|R)[1-9]\d{0,14}$/.test(value);
+const objectReference = (value: string): boolean => /^(?:PROJ|R|D|P|L)[1-9]\d{0,14}$/.test(value);
 function directReferences(rule: HeraldRule): { objects: string[]; rules: string[] } {
   const objects = rule.objectId === null ? [] : [rule.objectId], rules: string[] = [];
   for (const condition of rule.conditions) {
     if (condition.field === 'rule') rules.push(String(condition.value));
-    if (condition.field === 'projectIds' || condition.field === 'repositoryId') for (const value of Array.isArray(condition.value) ? condition.value : typeof condition.value === 'string' ? [condition.value] : []) if (objectReference(value)) objects.push(value);
+    if (condition.field === 'projectIds' || condition.field === 'repositoryId' || condition.field === 'acceptedRevision') for (const value of Array.isArray(condition.value) ? condition.value : typeof condition.value === 'string' ? [condition.value] : []) if (objectReference(value)) objects.push(value);
   }
   for (const action of rule.actions) if (action.type === 'add-projects' || action.type === 'remove-projects') objects.push(...action.targets);
   return { objects, rules };
@@ -58,6 +58,13 @@ export function presentHeraldTranscript(transcript: HeraldTranscript, principalI
     if (rule && visible(rule, principalId, policies, resolve)) allowed.add(result.ruleId);
   }
   const projected = structuredClone(transcript);
+  const linkedRevision = projected.snapshot.git?.review?.revision?.revisionId;
+  if (linkedRevision && !policies.access(linkedRevision, principalId).view) {
+    // A public repository never widens a linked revision's current policy.
+    // Rule matches and action messages can indirectly disclose that evidence.
+    delete projected.snapshot.git!.review;
+    allowed.clear();
+  }
   projected.snapshot.projectIds = projected.snapshot.projectIds.filter(id => policies.access(id, principalId).view);
   if (projected.snapshot.repositoryId && !policies.access(projected.snapshot.repositoryId, principalId).view) projected.snapshot.repositoryId = null;
   projected.rules = projected.rules.filter(result => allowed.has(result.ruleId));
@@ -79,7 +86,10 @@ export function presentGitReceiveReceipt(receipt: GitReceiveReceipt, principalId
     const saved = herald.transcript(id, () => true);
     if (saved.snapshot.repositoryId !== receipt.repositoryId || heraldPolicyObjectId(saved.snapshot) !== receipt.repositoryId) throw new HttpError(409, 'Git receive evidence cannot be verified.', 'GIT_AUTOMATION_INTEGRITY');
     const projected = presentHeraldTranscript(saved, principalId, herald, policies);
-    for (const action of projected.actions) if (action.status === 'applied' && action.action.type === 'block-push') messages.add(action.action.value);
+    for (const action of projected.actions) if (action.status === 'applied') {
+      if (action.action.type === 'block-push') messages.add(action.action.value);
+      if (action.action.type === 'require-build-plans') messages.add(action.message);
+    }
   }
   result.reasons = receipt.reasons.filter(reason => messages.has(reason) || reason === 'A push rule could not be safely evaluated. Inspect the Herald transcript before retrying.');
   if (result.reasons.length < receipt.reasons.length || !result.reasons.length) result.reasons.push('Herald rejected this push. Some rule details are unavailable under your current access.');

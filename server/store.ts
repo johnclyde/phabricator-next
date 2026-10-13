@@ -1,5 +1,6 @@
 import { initializeRevisionLanding } from './revision-landing.ts';
 import { initializeGitAutomation } from './git-automation.ts';
+import { initializeAudit } from './audit.ts';
 import { initializeDrydock } from './drydock.ts';
 import { initializeHerald } from './herald.ts';
 import { initializeHarbormaster } from './harbormaster.ts';
@@ -231,7 +232,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 39) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 40) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -535,6 +536,10 @@ export class Store {
     }
     if (version < 39) {
       try { this.transaction(() => { initializeRevisionLanding(this.database); this.database.exec('PRAGMA user_version = 39'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 40) {
+      try { this.transaction(() => { initializeAudit(this.database); this.database.exec('PRAGMA user_version = 40'); }); }
       catch (error) { this.database.close(); throw error; }
     }
     this.revisionViews = new RevisionViewStore(this.database);

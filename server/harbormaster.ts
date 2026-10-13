@@ -1,4 +1,5 @@
 import type { RevisionPatchPayload } from '../shared/revision-patch.ts';
+import type { GitReviewBuildPlan, GitReviewRevision } from '../shared/git-review-gates.ts';
 import { revisionPatchIdentity } from './revision-patch.ts';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -172,6 +173,43 @@ export class HarbormasterStore {
     this.hooks.authorize(context, objectId ?? null, false);
     const rows = this.database.prepare('SELECT b.data FROM harbormaster_builds b JOIN harbormaster_buildables a ON a.id=b.buildable_id WHERE (? IS NULL OR a.object_id=?) ORDER BY b.sequence DESC').all(objectId ?? null, objectId ?? null) as unknown as Row[];
     return rows.map(row => decode<Build>(row)).filter(build => { try { this.authorizeSource(this.buildable(build.buildableId), context, false); return true; } catch (error) { if (error instanceof HttpError && [403, 404].includes(error.status)) return false; throw error; } });
+  }
+  /** Internal receive enforcement read, not an API presentation. The caller
+   * holds the writer transaction and checks rule/reader access separately. */
+  reviewGateBuilds(source: GitCommitResult, revision: GitReviewRevision | null): GitReviewBuildPlan[] {
+    if (revision && revision.targetTreeId !== source.commit.treeId) throw new HttpError(409, 'The reviewed source does not match the incoming Git tree.', 'BUILD_GATE_SOURCE_MISMATCH');
+    const plans = (this.database.prepare('SELECT data FROM harbormaster_plans ORDER BY id').all() as unknown as Row[]).map(row => decode<BuildPlan>(row));
+    const rows = this.database.prepare('SELECT b.data,a.data AS source_data,a.identity FROM harbormaster_builds b JOIN harbormaster_buildables a ON a.id=b.buildable_id WHERE a.object_id=? OR a.object_id=? ORDER BY b.sequence').all(source.repositoryId, revision?.revisionId ?? '') as { data: string; source_data: string; identity: string }[];
+    const observed: { build: Build; source: Buildable }[] = [];
+    for (const row of rows) {
+      const build = decode<Build>(row), buildable = JSON.parse(row.source_data) as Buildable;
+      const exact = buildable.sourceKind === 'commit'
+        ? buildable.repositoryId === source.repositoryId && buildable.objectFormat === source.objectFormat && buildable.commitId === source.commit.id && buildable.treeId === source.commit.treeId
+        : revision !== null && buildable.revisionId === revision.revisionId && buildable.versionId === revision.versionId && buildable.versionNumber === revision.versionNumber && buildable.contentHash === revision.contentHash;
+      if (!exact) continue;
+      const { id: _id, createdAt: _created, ...identity } = buildable;
+      if (hash(JSON.stringify(identity)) !== row.identity || build.buildableId !== buildable.id || build.revisionId !== buildable.revisionId || !['pending', 'building', 'passed', 'failed', 'aborted', 'paused'].includes(build.status)) throw new HttpError(409, 'Exact build gate evidence cannot be verified.', 'BUILD_GATE_INTEGRITY');
+      if (buildable.sourceKind === 'revision') {
+        this.source(buildable);
+        if (buildable.revisionPatch && (buildable.repositoryId !== source.repositoryId || buildable.objectFormat !== source.objectFormat || buildable.revisionPatch.targetTreeId !== source.commit.treeId || buildable.revisionPatch.revisionId !== revision!.revisionId || buildable.revisionPatch.versionId !== revision!.versionId || buildable.revisionPatch.contentHash !== revision!.contentHash)) continue;
+      } else if (buildable.contentHash !== hash(JSON.stringify({ repositoryId: source.repositoryId, objectFormat: source.objectFormat, commitId: source.commit.id, treeId: source.commit.treeId }))) throw new HttpError(409, 'Exact commit build source cannot be verified.', 'BUILD_GATE_INTEGRITY');
+      observed.push({ build, source: buildable });
+    }
+    return plans.map(plan => {
+      const all = observed.filter(item => item.build.planId === plan.id);
+      const current = all.filter(item => item.build.planVersion === plan.version);
+      const superseded = new Set(current.map(item => item.build.restartOf).filter((id): id is string => id !== null));
+      const active = current.filter(item => !superseded.has(item.build.id));
+      // Every independent run must pass; only an explicit restart supersedes
+      // an earlier result. A fresh plan version needs fresh execution.
+      const status: GitReviewBuildPlan['status'] = !plan.enabled ? 'disabled' : !active.length ? all.length ? 'stale' : 'missing'
+        : active.some(item => item.build.status === 'failed') ? 'failed'
+          : active.some(item => item.build.status === 'aborted') ? 'aborted'
+            : active.some(item => item.build.status === 'paused') ? 'paused'
+              : active.some(item => item.build.status === 'building') ? 'building'
+                : active.some(item => item.build.status === 'pending') ? 'pending' : 'passed';
+      return { planId: plan.id, planVersion: plan.version, enabled: plan.enabled, status, builds: (current.length ? active : all).map(({ build, source }) => ({ id: build.id, version: build.version, planVersion: build.planVersion, status: build.status, sourceKind: source.sourceKind })) };
+    });
   }
   command(id: string, input: unknown, context: BuildAuthority): BuildDetail {
     return this.scope(() => {

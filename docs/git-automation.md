@@ -10,6 +10,20 @@ Rule owners retain the same current-authority checks as other Herald rules. Disa
 
 The mobile Herald interface authors these rules, lists receive decisions, opens their transcripts, and repeats a dry run on stored evidence. Dry runs evaluate current rules against the original immutable snapshot without rejecting a new push, starting builds, or consuming repetition state. They accept a stored object/transcript ID, never browser-supplied Git source.
 
+## Reviewed revisions and required builds
+
+Push content and observed commits capture server-derived review/build evidence. A commit associates only with a current repository-backed revision whose complete verified target tree matches its actual Git tree and object format. A `Differential Revision: D123` trailer (or a `P…` paper / `L…` document ID or corresponding HTTP(S) URL) in the terminal structured footer can select among matching revisions; it cannot authorize a mismatching tree. Quoted body text does not select a revision. Ambiguous matches and conflicting or unverified footer hints carry no accepted revision. Changed source invalidates the association with the older version.
+
+Herald exposes **Accepted Differential revision**, **Revision has build warning**, and **Passing build plans**. Acceptance requires the current accepted version (or a revision closed from acceptance), matching acceptance provenance, and no blocking/rejecting review evidence. To require review, create a push-content rule whose accepted-revision field does not exist and whose action blocks the push.
+
+The **Require passing build plans** action rejects a matching push unless every selected plan has passed for the exact associated revision version or exact incoming commit. Missing, pending, building, paused, aborted, failed, disabled and stale-plan evidence blocks. Updating a plan requires results for its new version. Independent runs must all pass; only an explicit restart supersedes its earlier attempt. Deterministic local checks retain their own provenance. No AI run or external source submission happens implicitly.
+
+Native landing uses this same pre-receive enforcement immediately before the atomic Git update under the database writer lock. Preparing a landing does not guarantee its later build status. Receipts and transcripts retain the decision-time revision identity, acceptance and build results. Retrying an old receipt preserves that history; a new push attempt gets a new decision. Historical events without review evidence cannot safely answer these fields. Dry runs use the stored evidence, never today's results substituted into an old event.
+
+Linked revision policy still applies. A public repository does not expose a private revision or its build evidence through transcripts, dry runs or receipt replay. An otherwise active rule which cannot read required linked evidence fails closed. Browser clients and receive payloads cannot assert review associations or build outcomes.
+
+Commit rules can **Add auditors** or **Audit self**, linking accepted Git observations to [Audit](audit.md). Post-receive review does not retroactively undo a Git push.
+
 ## Operator setup
 
 The receive service is a trust boundary. Configure a dedicated account with a read/write API token and repository Edit access. Bind that account explicitly on the web server:
@@ -94,4 +108,4 @@ The P305a release passed type checking, the full core suite (2,105 passed; nine 
 
 Real SHA-1/SHA-256 Git fixtures cover exact object metadata, quarantine, binary and non-UTF-8 source, large additions/deletions, ordinary large text edits, mode changes, symlinks, Gitlinks, hostile diff configuration, corrupt objects, cancellation and text/encoded-payload limits. Installed hooks verify actual push rejection and acceptance, post-receive API failure, private spool recovery and idempotent retry. Parser, rule and API tests cover unavailable-text guards, positive/negative conditions, selected-path matching, inconsistent metadata, current repository/Space access, historical evidence and commit-build deduplication. The browser fixture runs the collector on real disposable Git objects before submitting trusted observations; it does not fabricate production push history.
 
-Repository project tagging and associated project-scoped Git rules, full audit actions, Owners/Legalpad/review acceptance and build gating fields, complete branch graph membership, pre-diff blocking, hosted Git SSH/HTTP services, historical commit import, arbitrary Git formats, binary-format analysis and unbounded text inspection remain open. This implementation is a working native receive adapter, not full Diffusion hosting or unchanged upstream hook compatibility.
+Repository project tagging and associated project-scoped Git rules, collective/Owners audit actions, Owners/Legalpad fields, build waivers, complete branch graph membership, pre-diff blocking, hosted Git SSH/HTTP services, historical commit import, arbitrary Git formats, binary-format analysis and unbounded text inspection remain open. This implementation is a working native receive adapter, not full Diffusion hosting or unchanged upstream hook compatibility.

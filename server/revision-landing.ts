@@ -12,7 +12,7 @@ import { HttpError } from './validation.ts';
 
 export interface RevisionLandingHooks {
   authorize(operation: RevisionLandingOperation, actor: ActorAttribution, phase: 'read' | 'prepare' | 'land' | 'cancel' | 'recover'): void;
-  beforeLand(operation: RevisionLandingOperation, facts: GitReceiveFacts, actor: ActorAttribution): { allowed: true; proof: LandingGateProof } | { allowed: false; message?: string };
+  beforeLand(operation: RevisionLandingOperation, facts: GitReceiveFacts, actor: ActorAttribution): { allowed: true; proof: LandingGateProof } | { allowed: false; message?: string; receiptId?: string };
   afterLand(operation: RevisionLandingOperation, facts: GitReceiveFacts, actor: ActorAttribution): void;
 }
 const sha = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -98,7 +98,7 @@ export class RevisionLandingStore {
       this.hooks.authorize(value,actor,'land');
       if(state==='conflict'){value.state='conflict';value.message='The target branch changed. Update and review the source, then prepare again.';this.save(value,actor);return this.detail(id,actor);}
       const facts=this.facts(id),decision=this.hooks.beforeLand(value,facts,actor);
-      if(!decision.allowed){value.state='conflict';value.message=decision.message??'Repository rules rejected this landing.';this.save(value,actor);return this.detail(id,actor);}
+      if(!decision.allowed){if(decision.receiptId!==undefined){if(!/^GREC-[a-f0-9]{64}$/.test(decision.receiptId))throw invalid();value.rejectedReceiveId=decision.receiptId;}value.state='conflict';value.message=decision.message??'Repository rules rejected this landing.';this.save(value,actor);return this.detail(id,actor);}
       // Root must perform authorization, gate evaluation and this bounded local
       // CAS under the same writer transaction, without asynchronous callbacks.
       value.gateProof=decision.proof;

@@ -1,15 +1,16 @@
 /** Herald rule semantics follow the pinned 2021 engine. Host integrations supply
  * object snapshots, authority, and bounded regular-expression evaluation. */
 import type { GitReceiveFileInspection } from './git-automation';
+import { requireGitReviewEvidence, type GitReviewEvidence } from './git-review-gates';
 export type HeraldContentType = 'revision' | 'task' | 'wiki' | 'paste' | 'commit' | 'push-ref' | 'push-content';
 export type HeraldRuleType = 'personal' | 'object' | 'global';
 export type HeraldRepetition = 'every' | 'first' | 'change';
-export type HeraldField = 'always' | 'isNew' | 'title' | 'body' | 'comment' | 'status' | 'priority' | 'actorId' | 'authorId' | 'ownerId' | 'repositoryId' | 'projectIds' | 'subscriberIds' | 'reviewerIds' | 'filePaths' | 'fileContent' | 'rule' | 'refName' | 'refType' | 'refChange' | 'forced' | 'commitId' | 'authorRaw' | 'committerRaw' | 'branches' | 'isMerge' | 'diffAdded' | 'diffRemoved' | 'binaryFiles' | 'uninspectableFiles' | 'diffEnormous' | 'textInspectionComplete';
+export type HeraldField = 'always' | 'isNew' | 'title' | 'body' | 'comment' | 'status' | 'priority' | 'actorId' | 'authorId' | 'ownerId' | 'repositoryId' | 'projectIds' | 'subscriberIds' | 'reviewerIds' | 'filePaths' | 'fileContent' | 'rule' | 'refName' | 'refType' | 'refChange' | 'forced' | 'commitId' | 'authorRaw' | 'committerRaw' | 'branches' | 'isMerge' | 'diffAdded' | 'diffRemoved' | 'binaryFiles' | 'uninspectableFiles' | 'diffEnormous' | 'textInspectionComplete' | 'acceptedRevision' | 'revisionBuildWarning' | 'passingBuildPlans';
 export type HeraldOperator = 'contains' | '!contains' | 'is' | '!is' | 'isany' | '!isany' | 'all' | 'any' | 'none' | 'exists' | '!exists' | 'true' | 'false' | 'regexp' | '!regexp' | 'regexp-pair' | 'conditions' | '!conditions';
 export interface HeraldCondition { field: HeraldField; operator: HeraldOperator; value: string | string[] | boolean | null }
 export type HeraldAction =
-  | { type: 'nothing' | 'add-self-subscriber' | 'remove-self-subscriber' | 'add-self-reviewer' | 'assign-self' }
-  | { type: 'add-subscribers' | 'remove-subscribers' | 'add-projects' | 'remove-projects' | 'run-build-plans'; targets: string[] }
+  | { type: 'nothing' | 'add-self-subscriber' | 'remove-self-subscriber' | 'add-self-reviewer' | 'assign-self' | 'audit-self' }
+  | { type: 'add-subscribers' | 'remove-subscribers' | 'add-projects' | 'remove-projects' | 'run-build-plans' | 'require-build-plans' | 'add-auditors'; targets: string[] }
   | { type: 'add-reviewers'; targets: string[]; required?: boolean }
   | { type: 'comment' | 'task-status' | 'task-priority' | 'block-push'; value: string }
   | { type: 'assign'; value: string | null };
@@ -23,6 +24,8 @@ export interface HeraldGitSnapshot {
   /** Absence is historical fully captured text evidence, never an empty-file
    * substitution for a modern unavailable inspection. */
   fileInspection?: ({ path: string } & GitReceiveFileInspection)[];
+  /** Server-derived associations and build states, never receiver input. */
+  review?: GitReviewEvidence;
 }
 export interface HeraldSnapshot {
   objectId: string; contentType: HeraldContentType; eventId: string; actorId: string; isNew: boolean;
@@ -77,6 +80,9 @@ export const HERALD_FIELDS: readonly HeraldFieldDefinition[] = [
   { key: 'uninspectableFiles', label: 'Filenames without text inspection', type: 'text-list', contentTypes: gitContentTypes },
   { key: 'diffEnormous', label: 'Diff exceeds text inspection limits', type: 'boolean', contentTypes: gitContentTypes },
   { key: 'textInspectionComplete', label: 'Text inspection is complete', type: 'boolean', contentTypes: gitContentTypes },
+  { key: 'acceptedRevision', label: 'Accepted Differential revision', type: 'identity', contentTypes: gitContentTypes },
+  { key: 'revisionBuildWarning', label: 'Revision has build warning', type: 'boolean', contentTypes: gitContentTypes },
+  { key: 'passingBuildPlans', label: 'Passing build plans for exact source', type: 'list', contentTypes: gitContentTypes },
   { key: 'rule', label: 'Another Herald rule', type: 'rule', contentTypes: allTypes },
 ];
 export const HERALD_OPERATORS: Readonly<Record<HeraldFieldDefinition['type'], readonly HeraldOperator[]>> = {
@@ -97,6 +103,9 @@ export const HERALD_ACTIONS: readonly { type: HeraldAction['type']; label: strin
   { type: 'add-projects', label: 'Add project tags', contentTypes: ['revision', 'task'], personal: false },
   { type: 'remove-projects', label: 'Remove project tags', contentTypes: ['revision', 'task'], personal: false },
   { type: 'run-build-plans', label: 'Run build plans', contentTypes: ['revision', 'commit'], personal: false },
+  { type: 'require-build-plans', label: 'Require passing build plans', contentTypes: ['push-content'], personal: false },
+  { type: 'add-auditors', label: 'Request an audit', contentTypes: ['commit'], personal: false },
+  { type: 'audit-self', label: 'Request an audit from me', contentTypes: ['commit'], personal: true },
   { type: 'comment', label: 'Add comment', contentTypes: ['revision', 'task', 'paste'], personal: false },
   { type: 'task-status', label: 'Change task status', contentTypes: ['task'], personal: false },
   { type: 'task-priority', label: 'Change task priority', contentTypes: ['task'], personal: false },
@@ -123,8 +132,8 @@ export function parseHeraldAction(input: unknown, contentType: HeraldContentType
   const definition = HERALD_ACTIONS.find(action => action.type === input.type && action.contentTypes.includes(contentType));
   if (!definition || ruleType === 'personal' && !definition.personal) throw new Error('This action is unavailable for the rule type.');
   const type = definition.type;
-  if (['nothing', 'add-self-subscriber', 'remove-self-subscriber', 'add-self-reviewer', 'assign-self'].includes(type)) { exact(input, ['type']); return { type } as HeraldAction; }
-  if (['add-subscribers', 'remove-subscribers', 'add-reviewers', 'add-projects', 'remove-projects', 'run-build-plans'].includes(type)) {
+  if (['nothing', 'add-self-subscriber', 'remove-self-subscriber', 'add-self-reviewer', 'assign-self', 'audit-self'].includes(type)) { exact(input, ['type']); return { type } as HeraldAction; }
+  if (['add-subscribers', 'remove-subscribers', 'add-reviewers', 'add-projects', 'remove-projects', 'run-build-plans', 'require-build-plans', 'add-auditors'].includes(type)) {
     exact(input, type === 'add-reviewers' ? ['type', 'targets', 'required'] : ['type', 'targets']); const targets = identities(input.targets);
     if (type === 'add-reviewers') { if (input.required !== undefined && typeof input.required !== 'boolean') throw new Error('Required reviewer flag must be boolean.'); return { type, targets, ...(input.required === undefined ? {} : { required: input.required }) }; }
     return { type, targets } as HeraldAction;
@@ -144,7 +153,7 @@ export function parseHeraldRuleInput(input: unknown): HeraldRuleInput {
   if (!Array.isArray(data.conditions) || !Array.isArray(data.actions) || !data.actions.length) throw new Error('Provide conditions and at least one action.');
   return { name: text(data.name, 'Rule name', 255).trim(), contentType, ruleType, objectId: data.objectId as string | null, enabled: data.enabled, match: data.match as 'all' | 'any', repetition: data.repetition as HeraldRepetition, conditions: data.conditions.map(condition => parseHeraldCondition(condition, contentType)), actions: data.actions.map(action => parseHeraldAction(action, contentType, ruleType)) };
 }
-export interface HeraldEvaluationOptions { dryRun?: boolean; canEvaluate?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; matchesScope?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; regexp?: (pattern: string, values: readonly string[]) => boolean }
+export interface HeraldEvaluationOptions { dryRun?: boolean; canReadGitReview?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; canEvaluate?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; matchesScope?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; regexp?: (pattern: string, values: readonly string[]) => boolean }
 const order: Record<HeraldRuleType, number> = { personal: 0, object: 1, global: 2 };
 const directGitFields = ['refName', 'refType', 'refChange', 'forced', 'commitId', 'authorRaw', 'committerRaw', 'branches', 'isMerge'] as const;
 function gitFileInspection(snapshot: HeraldSnapshot): NonNullable<HeraldGitSnapshot['fileInspection']> {
@@ -182,6 +191,7 @@ export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: Hera
         let conditionMatched: boolean;
         try {
         let value: string | string[] | boolean | null;
+        if (['acceptedRevision', 'revisionBuildWarning', 'passingBuildPlans'].includes(condition.field) && options.canReadGitReview?.(rule, snapshot) === false) throw new Error('The rule cannot read the related review and build evidence.');
         if (condition.field === 'rule') {
           const dependency = byId.get(String(condition.value)); if (!dependency || !dependency.enabled) throw new Error(`Referenced rule ${String(condition.value)} is unavailable.`);
           const dependent = evaluate(dependency); if (dependent.status === 'error') throw new Error(dependent.error ?? 'Referenced rule failed.');
@@ -191,11 +201,14 @@ export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: Hera
         else if (condition.field === 'uninspectableFiles') value = gitFileInspection(snapshot).filter(file => file.kind !== 'text').map(file => file.path);
         else if (condition.field === 'diffEnormous') value = gitFileInspection(snapshot).some(file => file.kind === 'too-large');
         else if (condition.field === 'textInspectionComplete') value = gitFileInspection(snapshot).every(file => file.kind === 'text');
+        else if (condition.field === 'acceptedRevision') { const evidence = requireGitReviewEvidence(snapshot.git?.review); value = evidence.revision?.accepted ? evidence.revision.revisionId : null; }
+        else if (condition.field === 'revisionBuildWarning') { const evidence = requireGitReviewEvidence(snapshot.git?.review); value = evidence.revision !== null && evidence.builds.some(plan => plan.builds.length > 0 && plan.status !== 'passed'); }
+        else if (condition.field === 'passingBuildPlans') value = requireGitReviewEvidence(snapshot.git?.review).builds.filter(plan => plan.enabled && plan.status === 'passed').map(plan => plan.planId);
         else if (condition.field === 'filePaths') value = snapshot.files.map(file => file.path);
         else if (condition.field === 'fileContent') { if (condition.operator !== 'regexp-pair') requireTextInspection(snapshot); value = snapshot.files.map(file => file.content); }
         else if (condition.field === 'diffAdded' || condition.field === 'diffRemoved') { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); if (condition.operator !== 'regexp-pair') requireTextInspection(snapshot); value = snapshot.git[condition.field].map(file => file.content); }
         else if ((directGitFields as readonly string[]).includes(condition.field)) { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); value = snapshot.git[condition.field as typeof directGitFields[number]]; }
-        else value = snapshot[condition.field as Exclude<HeraldField, keyof HeraldGitSnapshot | 'filePaths' | 'fileContent' | 'rule' | 'always' | 'binaryFiles' | 'uninspectableFiles' | 'diffEnormous' | 'textInspectionComplete'>];
+        else value = snapshot[condition.field as Exclude<HeraldField, keyof HeraldGitSnapshot | 'filePaths' | 'fileContent' | 'rule' | 'always' | 'binaryFiles' | 'uninspectableFiles' | 'diffEnormous' | 'textInspectionComplete' | 'acceptedRevision' | 'revisionBuildWarning' | 'passingBuildPlans'>];
           const values = Array.isArray(value) ? value : value === null ? [] : [String(value)], targets = Array.isArray(condition.value) ? condition.value : [];
           switch (condition.operator) {
             case 'contains': case '!contains': { const found = values.some(value => value.toLocaleLowerCase('en-US').includes(String(condition.value).toLocaleLowerCase('en-US'))); conditionMatched = condition.operator === 'contains' ? found : !found; break; }

@@ -8,6 +8,7 @@ import { HttpError } from './validation.ts';
 export interface HeraldAuthority { canManageGlobal: (actorId: string) => boolean; canEditObject: (actorId: string, objectId: string) => boolean; isEnabledPrincipal: (actorId: string) => boolean }
 export interface HeraldHooks {
   canEvaluate: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean;
+  canReadGitReview?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean;
   matchesScope?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean;
   canApply: (rule: HeraldRule, action: HeraldAction, snapshot: HeraldSnapshot) => boolean;
   apply: (rule: HeraldRule, action: HeraldAction, snapshot: HeraldSnapshot) => { changed: boolean; message: string; references?: string[] };
@@ -126,7 +127,7 @@ export class HeraldStore {
       const rules = (this.database.prepare('SELECT id FROM herald_rules WHERE content_type=? ORDER BY number').all(frozen.contentType) as { id: string }[]).map(row => this.get(row.id));
       const previous: Record<string, HeraldRuleState> = {};
       for (const row of this.database.prepare('SELECT rule_id,applied,matched FROM herald_rule_state WHERE object_id=?').all(frozen.objectId) as { rule_id: string; applied: number; matched: number }[]) previous[row.rule_id] = { applied: Boolean(row.applied), matched: Boolean(row.matched) };
-      const evaluated = evaluateHeraldRules(rules, frozen, previous, { dryRun, canEvaluate: hooks.canEvaluate, matchesScope: hooks.matchesScope, regexp: heraldRegexp }), byId = new Map(rules.map(rule => [rule.id, rule])), actions: HeraldActionResult[] = [];
+      const evaluated = evaluateHeraldRules(rules, frozen, previous, { dryRun, canEvaluate: hooks.canEvaluate, canReadGitReview: hooks.canReadGitReview, matchesScope: hooks.matchesScope, regexp: heraldRegexp }), byId = new Map(rules.map(rule => [rule.id, rule])), actions: HeraldActionResult[] = [];
       for (const effect of evaluated.effects) {
         const rule = byId.get(effect.ruleId)!;
         if (dryRun) { actions.push({ ...effect, status: 'dry-run', message: 'This was a dry run; no action was taken.' }); continue; }

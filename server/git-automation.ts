@@ -6,12 +6,15 @@ import type { HeraldAction, HeraldRule, HeraldSnapshot, HeraldTranscript } from 
 import { isGitObjectId, isGitPath, type GitCommitResult, type GitObjectFormat, type GitPerson } from '../shared/repositories.ts';
 import type { HeraldHooks, HeraldStore } from './herald.ts';
 import { HttpError } from './validation.ts';
+import { requiredBuildFailures, type GitReviewEvidence } from '../shared/git-review-gates.ts';
 
 export interface GitAutomationHooks extends HeraldHooks {
   /** Recheck configured receiver, active pusher, and repository edit permission.
    * The caller closes over the authenticated receiver; facts cannot select it. */
   canReceive: (facts: GitReceiveFacts) => boolean;
   projectIds: (repositoryId: string) => string[];
+  reviewEvidence?: (facts: GitReceiveFacts, commit: GitReceiveCommit) => GitReviewEvidence;
+  observeCommit?: (id: string, facts: GitReceiveFacts) => void;
 }
 let serial = 0;
 function transaction<T>(db: DatabaseSync, work: () => T): T {
@@ -134,6 +137,7 @@ export class GitAutomationStore {
   }
   snapshot(id: string): HeraldSnapshot { return this.object(id).snapshot; }
   commit(id: string): GitCommitResult { const source = this.object(id); if (!source.commit || source.kind !== 'commit') throw unavailable(); return { repositoryId: source.repositoryId, objectFormat: source.objectFormat, commit: source.commit.commit }; }
+  commitFiles(id: string): GitReceiveFile[] { const source = this.object(id); if (!source.commit || source.kind !== 'commit') throw unavailable(); return structuredClone(source.commit.files); }
   private save(value: GitAutomationObject): { object: GitAutomationObject; fresh: boolean } {
     if (this.policyObjectId(value.id)) {
       const existing = this.object(value.id);
@@ -184,19 +188,22 @@ export class GitAutomationStore {
         snapshot.title = source.commit.message.split('\n')[0] ?? ''; snapshot.body = source.commit.message; snapshot.files = source.files.map(file => ({ path: file.path, content: file.content })); snapshot.versionId = source.commit.id; snapshot.contentHash = hash(source);
         snapshot.git = { ...snapshot.git!, commitId: source.commit.id, isMerge: source.commit.parentIds.length > 1, authorRaw: `${source.commit.author.name} <${source.commit.author.email}>`, committerRaw: `${source.commit.committer.name} <${source.commit.committer.email}>`, branches, diffAdded: source.files.map(file => ({ path: file.path, content: file.added })), diffRemoved: source.files.map(file => ({ path: file.path, content: file.removed })) };
         if(source.files.some(file=>file.inspection))snapshot.git.fileInspection=source.files.map(file=>({path:file.path,...file.inspection!}));
+        if (hooks.reviewEvidence) snapshot.git.review = hooks.reviewEvidence(facts, source);
         subjects.push({ id, repositoryId: facts.repositoryId, kind, snapshot, commit: source, objectFormat: facts.objectFormat });
       }
       // Publish all exact subjects before effects, so commit builds resolve the
       // verified source. No effect can change another rule's input snapshot.
       const saved = subjects.map(subject => this.save(subject)), transcripts: HeraldTranscript[] = [];
-      const wrapped: HeraldHooks = { ...hooks, canApply: (rule, action, snapshot) => (facts.phase === 'pre' ? action.type === 'block-push' || action.type === 'nothing' : action.type === 'run-build-plans' || action.type === 'nothing') && hooks.canApply(rule, action, snapshot), apply: (rule: HeraldRule, action: HeraldAction, snapshot: HeraldSnapshot) => {
+      const wrapped: HeraldHooks = { ...hooks, canApply: (rule, action, snapshot) => (facts.phase === 'pre' ? action.type === 'block-push' || action.type === 'require-build-plans' || action.type === 'nothing' : action.type === 'run-build-plans' || action.type === 'add-auditors' || action.type === 'audit-self' || action.type === 'nothing') && (action.type !== 'require-build-plans' || hooks.canReadGitReview?.(rule, snapshot) !== false) && hooks.canApply(rule, action, snapshot), apply: (rule: HeraldRule, action: HeraldAction, snapshot: HeraldSnapshot) => {
         if (facts.phase === 'pre' && action.type === 'block-push') return { changed: true, message: action.value };
+        if (facts.phase === 'pre' && action.type === 'require-build-plans') { const failures = requiredBuildFailures(snapshot.git?.review, action.targets); return { changed: failures.length > 0, message: failures.length ? [...new Set(failures)].join(' ') : 'Every required build plan passed on this exact source and current plan version.' }; }
         return hooks.apply(rule, action, snapshot);
       } };
-      for (const source of saved) if (source.fresh) transcripts.push(this.herald.evaluate(source.object.snapshot, wrapped));
+      for (const source of saved) if (source.fresh) { if (source.object.kind === 'commit') hooks.observeCommit?.(source.object.id, facts); transcripts.push(this.herald.evaluate(source.object.snapshot, wrapped)); }
       const reasons: string[] = [];
       if (facts.phase === 'pre') for (const transcript of transcripts) {
         for (const action of transcript.actions) if (action.action.type === 'block-push' && action.status === 'applied') reasons.push(action.action.value);
+        for (const action of transcript.actions) if (action.action.type === 'require-build-plans' && action.status === 'applied') reasons.push(action.message);
         if (transcript.rules.some(rule => rule.status === 'error') || transcript.actions.some(action => action.status === 'error' || action.status === 'forbidden')) reasons.push('A push rule could not be safely evaluated. Inspect the Herald transcript before retrying.');
       }
       if (!hooks.canReceive(facts)) throw new HttpError(403, 'Receive authority changed while evaluating rules.', 'GIT_RECEIVE_FORBIDDEN');

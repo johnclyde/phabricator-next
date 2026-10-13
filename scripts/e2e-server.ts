@@ -8,12 +8,14 @@ import { authAccounts } from '../tests/auth-fixture';
 import { createGitFixture, createGitComparisonFixture } from '../tests/git-fixture';
 import { createGitBlameFixture } from '../tests/git-blame-fixture';
 import { createBinaryPushFixture } from '../tests/binary-push-fixture';
+import { createAuditFixture } from '../tests/audit-fixture';
 import { texRunnerFromEnvironment } from '../server/tex-runner';
 
 const directory = mkdtempSync(join(tmpdir(), 'phabricator-e2e-'));
 const gitFixture = await createGitFixture();
 const comparisonFixture = await createGitComparisonFixture(gitFixture);
 const blameFixture = await createGitBlameFixture(gitFixture);
+const audit = process.env.E2E_AUTOMATION_FIXTURE === '1' ? await createAuditFixture(gitFixture) : undefined;
 const binaryPush = process.env.E2E_AUTOMATION_FIXTURE === '1' ? await createBinaryPushFixture(gitFixture) : undefined;
 const landingBranches = ['desktop', 'mobile'].flatMap(project => ['land', 'retry', 'stale'].map(test => `refs/heads/landing-${project}-${test}`));
 for (const branch of landingBranches) await gitFixture.git(['update-ref', branch, gitFixture.importCommit]);
@@ -24,7 +26,7 @@ if (process.env.E2E_REAL_TEX === '1' && !paperRunner) throw new Error('Real TeX 
 const transcriptionModelDirectory = process.env.E2E_REAL_TRANSCRIPTION === '1' ? process.env.APP_TRANSCRIPTION_MODEL_DIR : undefined;
 if (process.env.E2E_REAL_TRANSCRIPTION === '1' && !transcriptionModelDirectory) throw new Error('Real transcription verification requires a staged, pinned public model.');
 mkdirSync(resolve('.data'), { recursive: true });
-writeFileSync(fixturePath, JSON.stringify({ binaryPush, landingBranches, barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit, importNextCommit: gitFixture.importNextCommit, importEqualCommit: gitFixture.importEqualCommit, comparisonBase: comparisonFixture.base, comparisonTarget: comparisonFixture.target, blame: blameFixture }));
+writeFileSync(fixturePath, JSON.stringify({ audit, binaryPush, landingBranches, barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit, importNextCommit: gitFixture.importNextCommit, importEqualCommit: gitFixture.importEqualCommit, comparisonBase: comparisonFixture.base, comparisonTarget: comparisonFixture.target, blame: blameFixture }));
 const automation = process.env.E2E_AUTOMATION_FIXTURE === '1' ? { gitReceivers: { R1: ['local'] }, drydockBindings: [{ key: 'fixture-copy', worker: 'fixture-copy-worker', repositoryIds: ['R1'] }], drydockWorkers: { 'fixture-copy-worker': ['local'] } } : undefined;
 const landingBindings = process.env.E2E_AUTOMATION_FIXTURE === '1' ? [{ key: 'fixture-land', repositoryId: 'R1', repositoryPath: gitFixture.barePath, branches: landingBranches }] : undefined;
 const app = createApp({ automation, landingBindings, transcriptionModelDirectory, paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });

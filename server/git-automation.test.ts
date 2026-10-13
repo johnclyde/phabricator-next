@@ -8,6 +8,7 @@ import { GitAutomationStore, initializeGitAutomation, parseGitReceiveFacts, type
 import { HeraldStore, initializeHerald } from './herald.ts';
 import { parseHeraldRuleInput, type HeraldRuleInput } from '../shared/herald.ts';
 import { heraldPolicyObjectId, type GitReceiveFacts, type GitReceiveFile } from '../shared/git-automation.ts';
+import type { GitReviewEvidence } from '../shared/git-review-gates.ts';
 
 const a = 'a'.repeat(40), b = 'b'.repeat(40), c = 'c'.repeat(40);
 const person = { name: 'Contributor', email: 'contributor@example.test', timestamp: '2026-10-13T00:00:00.000Z' };
@@ -20,6 +21,60 @@ function fixture(path = ':memory:') {
   const hooks: GitAutomationHooks = { canReceive: value => value.pusherId === 'alice' && value.repositoryId === 'R1', projectIds: () => ['PROJ1'], canEvaluate: () => true, canApply: () => true, apply: (rule, action, snapshot) => { db.prepare('INSERT INTO effects(value) VALUES(?)').run(JSON.stringify([rule.id, action, store.commit(snapshot.objectId)])); return { changed: true, message: 'Build started.' }; } };
   return { db, herald, store, hooks, rule: (patch: Partial<HeraldRuleInput> = {}) => herald.create({ ...input, ...patch }, 'alice', authority) };
 }
+
+const reviewed: GitReviewEvidence = { association: 'verified', revision: { revisionId: 'D1', versionId: 'v1', versionNumber: 1, contentHash: 'd'.repeat(64), targetTreeId: c, accepted: true, lifecycleVersion: 2, reviewerVersion: 1, evidenceSha256: 'e'.repeat(64) }, builds: [{ planId: 'PLAN1', planVersion: 2, enabled: true, status: 'passed', builds: [{ id: 'BUILD1', version: 3, planVersion: 2, status: 'passed', sourceKind: 'revision' }] }] };
+
+test('accepted revision and build gates evaluate server-derived source evidence with immutable decision replay', () => {
+  const f = fixture(); try {
+    f.rule({ name: 'Accepted revision required', conditions: [{ field: 'acceptedRevision', operator: '!exists', value: null }], actions: [{ type: 'block-push', value: 'Accept the exact reviewed version first.' }] });
+    f.rule({ name: 'Builds required', actions: [{ type: 'require-build-plans', targets: ['PLAN1'] }] });
+    let evidence = structuredClone(reviewed), calls = 0;
+    const hooks: GitAutomationHooks = { ...f.hooks, reviewEvidence: () => { calls++; return structuredClone(evidence); } };
+    const allowed = f.store.receive(facts, hooks); assert.equal(allowed.allowed, true); assert.equal(calls, 1);
+    evidence.revision!.accepted = false; evidence.builds[0]!.status = 'failed';
+    assert.deepEqual(f.store.receive(facts, hooks), allowed); assert.equal(calls, 1, 'replayed decision retains its immutable evidence');
+    const denied = f.store.receive({ ...facts, requestId: 'fresh-evidence' }, hooks); assert.equal(denied.allowed, false); assert.equal(denied.reasons.length, 2); assert.match(denied.reasons.join(' '), /exact reviewed version.*failed/);
+    const original = allowed.transcriptIds.map(id => f.herald.transcript(id, () => true)).find(item => item.contentType === 'push-content')!;
+    assert.deepEqual(original.snapshot.git!.review, reviewed);
+    for (const status of ['missing', 'stale', 'disabled', 'pending', 'building', 'failed', 'aborted', 'paused'] as const) {
+      evidence = structuredClone(reviewed); evidence.builds[0]!.status = status; evidence.builds[0]!.enabled = status !== 'disabled';
+      assert.equal(f.store.receive({ ...facts, requestId: status }, hooks).allowed, false, status);
+    }
+    const forged = structuredClone(facts) as GitReceiveFacts & { review?: GitReviewEvidence }; forged.review = reviewed;
+    assert.throws(() => parseGitReceiveFacts(forged), { code: 'GIT_RECEIVE_INVALID' });
+  } finally { f.db.close(); }
+});
+
+test('review fields and build actions fail closed when evidence is unavailable or unreadable by an active rule', () => {
+  for (const condition of ['acceptedRevision', 'revisionBuildWarning', 'passingBuildPlans'] as const) {
+    const f = fixture(); try {
+      f.rule({ conditions: [{ field: condition, operator: condition === 'revisionBuildWarning' ? 'false' : '!exists', value: null }], actions: [{ type: 'nothing' }] });
+      assert.equal(f.store.receive(facts, f.hooks).allowed, false);
+      const denied = f.store.receive({ ...facts, requestId: 'private' }, { ...f.hooks, reviewEvidence: () => reviewed, canReadGitReview: () => false });
+      assert.equal(denied.allowed, false); assert.doesNotMatch(JSON.stringify(denied.reasons), /D1|BUILD1/);
+    } finally { f.db.close(); }
+  }
+  const f = fixture(); try {
+    f.rule({ actions: [{ type: 'require-build-plans', targets: ['PLAN1'] }] });
+    assert.equal(f.store.receive(facts, f.hooks).allowed, false);
+    assert.equal(f.store.receive({ ...facts, requestId: 'private' }, { ...f.hooks, reviewEvidence: () => reviewed, canReadGitReview: () => false }).allowed, false);
+  } finally { f.db.close(); }
+});
+
+test('commit observation precedes audit Herald effects and preserves first review evidence on rediscovery', () => {
+  const f = fixture(); try {
+    f.rule({ contentType: 'commit', ruleType: 'personal', objectId: null, actions: [{ type: 'audit-self' }] });
+    f.rule({ contentType: 'commit', actions: [{ type: 'add-auditors', targets: ['auditor'] }] });
+    const events: string[] = [], post = { ...facts, phase: 'post' as const };
+    let evidence = structuredClone(reviewed);
+    const hooks: GitAutomationHooks = { ...f.hooks, reviewEvidence: () => structuredClone(evidence), observeCommit: (id, seen) => { assert.equal(seen.phase, 'post'); assert.equal(f.store.commit(id).commit.id, b); events.push('observed'); }, apply: (_rule, action) => { events.push(action.type); return { changed: true, message: 'Audit requested.' }; } };
+    const first = f.store.receive(post, hooks); assert.deepEqual(events, ['observed', 'audit-self', 'add-auditors']);
+    const files = f.store.commitFiles(first.commitIds[0]!); files[0]!.content = 'caller edit'; assert.notEqual(f.store.commitFiles(first.commitIds[0]!)[0]!.content, 'caller edit');
+    evidence.revision!.accepted = false;
+    const second = f.store.receive({ ...post, requestId: 'rediscovered' }, hooks); assert.deepEqual(second.commitIds, first.commitIds); assert.equal(second.transcriptIds.length, 0); assert.equal(events.length, 3);
+    assert.equal(f.store.snapshot(first.commitIds[0]!).git?.review?.revision?.accepted, true);
+  } finally { f.db.close(); }
+});
 
 test('receive inspection validation rejects incomplete, contradictory and forged source facts', () => {
   assert.deepEqual(parseGitReceiveFacts(facts), facts);

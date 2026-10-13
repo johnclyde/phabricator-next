@@ -25,7 +25,7 @@ test('schema30 maps legacy scalar tags without changing any schema29 rows, const
     store.saveReview(id, 1, { provider: 'local', model: 'fixture', summary: 'Exact historical evidence', findings: [] }, actor); const acceptance = lifecycleAction(store, id, 'accept_reviewed', actor), proof = store.revisionLifecycle.operation(acceptance.operationId);
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('old-creation', 'original-fingerprint', 201, JSON.stringify(original), original.revision.createdAt);
     downgrade(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path }); const after = snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 39);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 40);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.deepEqual(store.revisionProjects.state(id), { revisionId: id, version: 0, projectIds: [project.id], updatedAt: null }); assert.deepEqual(store.revisionProjects.state(untagged).projectIds, []);
@@ -48,7 +48,7 @@ test('schema30 rejects unknown legacy tags and table collisions atomically, leav
       else original.database.exec("CREATE TABLE revision_project_operations(operator_note TEXT); INSERT INTO revision_project_operations VALUES('Preserve custom data')");
       const before = snapshot(original.database); original.close(); assert.throws(() => new Store({ path })); db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 29); assert.deepEqual(snapshot(db), before);
       if (fault === 'reference') db.prepare("UPDATE entities SET data=json_set(data,'$.projectId',NULL) WHERE id=?").run(id); else db.exec('DROP TABLE revision_project_operations');
-      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 39); assert.deepEqual(repaired.revisionProjects.state(id).projectIds, []);
+      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 40); assert.deepEqual(repaired.revisionProjects.state(id).projectIds, []);
     } finally { if (original.database.isOpen) original.close(); db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
   }
 });

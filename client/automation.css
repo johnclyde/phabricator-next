@@ -15,7 +15,7 @@
 .automation-list > button.selected { background: #f0f6fc; border-color: #8fb8de; box-shadow: inset 3px 0 #2980b9; }
 .automation-list strong { overflow-wrap: anywhere; }
 .automation-list small { color: var(--muted); }
-.automation-list .automation-status { justify-self: start; }
+.automation-list .badge { justify-self: start; }
 .automation-form { display: grid; gap: 18px; min-width: 0; }
 .automation-form fieldset { margin: 0; padding: 14px; border: 1px solid var(--border); border-radius: 5px; min-width: 0; display: grid; gap: 12px; }
 .automation-form legend { font-weight: 600; padding: 0 5px; }
@@ -43,10 +43,10 @@
 .automation-recovery { padding: 15px; border: 1px solid #e3c477; border-radius: 5px; background: #fff9e9; }
 .automation-recovery h3 { margin-top: 0; }
 .automation-status { text-transform: capitalize; }
-.automation-status-passed, .automation-status-complete, .automation-status-enabled, .automation-status-succeeded, .automation-status-active, .automation-status-approved, .automation-status-allowed { background: #e7f5ea; color: #287443; }
-.automation-status-failed, .automation-status-error, .automation-status-broken, .automation-status-blocked, .automation-status-denied { background: #fcebed; color: #a83c48; }
-.automation-status-running, .automation-status-pending, .automation-status-waiting, .automation-status-acquired, .automation-status-releasing { background: #e8f1fb; color: #245e94; }
-.automation-status-disabled, .automation-status-canceled, .automation-status-aborted, .automation-status-stopped, .automation-status-skipped, .automation-status-expired, .automation-status-released, .automation-status-revoked { background: #eef0f3; color: #637184; }
+.badge.automation-status-passed, .badge.automation-status-complete, .badge.automation-status-enabled, .badge.automation-status-succeeded, .badge.automation-status-active, .badge.automation-status-approved, .badge.automation-status-allowed { background: #e7f5ea; color: #287443; }
+.badge.automation-status-failed, .badge.automation-status-error, .badge.automation-status-broken, .badge.automation-status-blocked, .badge.automation-status-denied { background: #fcebed; color: #a83c48; }
+.badge.automation-status-running, .badge.automation-status-pending, .badge.automation-status-waiting, .badge.automation-status-acquired, .badge.automation-status-releasing { background: #e8f1fb; color: #245e94; }
+.badge.automation-status-disabled, .badge.automation-status-canceled, .badge.automation-status-aborted, .badge.automation-status-stopped, .badge.automation-status-skipped, .badge.automation-status-expired, .badge.automation-status-released, .badge.automation-status-revoked { background: #eef0f3; color: #637184; }
 .automation-table-wrap { max-width: 100%; overflow: auto; }
 .automation-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .automation-table th, .automation-table td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
@@ -76,9 +76,9 @@
 }
 
 .revision-landing { margin-top: 18px; }
-.automation-status-landed, .automation-status-prepared { background: #e7f5ea; color: #287443; }
-.automation-status-conflict { background: #fcebed; color: #a83c48; }
-.automation-status-cancelled { background: #eef0f3; color: #637184; }
+.badge.automation-status-landed, .badge.automation-status-prepared { background: #e7f5ea; color: #287443; }
+.badge.automation-status-conflict { background: #fcebed; color: #a83c48; }
+.badge.automation-status-cancelled { background: #eef0f3; color: #637184; }
 
 .landing-identities { margin-top: 16px; }
 .landing-identities > summary { display: list-item; cursor: pointer; padding: 12px 0; font-weight: 600; min-height: 44px; box-sizing: border-box; }
@@ -99,3 +99,27 @@
 .herald-file-objects .automation-properties { grid-template-columns: 1fr; gap: 4px; }
 .herald-file-objects dd { margin-bottom: 8px; }
 @media (max-width: 600px) { .herald-file-objects { grid-template-columns: 1fr; } }
+
+.badge.audit-status-audited, .badge.audit-request-accepted { background: #e7f5ea; color: #287443; }
+.badge.audit-status-concern-raised, .badge.audit-request-concerned { background: #fcebed; color: #a83c48; }
+.badge.audit-status-needs-audit, .badge.audit-status-partially-audited, .badge.audit-request-requested { background: #e8f1fb; color: #245e94; }
+.badge.audit-status-none, .badge.audit-request-resigned { background: #eef0f3; color: #637184; }
+.audit-message { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.audit-parent { display: block; }
+.audit-auditors { display: grid; gap: 8px; }
+.audit-auditors article, .audit-selected-auditors li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: 4px; }
+.audit-auditors strong { overflow-wrap: anywhere; }
+.audit-selected-auditors { display: grid; gap: 8px; padding: 0; list-style: none; }
+.audit-comment { white-space: pre-wrap; }
+.audit-history .automation-row-heading { flex-wrap: wrap; }
+.audit-history .automation-row-heading h3 { margin: 0; overflow-wrap: anywhere; }
+.audit-patch { max-height: 620px; }
+.herald-review-evidence { display: grid; gap: 12px; min-width: 0; }
+.herald-review-evidence > h3, .herald-review-evidence > p { margin: 0; }
+.herald-review-evidence .automation-row-heading { flex-wrap: wrap; }
+.badge.automation-status-accepted { background: #e7f5ea; color: #287443; }
+.badge.automation-status-not-accepted, .badge.automation-status-stale, .badge.automation-status-missing { background: #fff4db; color: #855c19; }
+
+.audit-patch-added { background: #e4f4e8; color: #246338; }
+.audit-patch-removed { background: #ffe8ea; color: #953a43; }
+.audit-patch-header { color: #26639b; }

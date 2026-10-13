@@ -46,7 +46,7 @@ export class LandingService {
       },
       beforeLand:(operation,facts,actor)=>{
         const receipt=this.automation.landingReceive(facts,{...actor,workspaceId:this.auth.workspaceId});
-        if(!receipt.allowed)return {allowed:false,message:'Herald repository rules rejected this landing. Inspect the receive decision.'};
+        if(!receipt.allowed)return {allowed:false,receiptId:receipt.id,message:'Herald repository rules rejected this landing. Inspect the receive decision.'};
         const transcripts=receipt.transcriptIds.map(id=>this.automation.herald.transcript(id,()=>true));
         return {allowed:true,proof:{receiptId:receipt.id,allowed:true,evidenceSha256:hash({operationId:operation.id,receipt,transcripts})}};
       },
