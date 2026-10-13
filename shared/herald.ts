@@ -1,9 +1,10 @@
 /** Herald rule semantics follow the pinned 2021 engine. Host integrations supply
  * object snapshots, authority, and bounded regular-expression evaluation. */
+import type { GitReceiveFileInspection } from './git-automation';
 export type HeraldContentType = 'revision' | 'task' | 'wiki' | 'paste' | 'commit' | 'push-ref' | 'push-content';
 export type HeraldRuleType = 'personal' | 'object' | 'global';
 export type HeraldRepetition = 'every' | 'first' | 'change';
-export type HeraldField = 'always' | 'isNew' | 'title' | 'body' | 'comment' | 'status' | 'priority' | 'actorId' | 'authorId' | 'ownerId' | 'repositoryId' | 'projectIds' | 'subscriberIds' | 'reviewerIds' | 'filePaths' | 'fileContent' | 'rule' | 'refName' | 'refType' | 'refChange' | 'forced' | 'commitId' | 'authorRaw' | 'committerRaw' | 'branches' | 'isMerge' | 'diffAdded' | 'diffRemoved';
+export type HeraldField = 'always' | 'isNew' | 'title' | 'body' | 'comment' | 'status' | 'priority' | 'actorId' | 'authorId' | 'ownerId' | 'repositoryId' | 'projectIds' | 'subscriberIds' | 'reviewerIds' | 'filePaths' | 'fileContent' | 'rule' | 'refName' | 'refType' | 'refChange' | 'forced' | 'commitId' | 'authorRaw' | 'committerRaw' | 'branches' | 'isMerge' | 'diffAdded' | 'diffRemoved' | 'binaryFiles' | 'uninspectableFiles' | 'diffEnormous' | 'textInspectionComplete';
 export type HeraldOperator = 'contains' | '!contains' | 'is' | '!is' | 'isany' | '!isany' | 'all' | 'any' | 'none' | 'exists' | '!exists' | 'true' | 'false' | 'regexp' | '!regexp' | 'regexp-pair' | 'conditions' | '!conditions';
 export interface HeraldCondition { field: HeraldField; operator: HeraldOperator; value: string | string[] | boolean | null }
 export type HeraldAction =
@@ -19,6 +20,9 @@ export interface HeraldGitSnapshot {
   commitId: string | null; refName: string | null; refType: 'branch' | 'tag' | null; refChange: 'create' | 'update' | 'delete' | null;
   forced: boolean; isMerge: boolean; authorRaw: string; committerRaw: string; branches: string[];
   diffAdded: { path: string; content: string }[]; diffRemoved: { path: string; content: string }[];
+  /** Absence is historical fully captured text evidence, never an empty-file
+   * substitution for a modern unavailable inspection. */
+  fileInspection?: ({ path: string } & GitReceiveFileInspection)[];
 }
 export interface HeraldSnapshot {
   objectId: string; contentType: HeraldContentType; eventId: string; actorId: string; isNew: boolean;
@@ -69,6 +73,10 @@ export const HERALD_FIELDS: readonly HeraldFieldDefinition[] = [
   { key: 'isMerge', label: 'Merge commit', type: 'boolean', contentTypes: gitContentTypes },
   { key: 'diffAdded', label: 'Added diff content', type: 'text-map', contentTypes: gitContentTypes },
   { key: 'diffRemoved', label: 'Removed diff content', type: 'text-map', contentTypes: gitContentTypes },
+  { key: 'binaryFiles', label: 'Binary filenames', type: 'text-list', contentTypes: gitContentTypes },
+  { key: 'uninspectableFiles', label: 'Filenames without text inspection', type: 'text-list', contentTypes: gitContentTypes },
+  { key: 'diffEnormous', label: 'Diff exceeds text inspection limits', type: 'boolean', contentTypes: gitContentTypes },
+  { key: 'textInspectionComplete', label: 'Text inspection is complete', type: 'boolean', contentTypes: gitContentTypes },
   { key: 'rule', label: 'Another Herald rule', type: 'rule', contentTypes: allTypes },
 ];
 export const HERALD_OPERATORS: Readonly<Record<HeraldFieldDefinition['type'], readonly HeraldOperator[]>> = {
@@ -138,6 +146,20 @@ export function parseHeraldRuleInput(input: unknown): HeraldRuleInput {
 }
 export interface HeraldEvaluationOptions { dryRun?: boolean; canEvaluate?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; matchesScope?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean; regexp?: (pattern: string, values: readonly string[]) => boolean }
 const order: Record<HeraldRuleType, number> = { personal: 0, object: 1, global: 2 };
+const directGitFields = ['refName', 'refType', 'refChange', 'forced', 'commitId', 'authorRaw', 'committerRaw', 'branches', 'isMerge'] as const;
+function gitFileInspection(snapshot: HeraldSnapshot): NonNullable<HeraldGitSnapshot['fileInspection']> {
+  if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.');
+  const inspection = snapshot.git.fileInspection;
+  if (inspection === undefined) return [];
+  const paths = new Set(snapshot.files.map(file => file.path));
+  if (!Array.isArray(inspection) || paths.size !== snapshot.files.length || inspection.length !== paths.size || new Set(inspection.map(file => file.path)).size !== inspection.length || inspection.some(file => !paths.has(file.path) || !['text','binary','non-utf8','too-large','gitlink'].includes(file.kind))) throw new Error('Exact Git file inspection evidence is unavailable.');
+  for (const files of [snapshot.git.diffAdded, snapshot.git.diffRemoved]) if (!Array.isArray(files) || files.length !== paths.size || new Set(files.map(file => file.path)).size !== paths.size || files.some(file => !paths.has(file.path))) throw new Error('Exact Git diff inspection evidence is unavailable.');
+  return inspection;
+}
+function requireTextInspection(snapshot: HeraldSnapshot, paths?: ReadonlySet<string>): void {
+  if (!gitContentTypes.includes(snapshot.contentType)) return;
+  if (gitFileInspection(snapshot).some(file => file.kind !== 'text' && (!paths || paths.has(file.path)))) throw new Error('Text is unavailable for one or more selected files. Inspect file metadata or guard this condition with complete text inspection.');
+}
 export function heraldRuleOrder(a: HeraldRule, b: HeraldRule): number { return order[a.ruleType] - order[b.ruleType] || Number(a.id.slice(1)) - Number(b.id.slice(1)); }
 /** All conditions see the original snapshot, never effects of earlier rules. */
 export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: HeraldSnapshot, previous: Readonly<Record<string, HeraldRuleState>> = {}, options: HeraldEvaluationOptions = {}): HeraldEvaluation {
@@ -165,11 +187,15 @@ export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: Hera
           const dependent = evaluate(dependency); if (dependent.status === 'error') throw new Error(dependent.error ?? 'Referenced rule failed.');
           value = dependent.shouldAct;
         } else if (condition.field === 'always') value = true;
+        else if (condition.field === 'binaryFiles') value = gitFileInspection(snapshot).filter(file => file.kind === 'binary').map(file => file.path);
+        else if (condition.field === 'uninspectableFiles') value = gitFileInspection(snapshot).filter(file => file.kind !== 'text').map(file => file.path);
+        else if (condition.field === 'diffEnormous') value = gitFileInspection(snapshot).some(file => file.kind === 'too-large');
+        else if (condition.field === 'textInspectionComplete') value = gitFileInspection(snapshot).every(file => file.kind === 'text');
         else if (condition.field === 'filePaths') value = snapshot.files.map(file => file.path);
-        else if (condition.field === 'fileContent') value = snapshot.files.map(file => file.content);
-        else if (condition.field === 'diffAdded' || condition.field === 'diffRemoved') { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); value = snapshot.git[condition.field].map(file => file.content); }
-        else if (['refName', 'refType', 'refChange', 'forced', 'commitId', 'authorRaw', 'committerRaw', 'branches', 'isMerge'].includes(condition.field)) { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); value = snapshot.git[condition.field as Exclude<keyof HeraldGitSnapshot, 'diffAdded' | 'diffRemoved'>]; }
-        else value = snapshot[condition.field as Exclude<HeraldField, keyof HeraldGitSnapshot | 'filePaths' | 'fileContent' | 'rule' | 'always'>];
+        else if (condition.field === 'fileContent') { if (condition.operator !== 'regexp-pair') requireTextInspection(snapshot); value = snapshot.files.map(file => file.content); }
+        else if (condition.field === 'diffAdded' || condition.field === 'diffRemoved') { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); if (condition.operator !== 'regexp-pair') requireTextInspection(snapshot); value = snapshot.git[condition.field].map(file => file.content); }
+        else if ((directGitFields as readonly string[]).includes(condition.field)) { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); value = snapshot.git[condition.field as typeof directGitFields[number]]; }
+        else value = snapshot[condition.field as Exclude<HeraldField, keyof HeraldGitSnapshot | 'filePaths' | 'fileContent' | 'rule' | 'always' | 'binaryFiles' | 'uninspectableFiles' | 'diffEnormous' | 'textInspectionComplete'>];
           const values = Array.isArray(value) ? value : value === null ? [] : [String(value)], targets = Array.isArray(condition.value) ? condition.value : [];
           switch (condition.operator) {
             case 'contains': case '!contains': { const found = values.some(value => value.toLocaleLowerCase('en-US').includes(String(condition.value).toLocaleLowerCase('en-US'))); conditionMatched = condition.operator === 'contains' ? found : !found; break; }
@@ -185,7 +211,7 @@ export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: Hera
             case 'conditions': conditionMatched = Boolean(value); break;
             case '!conditions': conditionMatched = !value; break;
             case 'regexp': case '!regexp': { if (!options.regexp) throw new Error('Bounded regular-expression evaluation is unavailable.'); const found = options.regexp(String(condition.value), values); conditionMatched = condition.operator === 'regexp' ? found : !found; break; }
-            case 'regexp-pair': { if (!options.regexp) throw new Error('Bounded regular-expression evaluation is unavailable.'); const pair = JSON.parse(String(condition.value)) as [string, string]; const files = condition.field === 'diffAdded' || condition.field === 'diffRemoved' ? snapshot.git?.[condition.field] : snapshot.files; if (!files) throw new Error('Exact diff content is unavailable.'); conditionMatched = files.some(file => options.regexp!(pair[0], [file.path]) && options.regexp!(pair[1], [file.content])); break; }
+            case 'regexp-pair': { if (!options.regexp) throw new Error('Bounded regular-expression evaluation is unavailable.'); const pair = JSON.parse(String(condition.value)) as [string, string]; const files = condition.field === 'diffAdded' || condition.field === 'diffRemoved' ? snapshot.git?.[condition.field] : snapshot.files; if (!files) throw new Error('Exact diff content is unavailable.'); const selected = files.filter(file => options.regexp!(pair[0], [file.path])); requireTextInspection(snapshot,new Set(selected.map(file=>file.path))); conditionMatched = selected.some(file => options.regexp!(pair[1], [file.content])); break; }
           }
         } catch (error) { result.conditions.push({ index, condition, matched: null, error: error instanceof Error ? error.message : 'Condition evaluation failed.' }); throw error; }
         result.conditions.push({ index, condition, matched: conditionMatched });

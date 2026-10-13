@@ -63,6 +63,35 @@ Run that command from the application directory or use absolute loader/script pa
 
 `GET /api/herald/receives` accepts optional `repositoryId`, `before`, and `limit` (1–100). `GET /api/herald/receives/:id` returns a decision and transcript IDs. Reads inherit current repository/Space visibility. `POST /api/herald/test` accepts exactly one `objectId` or `transcriptId`.
 
-The current hook accepts branch and tag refs, at most 100 ref updates and 500 distinct newly reachable commits per receive, 1,000 changed paths per commit, a 128,000-byte raw commit limit, an 8 MiB total inspection budget and 60 seconds. The API envelope is capped at 24 MiB, including repeated per-ref facts and JSON escaping. A newly created branch enumerates all reachable history; large initial repositories require explicit bootstrapping or a later scalable importer. These are operational admission limits, never silent truncation. Non-UTF-8 metadata/patches and binary changes are currently rejected by this strict text-inspection adapter. Deletions and noncommit tags still support ref rules.
+The hook accepts branch and tag refs, at most 100 ref updates and 500 distinct newly reachable commits per receive, 1,000 changed paths per commit, a 128,000-byte raw commit limit and 60 seconds. The API envelope is capped at 24 MiB, including repeated per-ref facts and JSON escaping. A newly created branch enumerates all reachable history; large initial repositories require explicit bootstrapping or a later scalable importer. These are operational admission limits, never silent truncation. Non-UTF-8 commit metadata and filenames remain unsupported. Deletions and noncommit tags still support ref rules.
 
-Repository project tagging and associated project-scoped Git rules, full audit actions, Owners/Legalpad/review acceptance and build gating fields, complete branch graph membership, pre-diff blocking, hosted Git SSH/HTTP services, historical commit import, arbitrary Git formats, and large/binary push inspection remain open. This implementation is a working native receive adapter, not full Diffusion hosting or unchanged upstream hook compatibility.
+## Large and binary changes
+
+Changed files carry exact old/new Git object IDs, modes and byte sizes. Additions and deletions have one absent side. Gitlinks record the referenced commit and mode without opening the other repository; their byte size is unavailable. Binary bytes never pass through a text decoder or appear as fabricated patch text. The hook does not follow symlinks, apply attributes, invoke conversion filters or run external diff drivers.
+
+Each file records one inspection state: complete text, binary, non-UTF-8, too large, or Gitlink. Blob and text-diff budgets bound local work; exceeding a text budget retains the complete changed-path and object metadata with an explicit unavailable-text state. Exhausting metadata, commit, ref, path, overall time or transport limits still rejects the inspection. This is bounded text inspection with complete file metadata, not an assertion that arbitrary binary formats or arbitrarily large text have been analyzed.
+
+The collector reads blobs up to 8 MiB per side and identifies binary data by NUL bytes; non-UTF-8 data has a separate state. Larger blobs retain metadata without guessing their encoding. Text diffing allows 100,000 input lines per side and 250 milliseconds per diff. A receive captures up to 8 MiB across patch text and added/removed text, with a separate 16 MiB JSON-encoded text budget and 8 MiB metadata budget. Budgets account for repeated commits in multiple ref updates. The 24 MiB final API envelope and 60-second collector deadline still apply. Text is kept whole for a file or marked unavailable; partial prefixes are never used for enforcement.
+
+Herald adds four fields for push content and observed commits:
+
+| Field | Meaning |
+| --- | --- |
+| Binary filenames | Changed files positively identified as binary. Oversized files whose bytes were not read are not guessed to be binary. |
+| Filenames without text inspection | Files with unavailable text, including binary, non-UTF-8, oversized and Gitlink changes. |
+| Diff exceeds text inspection limits | At least one file exceeded a text inspection budget. |
+| Text inspection is complete | Every changed file has complete captured text. |
+
+Filename, commit and metadata conditions work on these pushes. A text condition (`Source file content or commit diff`, `Added diff content`, or `Removed diff content`) errors if its required text is unavailable. This applies to both positive and negative matches: unavailable text cannot prove absence of a prohibited string. An evaluation error rejects a pre-receive operation and is recorded in its transcript.
+
+A filename/content regular-expression pair first selects paths. It requires complete text only for those paths, so a rule inspecting `\.ts$` can coexist with unrelated binary images. Ordered all/any conditions retain their usual short-circuit behavior. An operator may deliberately guard a content rule with `Text inspection is complete` and separately decide how to handle uninspectable files. Such a guard is an explicit policy choice; the hook never inserts one or silently approves unavailable text.
+
+The transcript inspector lists file states and expandable exact object metadata on mobile and desktop. Recorded evidence is immutable. Historical text-only observations remain readable and replayable, and re-observing an existing commit neither rewrites its original transcript nor starts its builds again. New push attempts are evaluated against their own newly collected evidence.
+
+## Verification
+
+The P305a release passed type checking, the full core suite (2,105 passed; nine optional TeX integration tests skipped), root and subpath production builds, and 100 affected browser checks across desktop/mobile and root/subpath hosting. The new inspection view also has a 768px layout check. Schema remains 39; existing evidence is not migrated or rewritten.
+
+Real SHA-1/SHA-256 Git fixtures cover exact object metadata, quarantine, binary and non-UTF-8 source, large additions/deletions, ordinary large text edits, mode changes, symlinks, Gitlinks, hostile diff configuration, corrupt objects, cancellation and text/encoded-payload limits. Installed hooks verify actual push rejection and acceptance, post-receive API failure, private spool recovery and idempotent retry. Parser, rule and API tests cover unavailable-text guards, positive/negative conditions, selected-path matching, inconsistent metadata, current repository/Space access, historical evidence and commit-build deduplication. The browser fixture runs the collector on real disposable Git objects before submitting trusted observations; it does not fabricate production push history.
+
+Repository project tagging and associated project-scoped Git rules, full audit actions, Owners/Legalpad/review acceptance and build gating fields, complete branch graph membership, pre-diff blocking, hosted Git SSH/HTTP services, historical commit import, arbitrary Git formats, binary-format analysis and unbounded text inspection remain open. This implementation is a working native receive adapter, not full Diffusion hosting or unchanged upstream hook compatibility.

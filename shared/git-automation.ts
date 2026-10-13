@@ -3,7 +3,23 @@ import type { HeraldSnapshot } from './herald';
 
 /** These facts may only be submitted by an operator-configured receive hook.
  * They are not a request format for ordinary users to supply repository source. */
-export interface GitReceiveFile { path: string; content: string; added: string; removed: string }
+export interface GitReceiveObject {
+  id: string;
+  mode: '100644' | '100755' | '120000' | '160000';
+  /** Gitlinks name commits in another repository and have no local blob size. */
+  bytes: number | null;
+}
+export interface GitReceiveFileInspection {
+  kind: 'text' | 'binary' | 'non-utf8' | 'too-large' | 'gitlink';
+  old: GitReceiveObject | null;
+  new: GitReceiveObject | null;
+}
+export interface GitReceiveFile {
+  path: string; content: string; added: string; removed: string;
+  /** Absent only on historical, fully captured text evidence. Non-text evidence
+   * records exact objects without representing their bytes as empty text. */
+  inspection?: GitReceiveFileInspection;
+}
 export interface GitReceiveCommit { commit: GitCommit; files: GitReceiveFile[]; inspectionComplete: true }
 export interface GitReceiveUpdate {
   refName: string; oldId: string | null; newId: string | null;

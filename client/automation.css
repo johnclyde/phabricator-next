@@ -82,3 +82,20 @@
 
 .landing-identities { margin-top: 16px; }
 .landing-identities > summary { display: list-item; cursor: pointer; padding: 12px 0; font-weight: 600; min-height: 44px; box-sizing: border-box; }
+
+.herald-file-inspection { display: grid; gap: 12px; min-width: 0; }
+.herald-file-inspection h3 { margin: 0; font-size: 15px; }
+.herald-file-inspection p { margin: 8px 0 0; }
+.herald-file-inspection .field { margin: 0; }
+.herald-file-list { display: grid; gap: 6px; min-width: 0; }
+.herald-file-evidence { min-width: 0; border: 1px solid var(--border); border-radius: 5px; }
+.herald-file-evidence > summary { display: list-item; cursor: pointer; min-height: 44px; padding: 12px; box-sizing: border-box; }
+.herald-file-summary { display: inline-grid; gap: 4px; max-width: calc(100% - 24px); vertical-align: top; }
+.herald-file-summary code { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13px; }
+.herald-file-details { padding: 0 12px 14px; }
+.herald-file-details > p { margin: 0 0 12px; }
+.herald-file-objects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.herald-file-objects h4 { margin: 0 0 10px; font-size: 13px; }
+.herald-file-objects .automation-properties { grid-template-columns: 1fr; gap: 4px; }
+.herald-file-objects dd { margin-bottom: 8px; }
+@media (max-width: 600px) { .herald-file-objects { grid-template-columns: 1fr; } }

@@ -27,6 +27,15 @@ async function start() {
   return { ...app, alice, bob, request, facts, policy, close: async () => { await app.close(); store.close(); } };
 }
 
+function withUnavailableFiles(facts: GitReceiveFacts): GitReceiveFacts {
+  const source = facts.updates[0]!.commits[0]!;
+  source.files = [
+    { path: 'PRIVATE-image.bin', content: '', added: '', removed: '', inspection: { kind: 'binary', old: null, new: { id: 'd'.repeat(40), mode: '100644', bytes: 1_024 } } },
+    { path: 'PRIVATE-large.txt', content: '', added: '', removed: '', inspection: { kind: 'too-large', old: { id: 'e'.repeat(40), mode: '100755', bytes: 9_000_000 }, new: { id: 'f'.repeat(40), mode: '100644', bytes: 12_000_000 } } },
+  ];
+  return facts;
+}
+
 test('receive API only trusts configured receivers and requires both receiver and pusher current repository/Space access', async () => {
   const app = await start(); try {
     const facts = app.facts();
@@ -45,9 +54,10 @@ test('receive API only trusts configured receivers and requires both receiver an
 test('receive receipts, stored transcripts, test console and idempotent replay inherit current repository/Space policy', async () => {
   const app = await start(); try {
     const created = await app.request('/api/herald/rules', 'POST', rule()); assert.equal(created.status, 201);
-    const facts = app.facts(), key = randomUUID(), first = await app.request<{ receive: GitReceiveReceipt }>('/api/herald/receive', 'POST', facts, 'alice', key); assert.equal(first.status, 200, JSON.stringify(first.body)); assert.equal(first.body.receive.allowed, false);
+    const facts = withUnavailableFiles(app.facts()), key = randomUUID(), first = await app.request<{ receive: GitReceiveReceipt }>('/api/herald/receive', 'POST', facts, 'alice', key); assert.equal(first.status, 200, JSON.stringify(first.body)); assert.equal(first.body.receive.allowed, false);
     const id = first.body.receive.id, transcriptId = first.body.receive.transcriptIds[1];
     const visible = await app.request<{ transcript: HeraldTranscript }>(`/api/herald/transcripts/${transcriptId}`, 'GET', undefined, 'bob'); assert.equal(visible.status, 200); assert.equal(visible.body.transcript.snapshot.body, 'PRIVATE exact commit message');
+    assert.deepEqual(visible.body.transcript.snapshot.git?.fileInspection, facts.updates[0]!.commits[0]!.files.map(file => ({ path: file.path, ...file.inspection })));
     const dryKey = randomUUID(), dryInput = { transcriptId }, dry = await app.request<{ transcript: HeraldTranscript }>('/api/herald/test', 'POST', dryInput, 'bob', dryKey); assert.equal(dry.status, 200, JSON.stringify(dry.body)); assert.equal(dry.body.transcript.dryRun, true);
     const policy = app.policy({ view: members(app.alice.id), edit: members(app.alice.id), interact: members(app.alice.id) });
     for (const path of [`/api/herald/transcripts/${transcriptId}`, `/api/herald/receives/${id}`]) { const response = await app.request(path, 'GET', undefined, 'bob'); assert.equal(response.status, 404); assert.equal(JSON.stringify(response.body).includes('PRIVATE'), false); }
@@ -65,7 +75,7 @@ test('post-receive triggers commit build plans on exact trusted commits once and
   const app = await start(); try {
     const plan = await app.request<{ plan: BuildPlan }>('/api/harbormaster/plans', 'POST', { name: 'Commit checks', description: '', enabled: true, steps: [{ key: 'worker', name: 'Inspect exact commit', kind: 'external', worker: 'trusted-worker', dependsOn: [] }] }); assert.equal(plan.status, 201);
     assert.equal((await app.request('/api/herald/rules', 'POST', rule({ contentType: 'commit', actions: [{ type: 'run-build-plans', targets: [plan.body.plan.id] }] }))).status, 201);
-    const facts = app.facts({ phase: 'post' }), first = await app.request<{ receive: GitReceiveReceipt }>('/api/herald/receive', 'POST', facts); assert.equal(first.status, 200, JSON.stringify(first.body)); assert.equal(first.body.receive.commitIds.length, 1);
+    const facts = withUnavailableFiles(app.facts({ phase: 'post' })), first = await app.request<{ receive: GitReceiveReceipt }>('/api/herald/receive', 'POST', facts); assert.equal(first.status, 200, JSON.stringify(first.body)); assert.equal(first.body.receive.commitIds.length, 1);
     const transcript = await app.request<{ transcript: HeraldTranscript }>(`/api/herald/transcripts/${first.body.receive.transcriptIds[0]}`); assert.equal(transcript.status, 200); assert.equal(transcript.body.transcript.actions[0].status, 'applied', JSON.stringify(transcript.body));
     const builds = await app.request<{ builds: Build[] }>('/api/harbormaster/builds?objectId=R1'); assert.equal(builds.status, 200); assert.equal(builds.body.builds.length, 1);
     const detail = await app.request<BuildDetail>(`/api/harbormaster/builds/${builds.body.builds[0].id}`); assert.equal(detail.body.buildable.repositoryId, 'R1'); assert.equal(detail.body.buildable.commitId, b);

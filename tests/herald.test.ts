@@ -83,3 +83,55 @@ test('switching first and change repetition keeps the upstream shared applied ma
   const every = evaluateHeraldRules([{ ...firstRule, repetition: 'every' }], snapshot, firstAgain.state, options); assert.deepEqual(every.state.H1, { applied: false, matched: false });
   assert.equal(evaluateHeraldRules([firstRule], snapshot, every.state, options).effects.length, 1);
 });
+
+function gitSnapshot(): HeraldSnapshot {
+  const files = [{ path: 'safe.txt', content: 'exact token' }, { path: 'asset.png', content: '' }, { path: 'huge.txt', content: '' }, { path: 'submodule', content: '' }];
+  return { ...snapshot, contentType: 'push-content', files, git: { commitId: 'a'.repeat(40), refName: null, refType: null, refChange: null, forced: false, isMerge: false, authorRaw: 'Contributor', committerRaw: 'Contributor', branches: ['main'], diffAdded: files, diffRemoved: files, fileInspection: files.map((file, index) => ({ path: file.path, kind: (['text', 'binary', 'too-large', 'gitlink'] as const)[index]!, old: null, new: { id: String(index + 1).repeat(40), mode: index === 3 ? '160000' : '100644', bytes: index === 3 ? null : index === 2 ? 9_000_000 : 11 } })) } };
+}
+const gitRule = (conditions: HeraldRuleInput['conditions'], match: 'all' | 'any' = 'all') => rule('H1', { contentType: 'push-content', conditions, match });
+const regexOptions = { ...options, regexp: (pattern: string, values: readonly string[]) => values.some(value => new RegExp(pattern).test(value)) };
+
+test('Git inspection fields expose binary and unavailable paths while filename rules remain usable', () => {
+  const source = gitSnapshot(), before = structuredClone(source);
+  const conditions: HeraldRuleInput['conditions'] = [{ field: 'binaryFiles', operator: 'contains', value: 'asset.png' }, { field: 'binaryFiles', operator: '!contains', value: 'huge.txt' }, { field: 'uninspectableFiles', operator: 'contains', value: 'submodule' }, { field: 'diffEnormous', operator: 'true', value: null }, { field: 'textInspectionComplete', operator: 'false', value: null }, { field: 'filePaths', operator: 'contains', value: 'huge.txt' }];
+  assert.deepEqual(parseHeraldRuleInput({ ...input, contentType: 'push-content', conditions }).conditions, conditions);
+  assert.equal(evaluateHeraldRules([gitRule(conditions)], source, {}, options).rules[0].status, 'matched');
+  assert.deepEqual(source, before);
+});
+
+test('positive and negative Git text conditions fail visibly when any selected text is unavailable', () => {
+  for (const field of ['fileContent', 'diffAdded', 'diffRemoved'] as const) for (const operator of ['contains', '!contains', 'regexp', '!regexp'] as const) {
+    const result = evaluateHeraldRules([gitRule([{ field, operator, value: operator.startsWith('!') ? 'absent' : 'token' }])], gitSnapshot(), {}, regexOptions);
+    assert.equal(result.rules[0].status, 'error', `${field} ${operator}`); assert.match(result.rules[0].error!, /Text is unavailable/); assert.equal(result.effects.length, 0); assert.equal(result.rules[0].conditions[0].matched, null);
+  }
+});
+
+test('ordered all and any guards preserve short circuit before unavailable Git text conditions', () => {
+  const text = { field: 'fileContent', operator: 'contains', value: 'token' } as const;
+  const all = evaluateHeraldRules([gitRule([{ field: 'textInspectionComplete', operator: 'true', value: null }, text])], gitSnapshot(), {}, options).rules[0];
+  assert.equal(all.status, 'not-matched'); assert.equal(all.conditions.length, 1);
+  const any = evaluateHeraldRules([gitRule([{ field: 'textInspectionComplete', operator: 'false', value: null }, text], 'any')], gitSnapshot(), {}, options).rules[0];
+  assert.equal(any.status, 'matched'); assert.equal(any.conditions.length, 1);
+  const reversed = evaluateHeraldRules([gitRule([text, { field: 'textInspectionComplete', operator: 'true', value: null }])], gitSnapshot(), {}, options).rules[0];
+  assert.equal(reversed.status, 'error'); assert.equal(reversed.conditions.length, 1);
+});
+
+test('Git regular expression pairs require all selected paths but ignore unavailable unrelated paths', () => {
+  for (const field of ['fileContent', 'diffAdded', 'diffRemoved'] as const) {
+    const evaluate = (pattern: string) => evaluateHeraldRules([gitRule([{ field, operator: 'regexp-pair', value: JSON.stringify([pattern, 'token']) }])], gitSnapshot(), {}, regexOptions).rules[0];
+    assert.equal(evaluate('^safe\\.txt$').status, 'matched', field);
+    assert.equal(evaluate('^missing').status, 'not-matched', field);
+    assert.equal(evaluate('.*').status, 'error', `${field}: matching text first must not conceal unavailable later paths`);
+    assert.equal(evaluate('^asset').status, 'error', field);
+  }
+});
+
+test('legacy Git evidence remains complete text without adding metadata, and malformed modern coverage errors', () => {
+  const legacy = gitSnapshot(); delete legacy.git!.fileInspection; const before = JSON.stringify(legacy);
+  const conditions: HeraldRuleInput['conditions'] = [{ field: 'binaryFiles', operator: '!contains', value: 'asset' }, { field: 'uninspectableFiles', operator: '!contains', value: 'huge' }, { field: 'diffEnormous', operator: 'false', value: null }, { field: 'textInspectionComplete', operator: 'true', value: null }, { field: 'fileContent', operator: 'contains', value: 'token' }];
+  assert.equal(evaluateHeraldRules([gitRule(conditions)], legacy, {}, options).rules[0].status, 'matched'); assert.equal(JSON.stringify(legacy), before);
+  for (const mutate of [(source: HeraldSnapshot) => { source.git!.fileInspection!.pop(); }, (source: HeraldSnapshot) => { source.git!.diffAdded = source.git!.diffAdded.slice(0, 1); }, (source: HeraldSnapshot) => { source.git!.diffRemoved = source.git!.diffRemoved.map(() => source.git!.diffRemoved[0]!); }]) {
+    const source = gitSnapshot(); mutate(source);
+    assert.equal(evaluateHeraldRules([gitRule([{ field: 'diffAdded', operator: 'regexp-pair', value: '[".*","token"]' }])], source, {}, regexOptions).rules[0].status, 'error');
+  }
+});
