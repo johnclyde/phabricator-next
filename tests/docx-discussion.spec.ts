@@ -40,13 +40,19 @@ test('exact Word passage threads reply, resolve, export and reimport as separate
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true); if (info.project.name === 'mobile') for (const button of [prepare(page), download(page)]) { const height = (await button.boundingBox())!.height; expect(height).toBeGreaterThanOrEqual(44); expect(height).toBeLessThanOrEqual(80); }
   const folder = `.data/docx-discussion-visual/${process.env.APP_BASE_PATH ? 'mounted' : 'root'}`; await mkdir(folder, { recursive: true }); await exportPanel(page).evaluate(element => element.scrollIntoView({ block: 'start' })); await page.evaluate(() => scrollBy(0, -110)); await page.screenshot({ path: `${folder}/${info.project.name}-discussion-export.png` });
   if (info.project.name === 'mobile') {
-    await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
-    const footer = (await page.locator('.mobile-tabs').boundingBox())!, header = (await page.locator('.topbar').boundingBox())!;
-    for (const target of [download(page), exportPanel(page).getByRole('status')]) {
-      const bounds = (await target.boundingBox())!;
-      expect(bounds.y).toBeGreaterThanOrEqual(header.y + header.height);
-      expect(bounds.y + bounds.height).toBeLessThanOrEqual(footer.y);
-    }
+    // Management panels follow export, so page bottom is not the export footer.
+    await exportPanel(page).evaluate(element => {
+      const footer = document.querySelector('.mobile-tabs')!.getBoundingClientRect();
+      scrollBy({ top: element.getBoundingClientRect().bottom - footer.top + 12, behavior: 'instant' });
+    });
+    await expect(async () => {
+      const footer = (await page.locator('.mobile-tabs').boundingBox())!, header = (await page.locator('.topbar').boundingBox())!;
+      for (const target of [download(page), exportPanel(page).getByRole('status')]) {
+        const bounds = (await target.boundingBox())!;
+        expect(bounds.y).toBeGreaterThanOrEqual(header.y + header.height);
+        expect(bounds.y + bounds.height).toBeLessThanOrEqual(footer.y);
+      }
+    }).toPass({ timeout: 5_000 });
     await page.screenshot({ path: `${folder}/mobile-discussion-export-bottom.png` });
   }
 });

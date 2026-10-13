@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import ComparisonLines from './ComparisonLines';
+import ComparisonDiscussion, { ComparisonPassageComment, INLINE_DISCUSSION_LIMIT } from './ComparisonDiscussion';
 import { useWorkspace } from './SessionGate';
 import { comparisonPassages } from '../shared/comparison-navigation';
-import { compareFile, type ComparisonSegment, type FileComparison } from '../shared/comparison';
+import { compareFile, type ComparisonRange, type ComparisonSegment, type FileComparison } from '../shared/comparison';
+import { comparisonPassage, comparisonDiscussionThreads, type ComparisonDiscussionContext, type ComparisonSide } from '../shared/comparison-discussion';
 import { compareParagraphFile, type ReadyParagraphComparison, type ReorderedParagraph } from '../shared/paragraph-comparison';
 import type { RevisionDetail, RevisionVersion, SourceFile } from '../shared/types';
 import type { ComparisonVoiceAction } from './voice';
@@ -12,6 +14,11 @@ import { comparisonIdentity, comparisonPaths, versionIdentity, type ComparisonSe
 export type ComparisonAction = ComparisonVoiceAction;
 export interface ComparisonController { identity: string; snapshot: ComparisonVoiceSnapshot; execute: (action: ComparisonAction) => { text: string; identity: string } }
 export type RegisterComparison = (controller: ComparisonController | null) => void;
+export interface ComparisonInlineDiscussion {
+  detail: RevisionDetail;
+  onComment: (side: ComparisonSide, range: ComparisonRange) => void;
+  openThread: (threadId: string) => void;
+}
 interface ParagraphMarker { match: ReorderedParagraph; number: number; side: 'before' | 'after' }
 /** Word projections are presentation inputs; immutable versions/files are never rewritten. */
 export interface WordComparisonPresentation {
@@ -68,13 +75,23 @@ export function ComparisonPicker({ detail, selection, change, current }: { detai
 function downloadSource(file: SourceFile, side: string) {
   const url = URL.createObjectURL(new Blob([file.content], { type: 'text/plain;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = `${side}-${file.path.split('/').pop() || 'source.txt'}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-export default function Comparison({ revisionId, base, target, selection, register, children, canComment, onLine, selectedLine, change, word, supportsParagraphAlignment = false }: { word?: WordComparisonPresentation; supportsParagraphAlignment?: boolean; change: (selection: ComparisonSelection) => void; canComment: boolean; onLine: (line: number) => void; selectedLine: number | null; revisionId: string; base: RevisionVersion | null; target: RevisionVersion; selection: ComparisonSelection; register: RegisterComparison; children?: React.ReactNode }) {
+export default function Comparison({ revisionId, base, target, selection, register, children, canComment, onLine, selectedLine, change, word, discussion, supportsParagraphAlignment = false }: { word?: WordComparisonPresentation; discussion?: ComparisonInlineDiscussion; supportsParagraphAlignment?: boolean; change: (selection: ComparisonSelection) => void; canComment: boolean; onLine: (line: number) => void; selectedLine: number | null; revisionId: string; base: RevisionVersion | null; target: RevisionVersion; selection: ComparisonSelection; register: RegisterComparison; children?: React.ReactNode }) {
   const client = useWorkspace(), { isActive, unavailableObject } = client;
   const before = word ? word.before : base?.files.find(file => file.path === selection.filePath) || null;
   const after = word ? word.after : target.files.find(file => file.path === selection.filePath) || null;
   const paragraphAlignment = supportsParagraphAlignment && !word && !base?.docx && !target.docx && selection.mode === 'words' && selection.paragraphAlignment === true;
   const result = useMemo(() => word ? word.compare(selection.filePath) : paragraphAlignment ? compareParagraphFile(before, after) : compareFile(before, after, selection.mode), [before, after, selection.mode, word, selection.filePath, paragraphAlignment]);
   const aligned = paragraphAlignment && result.status === 'ready' ? result as ReadyParagraphComparison : null;
+  const discussionContext = useMemo<ComparisonDiscussionContext>(() => ({ revisionId, base, target, filePath: selection.filePath }), [revisionId, base, target, selection.filePath]);
+  const supportsDiscussion = Boolean(discussion && !word && !base?.docx && !target.docx && discussion.detail.revision.id === revisionId);
+  const threads = useMemo(() => supportsDiscussion ? comparisonDiscussionThreads(discussion!.detail, discussionContext, result) : [], [supportsDiscussion, discussion?.detail, discussionContext, result]);
+  const shownThreads = useMemo(() => threads.slice(0, INLINE_DISCUSSION_LIMIT), [threads]);
+  const passageSelections = useMemo(() => result.status === 'ready' && supportsDiscussion ? result.passages.map(changed => (['before', 'after'] as const).flatMap(side => {
+    const range = changed[side], version = side === 'before' ? discussionContext.base : discussionContext.target;
+    if (!version || range.start === range.end) return [];
+    return [{ side, range, versionNumber: version.number, passage: comparisonPassage(discussionContext, side, range) }];
+  })) : [], [result, supportsDiscussion, discussionContext]);
+  const latestDiscussion = useRef({ discussion, canComment, shownThreads }); latestDiscussion.current = { discussion, canComment, shownThreads };
   const paragraphMarkers = useMemo(() => {
     const markers = new Map<number, ParagraphMarker[]>();
     aligned?.reordered.forEach((match, index) => {
@@ -160,6 +177,20 @@ export default function Comparison({ revisionId, base, target, selection, regist
       && accessEpoch === client.session?.accessEpoch && sourceGeneration === client.taskSnapshotGeneration()
       && objectGeneration === (client.session?.objectGenerations.get(revisionId) || 0);
   };
+  const commentOn = (side: ComparisonSide, range: ComparisonRange) => {
+    if (!supportsDiscussion || !latestDiscussion.current.canComment || !paragraphCurrent()) return;
+    if (comparisonPassage(discussionContext, side, range).status !== 'ready') return;
+    window.dispatchEvent(new Event('comparison-navigation'));
+    latestDiscussion.current.discussion?.onComment(side, range);
+  };
+  const openThread = (threadId: string) => {
+    if (!supportsDiscussion || !paragraphCurrent() || !latestDiscussion.current.shownThreads.some(placement => placement.thread.id === threadId)) return;
+    window.dispatchEvent(new Event('comparison-navigation'));
+    latestDiscussion.current.discussion?.openThread(threadId);
+  };
+  const threadsBySegment = new Map<number, typeof shownThreads>();
+  for (const placement of shownThreads) threadsBySegment.set(placement.segmentIndex, [...(threadsBySegment.get(placement.segmentIndex) || []), placement]);
+  const lineDiscussion = supportsDiscussion ? { context: discussionContext, placements: shownThreads, onComment: commentOn, openThread } : undefined;
   const paragraphTargetKey = (match: ReorderedParagraph, side: 'before' | 'after') => `${side}:${match.id}`;
   const paragraphTargetId = (number: number, side: 'before' | 'after') => `paragraph-${readerId}-${side}-${number}`;
   const counterpart = (marker: ParagraphMarker) => {
@@ -207,14 +238,17 @@ export default function Comparison({ revisionId, base, target, selection, regist
           <button type="button" className="button" aria-controls={paragraphTargetId(marker.number, side)} disabled={skipped} title={skipped ? 'The counterpart is skipped by the current navigation filter.' : undefined} onClick={() => counterpart(marker)}>Show {side === 'before' ? 'removed' : 'added'} paragraph {marker.number}</button>
         </span>;
       })}
+      {(threadsBySegment.get(index) || []).map(placement => <ComparisonDiscussion key={placement.thread.id} placement={placement} versionNumber={(placement.side === 'before' ? base : target)!.number} openThread={openThread}/>)}
     </Fragment>;
   };
   return <div className="exact-comparison" ref={root}>
     <p className="comparison-identity">{base ? `Version ${base.number}` : 'Empty base'} → Version {target.number} · <strong>{word ? word.scopeLabel(selection.filePath) : selection.filePath}</strong> · {paragraphAlignment ? 'Source paragraph alignment' : selection.mode === 'words' ? 'Literal word comparison' : 'Literal line comparison'}{word ? ' · Word projected text' : ''}</p>
     {aligned && <p className="paragraph-alignment-note">Exact paragraph match; source paragraphs, not rendered structure. {aligned.reordered.length} exact reordered {aligned.reordered.length === 1 ? 'paragraph' : 'paragraphs'}. Added and removed text remains visible.</p>}
+    {supportsDiscussion && selection.view === 'changes' && threads.length > INLINE_DISCUSSION_LIMIT && <p className="comparison-discussion-limit" role="status">Showing {INLINE_DISCUSSION_LIMIT} of {threads.length} discussions anchored to these exact versions and file. All threads remain in Discussion across versions below.</p>}
     {result.status === 'too_large' ? <><div className="comparison-limit"><h3>Comparison too large to render safely</h3><p>{word ? 'No partial comparison is shown. Read or download either projected scope below, or return to the document reader to download the exact Word package.' : 'No partial comparison is shown. Read or download either exact source instead.'}</p><div className="small-actions">{before && <button className="button" onClick={() => { if (!word || word.available()) downloadSource(before, `v${base!.number}`); }}>{word ? 'Download base projected text' : 'Download base source'}</button>}{after && <button className="button" onClick={() => { if (!word || word.available()) downloadSource(after, `v${target.number}`); }}>{word ? 'Download target projected text' : 'Download target source'}</button>}</div>{before && <details><summary>{word ? 'Read base projected text' : 'Read base source'}</summary><pre className="raw-comparison-source">{before.content || (word ? '(Empty projected scope)' : '(Empty file)')}</pre></details>}{after && <details><summary>{word ? 'Read target projected text' : 'Read target source'}</summary><pre className="raw-comparison-source">{after.content || (word ? '(Empty projected scope)' : '(Empty file)')}</pre></details>}</div>{selection.view !== 'changes' && children}</> : <>
       <div className="passage-navigation"><button className="button" disabled={!count || ordinal <= 0} onClick={() => { window.dispatchEvent(new Event('comparison-navigation')); move(ordinal - 1); }}>Previous change</button><span role="status">{count ? `Change ${ordinal + 1} of ${count}` : navigation.skipped ? 'No navigable changes' : word ? 'No projected text changes' : 'No text changes'}{navigation.skipped > 0 ? ` · ${navigation.skipped} space/tab-only ${navigation.skipped === 1 ? 'change' : 'changes'} skipped` : ''}{result.fileChange === 'added' ? word ? ' · Scope added' : ' · File added' : result.fileChange === 'removed' ? word ? ' · Scope removed' : ' · File removed' : ''}</span><button className="button" disabled={!count || ordinal >= count - 1} onClick={() => { window.dispatchEvent(new Event('comparison-navigation')); move(ordinal + 1); }}>Next change</button></div>
-      {selection.view === 'changes' ? selection.mode === 'lines' ? <ComparisonLines projectedWord={Boolean(word)} comparison={result} passageIndex={passageIndex} canComment={canComment && Boolean(after)} onLine={onLine} selectedLine={selectedLine}/> : <div className="prose-diff"><div className="diff-legend"><span><i className="added-key"/>Added text</span><span><i className="removed-key"/>Removed text</span><small>{word ? 'Projected lines cannot receive comments. Use an original Word passage in the document reader.' : 'Source comments attach only to the selected target.'}</small></div><div className="prose-content literal-diff" aria-label={word ? "Selected Word scope comparison" : "Selected file comparison"}>{result.segments.map(literalSegment)}{!result.beforeLength && !result.afterLength && <span className="muted">{word ? result.fileChange === 'added' ? 'Empty scope added.' : result.fileChange === 'removed' ? 'Empty scope removed.' : 'This projected scope is empty on both sides.' : result.fileChange === 'added' ? 'Empty file added.' : result.fileChange === 'removed' ? 'Empty file removed.' : 'This file is empty on both sides.'}</span>}</div></div> : children}
+      {supportsDiscussion && selection.view === 'changes' && (passageSelections[passageIndex]?.length ?? 0) > 0 && <div className="comparison-active-passage-actions" role="group" aria-label="Active change comment actions" data-active-change={passageIndex}>{passageSelections[passageIndex]!.map(choice => <ComparisonPassageComment key={`${passageIndex}:${choice.side}`} {...choice} canComment={canComment} onComment={commentOn}/>)}</div>}
+      {selection.view === 'changes' ? selection.mode === 'lines' ? <ComparisonLines projectedWord={Boolean(word)} comparison={result} passageIndex={passageIndex} canComment={canComment} onLine={onLine} selectedLine={selectedLine} discussion={lineDiscussion}/> : <div className="prose-diff"><div className="diff-legend"><span><i className="added-key"/>Added text</span><span><i className="removed-key"/>Removed text</span><small>{word ? 'Projected lines cannot receive comments. Use an original Word passage in the document reader.' : supportsDiscussion ? 'Comments stay with the exact base or target source version you choose.' : 'Source comments attach only to the selected target.'}</small></div><div className="prose-content literal-diff" aria-label={word ? "Selected Word scope comparison" : "Selected file comparison"}>{result.segments.map(literalSegment)}{!result.beforeLength && !result.afterLength && <span className="muted">{word ? result.fileChange === 'added' ? 'Empty scope added.' : result.fileChange === 'removed' ? 'Empty scope removed.' : 'This projected scope is empty on both sides.' : result.fileChange === 'added' ? 'Empty file added.' : result.fileChange === 'removed' ? 'Empty file removed.' : 'This file is empty on both sides.'}</span>}</div></div> : children}
     </>}
   </div>;
 }

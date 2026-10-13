@@ -107,7 +107,8 @@ test('empty replacement explicitly deletes only the selected passage', async ({ 
 });
 
 test('replacement drafts survive reload, require retarget confirmation and preserve newer text after a late save', async ({ page }, info) => {
-  await createDraft(page, info, 'Alpha original.\nBeta original.\n');
+  const source = 'Alpha original.\nBeta original.\n';
+  await createDraft(page, info, source);
   await selectLine(page, 1);
   const toggle = page.getByRole('checkbox', { name: 'Suggest an edit', exact: true });
   await toggle.check();
@@ -132,6 +133,7 @@ test('replacement drafts survive reload, require retarget confirmation and prese
   await expect(page.getByLabel('Suggested replacement', { exact: true })).toHaveValue('Beta proposed.');
   const explanation = 'Improve the second sentence.';
   await page.getByRole('textbox', { name: 'Review comment', exact: true }).fill(explanation);
+  const revisionHash = new URL(page.url()).hash, sourceVersionId = await page.getByLabel('Comment version', { exact: true }).inputValue();
   let release!: () => void; let started!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const intercepted = new Promise<void>(resolve => { started = resolve; });
@@ -142,16 +144,29 @@ test('replacement drafts survive reload, require retarget confirmation and prese
     await intercepted;
     await expect(page.getByLabel('Suggested replacement', { exact: true })).toBeDisabled();
     await page.getByRole('button', { name: /^Review evidence/ }).click();
+    await expect(page.locator('.comment-form')).toHaveCount(1);
+    await expect(page.getByLabel('Suggested replacement', { exact: true })).toBeDisabled();
     await page.getByRole('button', { name: /^Discussion/ }).click();
+    await expect(page.locator('.comment-form')).toHaveCount(1);
+    await expect(page.getByLabel('Suggested replacement', { exact: true })).toBeDisabled();
+    await page.goto('./#home'); await expect(page.locator('.comment-form')).toHaveCount(0);
+    await page.goto(`./${revisionHash}`);
+    await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+    await expect(page.getByLabel('Comment version', { exact: true })).toHaveValue(sourceVersionId);
+    await expect(page.getByLabel('Source passage text', { exact: true })).toHaveJSProperty('textContent', source);
+    await expect(page.getByLabel('Suggested replacement', { exact: true })).toBeEnabled();
+    await expect(page.locator('.comment-target .thread-quotation')).toHaveText('Beta original.');
     await page.getByLabel('Suggested replacement', { exact: true }).fill('Beta newer unsaved proposal.');
-    release();
+    const refreshed = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith('/api/state'));
+    release(); await (await refreshed).finished(); await page.unrouteAll({ behavior: 'wait' });
     const thread = page.locator('.review-thread').filter({ hasText: explanation });
     await expect(thread.locator('.suggestion-replacement')).toHaveText('Beta proposed.');
     await expect(page.getByLabel('Suggested replacement', { exact: true })).toHaveValue('Beta newer unsaved proposal.');
-    await page.unroute(pattern);
     await page.reload();
+    await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+    await expect(page.getByLabel('Comment version', { exact: true })).toHaveValue(sourceVersionId);
     await expect(page.getByLabel('Suggested replacement', { exact: true })).toHaveValue('Beta newer unsaved proposal.');
     await expect(page.getByRole('textbox', { name: 'Review comment', exact: true })).toHaveValue(explanation);
     await expect(thread).toHaveCount(1);
-  } finally { release(); }
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
 });

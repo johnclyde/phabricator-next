@@ -57,8 +57,8 @@ export interface DiscussionController { identity: string; revisionId: string; ex
 export type RegisterDiscussion = (controller: DiscussionController | null) => void;
 const ignoreRegistration: RegisterDiscussion = () => {};
 
-export default function ReviewThreads({ stagePrivate, canStagePrivate, principals, detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, register = ignoreRegistration }: { stagePrivate: StagePrivateReview; canStagePrivate: boolean; detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null, wordPassage?: DocxPassageAnchor) => void; register?: RegisterDiscussion; principals: PublicAccount[] }) {
-  const { isActive, unavailableObject } = useWorkspace();
+export default function ReviewThreads({ focusRequest, stagePrivate, canStagePrivate, principals, detail, version, online, canEdit, canInteract, mutate, saved, suggestionApplied, openSource, register = ignoreRegistration }: { focusRequest?: { threadId: string; nonce: number } | null; stagePrivate: StagePrivateReview; canStagePrivate: boolean; detail: RevisionDetail; version: RevisionVersion; online: boolean; canEdit: boolean; canInteract: boolean; mutate: Mutate; saved: () => Promise<void>; suggestionApplied: () => Promise<void>; openSource: (versionId: string, filePath: string | null, line: number | null, wordPassage?: DocxPassageAnchor) => void; register?: RegisterDiscussion; principals: PublicAccount[] }) {
+  const client = useWorkspace(), { isActive, unavailableObject } = client;
   const [filter, setFilter] = useState<DiscussionFilter>('all'); const filterRef = useRef(filter); filterRef.current = filter;
   const [selected, setSelected] = useState<string | null>(null); const selectedRef = useRef(selected); selectedRef.current = selected;
   const [includeCollapsed, setIncludeCollapsed] = useState(false); const [boundary, setBoundary] = useState('');
@@ -66,14 +66,18 @@ export default function ReviewThreads({ stagePrivate, canStagePrivate, principal
   const preferences = useDiscussionPreferences(detail.revision.id, threads.map(thread => thread.id), online, detail.accessEpoch);
   const shown = filterDiscussionThreads(threads, filter);
   const root = useRef<HTMLDivElement>(null); const frame = useRef<number | null>(null); const alive = useRef(true);
+  const frameGeneration = useRef(0), currentFocusRequest = useRef(focusRequest); currentFocusRequest.current = focusRequest;
   const active = () => alive.current && isActive() && !unavailableObject(detail.revision.id);
   const identity = () => JSON.stringify([detail.revision.id, version.id, version.contentHash, filterRef.current, selectedRef.current, includeCollapsed, threads.map(thread => [thread.id, thread.version, thread.status, preferences.collapsed(thread.id)])]);
-  const moveFocus = (id: string | null) => {
+  const moveFocus = (id: string | null, requested?: { threadId: string; nonce: number }) => {
+    const ticket = ++frameGeneration.current;
     if (frame.current !== null) cancelAnimationFrame(frame.current);
-    if (!id) return; const expected = identity();
-    frame.current = requestAnimationFrame(() => { frame.current = null; if (!active() || expected !== currentIdentity.current()) return; const element = [...(root.current?.querySelectorAll<HTMLElement>('[data-thread-id]') || [])].find(item => item.dataset.threadId === id); element?.focus({ preventScroll: true }); element?.scrollIntoView({ block: 'nearest', behavior: 'instant' }); });
+    if (!id) return; const expected = identity(), epoch = client.session?.accessEpoch, generation = client.taskSnapshotGeneration(), objectGeneration = client.session?.objectGenerations.get(detail.revision.id) || 0;
+    frame.current = requestAnimationFrame(() => { if (ticket !== frameGeneration.current) return; frame.current = null; if (!active() || expected !== currentIdentity.current() || epoch !== client.session?.accessEpoch || generation !== client.taskSnapshotGeneration() || objectGeneration !== (client.session?.objectGenerations.get(detail.revision.id) || 0)
+      || (requested && (requested.nonce !== currentFocusRequest.current?.nonce || requested.threadId !== currentFocusRequest.current?.threadId))) return;
+      const element = [...(root.current?.querySelectorAll<HTMLElement>('[data-thread-id]') || [])].find(item => item.dataset.threadId === id); element?.focus({ preventScroll: true }); element?.scrollIntoView({ block: 'nearest', behavior: 'instant' }); });
   };
-  const select = (id: string | null) => { selectedRef.current = id; setSelected(id); moveFocus(id); };
+  const select = (id: string | null, requested?: { threadId: string; nonce: number }) => { selectedRef.current = id; setSelected(id); moveFocus(id, requested); };
   const execute = (action: DiscussionVoiceAction): { text: string; identity: string } => {
     if (!active()) return { text: 'This discussion is unavailable.', identity: identity() };
     const visible = filterDiscussionThreads(threads, filterRef.current); const current = selectedRef.current;
@@ -93,6 +97,14 @@ export default function ReviewThreads({ stagePrivate, canStagePrivate, principal
   const latest = useRef(execute); latest.current = execute;
   const manual = (action: DiscussionVoiceAction) => { if (!active()) return; window.dispatchEvent(new Event('discussion-navigation')); return latest.current(action); };
   const currentIdentity = useRef(identity); currentIdentity.current = identity;
+  const consumedFocus = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focusRequest || consumedFocus.current === focusRequest.nonce || !active() || !threads.some(thread => thread.id === focusRequest.threadId)) return;
+    consumedFocus.current = focusRequest.nonce;
+    window.dispatchEvent(new Event('discussion-navigation'));
+    filterRef.current = 'all'; setFilter('all'); setBoundary('');
+    select(focusRequest.threadId, focusRequest);
+  }, [focusRequest]);
   const context = identity();
   useLayoutEffect(() => { register({ get identity() { return currentIdentity.current(); }, revisionId: detail.revision.id, execute: action => latest.current(action) }); }, [context, register]);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; if (frame.current !== null) cancelAnimationFrame(frame.current); register(null); }; }, [register]);

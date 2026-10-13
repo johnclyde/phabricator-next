@@ -1312,6 +1312,25 @@
 .paragraph-reorder button { min-height: 44px; white-space: normal; }
 .paragraph-match-text { border-bottom: 2px dotted #5c7695; }
 .paragraph-match-text:focus { outline: 2px solid #496e8a; outline-offset: 2px; }
+.literal-line-diff.has-inline-discussion .old-number { display: table-cell; }
+.comparison-active-passage-actions { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 4px 18px; border-bottom: 1px solid var(--border); background: #f9fbfc; }
+.comparison-passage-comment { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; white-space: normal; font: 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.comparison-passage-comment button { min-height: 44px; white-space: normal; text-align: left; }
+.comparison-comment-unavailable, .comparison-discussion-limit { padding: 8px 12px; margin: 0; font-size: 12px; line-height: 1.5; white-space: normal; color: #617487; }
+.comparison-discussion { margin: 12px 0; padding: 12px; border: 1px solid #bbcbd8; border-left: 3px solid #6e8ea7; border-radius: 3px; background: #f5f8fb; color: #354b5c; font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; white-space: normal; min-width: 0; max-width: 100%; }
+.comparison-discussion header, .comparison-discussion footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; }
+.comparison-discussion footer { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 10px; }
+.comparison-discussion button { min-height: 44px; }
+.comparison-discussion-quote { margin: 10px 0; padding: 6px 10px; border-left: 2px solid #bfccd7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comparison-discussion-message p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 10px; }
+.comparison-discussion-reply { padding-left: 10px; border-left: 1px solid #ccd6df; }
+.comparison-discussion-row > td { padding: 8px 12px; white-space: normal; background: #f9fbfc; }
+.comparison-discussion-row .comparison-discussion { width: min(680px, calc(100vw - 90px)); }
+.comparison-comment-composer .comment-form { margin-top: 0; }
+.comment-version-choice { padding: 12px 16px; border-bottom: 1px solid var(--border); background: #f6f8fa; }
+.comment-version-choice label { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-weight: 600; }
+.comment-version-choice select { min-height: 44px; max-width: 100%; }
+.comment-version-choice p { margin: 8px 0 0; }
 @media (max-width: 700px) {
   .paragraph-alignment-note { padding-inline: 12px; }
   .paragraph-reorder { font-size: 12px; gap: 4px 8px; }

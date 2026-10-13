@@ -146,7 +146,7 @@ test('a held comment writer reports tab-only retention until its exact bytes are
   } finally { await page.evaluate(() => (window as unknown as { releaseCommentWriter?: () => void }).releaseCommentWriter?.()); }
 });
 
-test('a committed root comment refreshes after a version remount without replacing its newer draft', async ({ page, request, baseURL }) => {
+test('a committed root comment refreshes after a route remount without replacing its newer draft', async ({ page, request, baseURL }) => {
   const detail = await create(request, baseURL!), id = detail.revision.id, versionId = detail.versions[0]!.id, key = `comment-source:${id}:${versionId}`;
   const response = await request.post(new URL(`api/revisions/${id}/versions`, baseURL).href, { data: { expectedVersion: 1, files: [{ path: 'motion.md', content: 'Second immutable source.\n' }], message: 'Second version for remount.' } });
   expect(response.ok(), await response.text()).toBe(true);
@@ -159,16 +159,24 @@ test('a committed root comment refreshes after a version remount without replaci
   try {
     await page.getByRole('button', { name: 'Add Comment', exact: true }).click(); await submitted;
     await expect(page.getByLabel('Review comment', { exact: true })).toBeDisabled();
-    await page.getByLabel('Version to inspect', { exact: true }).selectOption('2'); await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('');
-    await page.getByLabel('Version to inspect', { exact: true }).selectOption('1'); await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('This root comment is committed.');
+    await page.goto('./#home'); await expect(page.locator('.comment-form')).toHaveCount(0);
+    await page.goto(`./#${id}`);
+    await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+    await expect(page.getByLabel('Comment version', { exact: true })).toHaveValue(versionId);
+    await expect(page.getByLabel('Review comment', { exact: true })).toBeEnabled();
+    await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('This root comment is committed.');
     await page.getByLabel('Review comment', { exact: true }).fill('A newer unsent root comment survives.');
-    release();
+    const refreshed = page.waitForResponse(result => result.request().method() === 'GET' && new URL(result.url()).pathname.endsWith('/api/state'));
+    release(); await (await refreshed).finished(); await page.unrouteAll({ behavior: 'wait' });
     await expect(page.locator('.comment .remarkup-content').getByText('This root comment is committed.', { exact: true })).toBeVisible();
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+    await expect(page.getByLabel('Comment version', { exact: true })).toHaveValue(versionId);
     await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('A newer unsent root comment survives.');
     await expect(page.locator('.comment-target')).toContainText('motion.md:1');
     await expect.poll(() => retained(page, key)).toEqual({ body: 'A newer unsent root comment survives.', versionId, filePath: 'motion.md', line: 1 });
-    await page.unrouteAll({ behavior: 'wait' }); await page.reload();
+    await page.reload();
+    await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+    await expect(page.getByLabel('Comment version', { exact: true })).toHaveValue(versionId);
     await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('A newer unsent root comment survives.');
     await expect(page.locator('.comment .remarkup-content').getByText('This root comment is committed.', { exact: true })).toHaveCount(1);
   } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }

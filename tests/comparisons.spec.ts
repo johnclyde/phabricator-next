@@ -63,7 +63,9 @@ test('arbitrary comparisons retain exact pair and file across refresh and offlin
   await page.getByLabel('Source file', { exact: true }).selectOption('motion.md');
   await page.getByLabel('Comparison mode', { exact: true }).selectOption('lines');
   await page.getByRole('button', { name: 'Comment on line 1', exact: true }).click();
-  await expect(page.locator('.comment-target')).toContainText('motion.md:1');
+  await expect(page.getByLabel('Comment version', { exact: true })).toHaveValue(detail.versions[0]!.id);
+  await expect(page.locator('.comment-target')).toContainText('motion.md');
+  await expect(page.locator('.comment-target .thread-quotation')).toHaveText('First short claim.');
   await add(request, baseURL!, id, 2, [{ path: 'latest.txt', content: 'Unrelated latest source' }]);
   await page.reload();
   await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
@@ -151,26 +153,35 @@ test('missing or mismatched stored identities are explicit and large comparisons
 
 test('a delayed saved version cannot erase a newer remounted draft or change its selected comparison', async ({ page, request, baseURL }) => {
   const detail = await create(request, baseURL!, [{ path: 'motion.md', content: 'Original text' }]); await open(page, detail.revision.id);
-  let release!: () => void; let received!: () => void;
+  let release!: () => void; let received!: () => void; let detailReceived!: () => void;
   const pending = new Promise<void>(resolve => { received = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
-  await page.route(`**/api/revisions/${detail.revision.id}/versions`, async route => { const response = await route.fetch(); received(); await gate; await route.fulfill({ response }); });
+  const detailPending = new Promise<void>(resolve => { detailReceived = resolve; }), handled: Promise<void>[] = [];
+  await page.route(`**/api/revisions/${detail.revision.id}/versions`, route => {
+    const completion = (async () => { const response = await route.fetch(); received(); await gate; await route.fulfill({ response }); })();
+    handled.push(completion); return completion;
+  });
   try {
     await page.getByRole('button', { name: 'Edit & add version', exact: true }).click(); await page.getByRole('textbox', { name: 'File content', exact: true }).fill('Submitted text'); await page.getByRole('textbox', { name: 'What changed?', exact: true }).fill('Submitted revision');
     await page.getByRole('button', { name: 'Save New Version', exact: true }).click(); await pending;
     await expect(page.getByRole('textbox', { name: 'File content', exact: true })).toBeDisabled();
     await page.goto('./#drafts'); await expect(page.locator('.version-editor')).toHaveCount(0);
-    await page.route(`**/api/revisions/${detail.revision.id}`, async route => { const response = await route.fetch(); await gate; await route.fulfill({ response }); });
+    await page.route(`**/api/revisions/${detail.revision.id}`, route => {
+      const completion = (async () => { const response = await route.fetch(); detailReceived(); await gate; await route.fulfill({ response }); })();
+      handled.push(completion); return completion;
+    });
     await page.goto(`./#${detail.revision.id}`);
+    await detailPending;
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
     await page.getByRole('button', { name: 'Edit & add version', exact: true }).click();
     await page.getByRole('textbox', { name: 'File content', exact: true }).fill('Newer unsaved text');
     await page.getByRole('textbox', { name: 'What changed?', exact: true }).fill('Newer unsaved message');
-    release(); await page.unrouteAll({ behavior: 'wait' });
+    release(); await Promise.all(handled);
+    await expect(page.getByLabel('Version to inspect', { exact: true }).locator('option[value="2"]')).toHaveCount(1);
     await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
     await expect(page.getByRole('textbox', { name: 'File content', exact: true })).toHaveValue('Newer unsaved text');
     const retained = await page.evaluate(id => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.endsWith(`:version-draft:${id}:1`))!)!), detail.revision.id);
     expect(retained.files[0].content).toBe('Newer unsaved text'); expect(retained.message).toBe('Newer unsaved message');
-  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+  } finally { release(); await Promise.all(handled); await page.unrouteAll({ behavior: 'wait' }); }
 });
 
 test('late post-save detail refresh cannot replace a comparison chosen while it was pending', async ({ page, request, baseURL }) => {
