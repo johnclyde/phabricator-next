@@ -230,7 +230,7 @@ function schemaEleven(path:string):Map<string,unknown[]> {
 test('schema 12 migrates actual schema 11 into root hierarchy without changing any historical/profile/member/policy/replay bytes',()=>{
   const directory=mkdtempSync(join(tmpdir(),'phab-hierarchy-migrate-'));const path=join(directory,'workspace.sqlite');const old=schemaEleven(path);let store=new Store({path});
   try{
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,38);for(const [table,rows]of old)assert.deepEqual(raw(store,table),rows,table);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,39);for(const [table,rows]of old)assert.deepEqual(raw(store,table),rows,table);
     const project=store.getProject('PROJ1');assert.equal(project.kind,'project');assert.equal(project.parentId,null);assert.equal(project.milestoneNumber,null);assert.equal(project.depth,0);assert.equal(project.hierarchyVersion,1);assert.equal(project.membershipMode,'direct');assert.equal(project.displayName,project.name);
     assert.equal(store.projectPreferences('PROJ1','alice').membership.version,3);assert.equal(store.projectPreferences('PROJ1','bob').membership.version,2);assert.equal(store.projectPreferences('PROJ1','alice').watching.version,2);assert.equal(store.projectPreferences('PROJ1','alice').silence.version,1);assert.equal(store.projectMembers('PROJ1','alice').collectionVersion,5);
     const baseline=store.projectHistory('PROJ1').transactions[0]!.snapshot!;assert.equal(baseline.kind,undefined);assert.equal(baseline.parentId,undefined);assert.deepEqual(store.taskDetail('T1').task.projectIds,['PROJ1']);

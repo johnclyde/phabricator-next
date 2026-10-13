@@ -74,3 +74,11 @@
   .automation-properties { grid-template-columns: 1fr; gap: 4px; }
   .automation-properties dd { margin-bottom: 8px; }
 }
+
+.revision-landing { margin-top: 18px; }
+.automation-status-landed, .automation-status-prepared { background: #e7f5ea; color: #287443; }
+.automation-status-conflict { background: #fcebed; color: #a83c48; }
+.automation-status-cancelled { background: #eef0f3; color: #637184; }
+
+.landing-identities { margin-top: 16px; }
+.landing-identities > summary { display: list-item; cursor: pointer; padding: 12px 0; font-weight: 600; min-height: 44px; box-sizing: border-box; }

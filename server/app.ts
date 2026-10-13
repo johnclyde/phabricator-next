@@ -1,3 +1,5 @@
+import { LandingService } from './landing.ts';
+import type { LocalLandingBinding } from './git-landing.ts';
 import { Automation, type AutomationConfiguration } from './automation.ts';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
@@ -50,6 +52,7 @@ import { revisionViewInput, type RevisionViewAction, type RevisionViewInput } fr
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
   automation?: AutomationConfiguration;
+  landingBindings?: readonly LocalLandingBinding[];
   store?: Store;
   databasePath?: string;
   seed?: boolean;
@@ -71,7 +74,7 @@ export interface AppOptions {
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
-export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; automation: Automation; close: () => Promise<void> }
+export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; automation: Automation; landing: LandingService; close: () => Promise<void> }
 
 function security(req: IncomingMessage, res: ServerResponse, configuredPort: number, hosting: HostedOrigin | undefined, basePath: string): void {
   assertHostingRequest(req, configuredPort, hosting, basePath);
@@ -194,6 +197,7 @@ export function createApp(options: AppOptions = {}): App {
   } });
   const automation = new Automation(store, auth, policies, options.automation);
   automation.start();
+  const landing = new LandingService(store, auth, policies, automation, options.landingBindings);
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null);
@@ -322,6 +326,13 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
+    const revisionLanding = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/landings$/.exec(path);
+    if (method === 'POST' && revisionLanding) {
+      if (closing) throw new HttpError(503, 'The application is shutting down.');
+      return trackDocxWork(landing.prepare(revisionLanding[1]!, input, rawKey, context, signal));
+    }
+    const landingCommand = /^\/api\/landings\/(LAND-[a-f0-9-]+)\/commands$/.exec(path);
+    if (method === 'POST' && landingCommand) return landing.command(landingCommand[1]!, input, rawKey, context);
     if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/')) {
       let commit;
       if (method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases') && input && typeof input === 'object' && 'repositoryId' in input) {
@@ -873,6 +884,20 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, bootstrap.session); return;
       }
       if (req.method === 'GET') {
+        const revisionLanding = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/landings$/.exec(path);
+        if (revisionLanding) {
+          store.read(() => { auth.revalidate(context, 'read'); new AccessLayer(store, auth, policies, context).require(revisionLanding[1]!); });
+          if (url.search) throw new HttpError(400, 'Landing lists do not accept query parameters.');
+          if (closing) throw new HttpError(503, 'The application is shutting down.');
+          const controller = new AbortController(), abort = () => controller.abort(), close = () => { if (!res.writableEnded) abort(); };
+          gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+          if (req.aborted || res.destroyed) abort();
+          try { const result = await trackDocxWork(landing.snapshotForReader(revisionLanding[1]!, context, controller.signal)); if (!res.destroyed) send(res, 200, result); }
+          finally { gitReads.delete(controller); req.off('aborted', abort); res.off('close', close); }
+          return;
+        }
+        const landingDetail = /^\/api\/landings\/(LAND-[a-f0-9-]+)$/.exec(path);
+        if (landingDetail) { const detail = landing.detail(landingDetail[1]!, context); if (url.search) throw new HttpError(400, 'Landing details do not accept query parameters.'); send(res, 200, detail); return; }
         const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|blame|history|compare(?:\/(?:file|patch))?)|\/(commits)\/([^/]+))?$/.exec(path);
         if (repository) { await repositoryRead(req, res, context, repository[1]!, repository[2] ?? repository[3], repository[4], url); return; }
         const docxInspection = /^\/api\/files\/(F[1-9]\d{0,14})\/docx$/.exec(path);
@@ -1340,7 +1365,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases' || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
+      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
@@ -1361,7 +1386,7 @@ export function createApp(options: AppOptions = {}): App {
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   let closing: Promise<void> | undefined;
-  return { server, store, auth, policies, paperBuilds, automation, close: () => closing ??= (async () => {
+  return { server, store, auth, policies, paperBuilds, automation, landing, close: () => closing ??= (async () => {
     for (const controller of gitReads) controller.abort();
     await automation.close();
     await paperBuilds.close();

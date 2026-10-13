@@ -1,3 +1,5 @@
+import { resolveRevisionPatch, revisionPatchIdentity } from './revision-patch.ts';
+import type { RevisionPatchPayload } from '../shared/revision-patch.ts';
 import { DrydockStore } from './drydock.ts';
 import { GitAutomationStore, parseGitReceiveFacts } from './git-automation.ts';
 import { heraldPolicyObjectId } from '../shared/git-automation.ts';
@@ -7,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DrydockBinding, DrydockBlueprint, DrydockLeaseDetail, DrydockAuthorization, DrydockClaim } from '../shared/drydock.ts';
 import type { AuthContext } from '../shared/auth.ts';
 import type { Activity, RevisionVersion, WikiVersion } from '../shared/types.ts';
+import type { BuildClaim, Buildable } from '../shared/harbormaster.ts';
 import type { HeraldRule, HeraldSnapshot, HeraldTranscript } from '../shared/herald.ts';
 import type { GitCommitResult } from '../shared/repositories.ts';
 import type { Auth } from './auth.ts';
@@ -50,6 +53,7 @@ export class Automation {
     this.git = new GitAutomationStore(store.database, this.herald);
     this.drydock = new DrydockStore(store.database, {
       authorize: (actor, id, write) => this.authorize(actor, id, write),
+      revisionPatch: (id, versionId, contentHash, actor) => this.revisionPatch(id, versionId, contentHash, actor),
       mayManage: (actor, blueprint) => this.drydockManager(actor, blueprint),
       allowBinding: blueprint => { const binding = this.config.drydockBindings?.find(item => item.key === blueprint.binding && item.worker === blueprint.worker && item.repositoryIds.includes(blueprint.repositoryId)); if (!binding || !this.config.drydockWorkers?.[binding.worker]?.length) throw new HttpError(403, 'This Drydock binding is not configured by the operator.'); },
       worker: (actor, label) => { const allowed = this.config.drydockWorkers?.[label]; if (!allowed || !this.boundListed(actor.principalId, allowed)) throw new HttpError(403, 'This account is not configured as this Drydock worker.'); },
@@ -57,6 +61,7 @@ export class Automation {
     });
     this.harbormaster = new HarbormasterStore(store.database, {
       authorize: (actor, id, write) => this.authorize(actor, id, write),
+      revisionPatch: (id, versionId, contentHash, actor) => this.revisionPatch(id, versionId, contentHash, actor),
       mayManagePlan: actor => this.manager(actor.principalId),
       source: (id, versionId, contentHash) => {
         const detail = store.detail(id), version = detail.versions.find(version => version.id === versionId && version.contentHash === contentHash);
@@ -72,8 +77,13 @@ export class Automation {
     });
     store.configureAutomation(events => this.capture(events));
   }
+  revisionPatch(id:string,versionId:string,contentHash:string,actor:BuildAuthority,write=true):RevisionPatchPayload {
+    this.authorize(actor,id,write);const detail=this.store.detail(id),repositoryId=detail.revision.repositoryId;
+    if(!repositoryId)throw new HttpError(409,'Import a complete Git text tree before requesting a revision working copy.');
+    this.authorize(actor,repositoryId,write);return resolveRevisionPatch(repositoryId,detail.versions,versionId,contentHash);
+  }
   private drydockManager(actor: BuildAuthority, blueprint: DrydockBlueprint | null): boolean { return this.enabled(actor.principalId) && (this.manager(actor.principalId) || blueprint?.ownerId === actor.principalId); }
-  private canManageLease(detail: DrydockLeaseDetail, context: AuthContext): boolean { return context.scopes.includes('write') && this.policies.access(detail.lease.source.repositoryId, context.principalId).edit && (detail.lease.holderId === context.principalId || this.drydockManager(context, this.drydock.blueprint(detail.lease.blueprintId, context))); }
+  private canManageLease(detail: DrydockLeaseDetail, context: AuthContext): boolean { return context.scopes.includes('write') && this.policies.access(detail.lease.source.repositoryId, context.principalId).edit && (!detail.lease.source.revisionPatch || this.policies.access(detail.lease.source.revisionPatch.revisionId, context.principalId).edit) && (detail.lease.holderId === context.principalId || this.drydockManager(context, this.drydock.blueprint(detail.lease.blueprintId, context))); }
   private httpActor(): BuildActor {
     const selected = this.config.httpWorker;
     const account = selected ? this.store.database.prepare('SELECT id,display_name FROM auth_accounts WHERE (id=? OR username=?) AND disabled=0').get(selected, selected) as { id: string; display_name: string } | undefined : undefined;
@@ -106,6 +116,10 @@ export class Automation {
     this.policies.require(facts.repositoryId, context.principalId, 'edit'); this.policies.require(facts.repositoryId, facts.pusherId, 'edit'); return true;
   }
   private policyObject(id: string): string { return this.git.policyObjectId(id) ?? id; }
+  /** Trusted local landing facts, collected by the configured Git transport. */
+  landingReceive(facts:GitReceiveFacts,actor:BuildActor):GitReceiveReceipt {
+    return this.git.receive(facts,{...this.hooks(),canReceive:value=>{this.authorize(actor,value.repositoryId,true);if(value.pusherId!==actor.principalId)throw new HttpError(403,'The landing pusher changed.');return true;},projectIds:()=>[]});
+  }
   private hooks() { return {
     canEvaluate: (rule: HeraldRule, snapshot: HeraldSnapshot) => this.enabled(rule.authorId) && this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId).view && (!snapshot.git || rule.actions.every(action => action.type === 'nothing') || this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId).edit) && (rule.ruleType !== 'global' || this.manager(rule.authorId)) && (rule.ruleType !== 'object' || Boolean(rule.objectId && this.policies.access(rule.objectId, rule.authorId).edit)),
     canApply: (rule: HeraldRule, action: Parameters<typeof canApplyHeraldAction>[5], snapshot: HeraldSnapshot) => snapshot.git ? this.enabled(rule.authorId) && this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId)[action.type === 'nothing' ? 'view' : 'edit'] : canApplyHeraldAction(this.store, this.auth, this.policies, this.harbormaster, rule, action, snapshot),
@@ -168,6 +182,8 @@ export class Automation {
   read(path: string, query: URLSearchParams, context: AuthContext): unknown {
     this.auth.revalidate(context, 'read'); const accessEpoch = this.policies.epoch(), canManage = this.manager(context.principalId) && context.scopes.includes('write');
     const number = (name: string) => query.has(name) ? integer(Number(query.get(name)), name) : undefined;
+    const patch=/^\/api\/drydock\/revision-patches\/([DPL][1-9]\d*)$/.exec(path);
+    if(patch){if([...query.keys()].some(key=>!['versionId','contentHash'].includes(key)||query.getAll(key).length!==1))throw new HttpError(400,'Unsupported revision patch query parameters.');const payload=this.revisionPatch(patch[1]!,string(query.get('versionId'),'Version ID',100),string(query.get('contentHash'),'Content hash',64),context,false);return {revisionPatch:revisionPatchIdentity(payload),repositoryId:payload.repositoryId,accessEpoch};}
     const allowed = path === '/api/drydock/worker/jobs' ? ['worker'] : path === '/api/herald/receives' ? ['repositoryId', 'before', 'limit'] : path === '/api/herald/rules' ? ['before', 'limit', 'contentType', 'enabled'] : path === '/api/herald/transcripts' ? ['before', 'limit', 'objectId'] : path.endsWith('/history') ? ['before', 'limit'] : path === '/api/harbormaster/builds' ? ['revisionId', 'objectId'] : [];
     if ([...query.keys()].some(key => !allowed.includes(key) || query.getAll(key).length !== 1)) throw new HttpError(400, 'Unsupported automation query parameters.');
     if (path.startsWith('/api/drydock/')) {
@@ -207,7 +223,7 @@ export class Automation {
       return { builds, buildables, accessEpoch };
     }
     const build = /^\/api\/harbormaster\/builds\/([^/]+)$/.exec(path);
-    if (build) { const detail = this.harbormaster.detail(build[1]!, context); return { ...detail, accessEpoch, canManage: context.scopes.includes('write') && this.policies.access((detail.buildable.revisionId ?? detail.buildable.repositoryId)!, context.principalId).edit }; }
+    if (build) { const detail = this.harbormaster.detail(build[1]!, context); return { ...detail, accessEpoch, canManage: context.scopes.includes('write') && this.policies.access((detail.buildable.revisionId ?? detail.buildable.repositoryId)!, context.principalId).edit && (!detail.buildable.revisionPatch || this.policies.access(detail.buildable.repositoryId!, context.principalId).edit) }; }
     throw new HttpError(404, 'Automation endpoint not found.');
   }
   mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, commit?: GitCommitResult): MutationResponse {
@@ -223,6 +239,11 @@ export class Automation {
         if (method === 'POST' && blueprint?.[2]) { const authorization = this.drydock.requestAuthorization(blueprint[1]!, input, context); return { status: 201, body: { authorization, accessEpoch, canManage: this.drydockManager(context, this.drydock.blueprint(authorization.blueprintId, context)) } }; }
         const authorization = /^\/api\/drydock\/authorizations\/([^/]+)\/commands$/.exec(path);
         if (method === 'POST' && authorization) return { status: 200, body: { authorization: this.drydock.authorizationCommand(authorization[1]!, input, context), accessEpoch, canManage: true } };
+        if (method === 'POST' && path === '/api/drydock/leases' && input && typeof input === 'object' && 'revisionId' in input) {
+          const {revisionId,versionId,contentHash,...data}=object(input,['revisionId','versionId','contentHash','blueprintId','blueprintVersion','durationSeconds']);
+          const patch=this.revisionPatch(string(revisionId,'Revision ID',100),string(versionId,'Version ID',100),string(contentHash,'Content hash',64),context);
+          const detail=this.drydock.requestRevision(patch,data,context);return {status:201,body:{...detail,accessEpoch,canManage:this.canManageLease(detail,context)}};
+        }
         if (method === 'POST' && path === '/api/drydock/leases') { const { repositoryId, commitId, ...data } = object(input, ['repositoryId', 'commitId', 'blueprintId', 'blueprintVersion', 'durationSeconds']); if (!commit || commit.repositoryId !== repositoryId || commit.commit.id !== commitId) throw new HttpError(400, 'Select a verified immutable Git commit.'); const detail = this.drydock.request(commit, data, context); return { status: 201, body: { ...detail, accessEpoch, canManage: this.canManageLease(detail, context) } }; }
         const lease = /^\/api\/drydock\/leases\/([^/]+)\/(commands|claim|report)$/.exec(path);
         if (method === 'POST' && lease) { const result = lease[2] === 'commands' ? this.drydock.command(lease[1]!, input, context) : lease[2] === 'claim' ? this.drydock.claim(lease[1]!, input, context) : this.drydock.report(lease[1]!, input, context); return { status: 200, body: { ...result, accessEpoch, canManage: lease[2] === 'commands' } }; }
@@ -261,9 +282,11 @@ export class Automation {
       throw new HttpError(404, 'Automation endpoint not found.');
     }, authorize, response => {
       // A replay is private to its principal, but object access may have changed.
-      const value = response.body as Partial<DrydockLeaseDetail & DrydockClaim> & { blueprint?: DrydockBlueprint; authorization?: DrydockAuthorization; transcript?: HeraldTranscript; buildable?: { revisionId: string | null; repositoryId: string | null }; source?: RevisionVersion; rule?: HeraldRule; receive?: GitReceiveReceipt };
+      const value = response.body as Partial<DrydockLeaseDetail & DrydockClaim> & { blueprint?: DrydockBlueprint; authorization?: DrydockAuthorization; transcript?: HeraldTranscript; buildable?: Buildable; source?: RevisionVersion; target?: BuildClaim['target']; leaseToken?: string; rule?: HeraldRule; receive?: GitReceiveReceipt };
       const id = value.transcript?.objectId ?? value.buildable?.revisionId ?? value.buildable?.repositoryId ?? value.source?.revisionId;
       if (id) this.policies.require(this.policyObject(id), context.principalId, 'view');
+      if (value.buildable?.revisionPatch) this.policies.require(value.buildable.repositoryId!, context.principalId, 'view');
+      if (value.target && value.leaseToken && path.endsWith('/claim')) this.harbormaster.revalidateClaim(value as unknown as BuildClaim, context);
       if (value.receive) this.policies.require(value.receive.repositoryId, context.principalId, 'view');
       if (value.blueprint) this.drydock.blueprint(value.blueprint.id, context);
       if (value.authorization) this.drydock.authorization(value.authorization.id, context);

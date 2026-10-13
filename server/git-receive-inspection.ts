@@ -14,7 +14,10 @@ const fail = (message: string): never => { throw new Error(message); };
 const utf8 = (data: Buffer) => new TextDecoder('utf-8', { fatal: true }).decode(data);
 const oid = (value: string, length: number) => new RegExp(`^[0-9a-f]{${length}}$`).test(value);
 
-export async function inspectReceive(repositoryPath: string, stdin: string, phase: 'pre' | 'post', inherited: NodeJS.ProcessEnv = process.env): Promise<ReceiveInspection> {
+export async function inspectReceive(repositoryPath: string, stdin: string, phase: 'pre' | 'post', inherited: NodeJS.ProcessEnv = process.env, options: { maximumCommitBytes?: number; signal?: AbortSignal } = {}): Promise<ReceiveInspection> {
+  const maximumCommitBytes=options.maximumCommitBytes??128_000;
+  if(!Number.isSafeInteger(maximumCommitBytes)||maximumCommitBytes<1||maximumCommitBytes>1024*1024)fail('Invalid receive commit inspection limit.');
+  if(options.signal?.aborted)fail('Receive inspection was cancelled.');
   const root = await realpath(repositoryPath);
   if (!(await lstat(root)).isDirectory()) fail('The configured receiving repository is unavailable.');
   const deadline = Date.now() + RECEIVE_LIMITS.timeoutMs;
@@ -34,15 +37,16 @@ export async function inspectReceive(repositoryPath: string, stdin: string, phas
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   const run = (args: string[], maximum = RECEIVE_LIMITS.bytes): Promise<{ data: Buffer; code: number | null }> => new Promise((accept, reject) => {
-    const remaining = deadline - Date.now(); if (remaining <= 0) { reject(new Error('Receive inspection exceeded its time limit.')); return; }
+    const remaining = deadline - Date.now(); if (remaining <= 0) { reject(new Error('Receive inspection exceeded its time limit.')); return; }if(options.signal?.aborted){reject(new Error('Receive inspection was cancelled.'));return;}
     const child = spawn('git', ['--no-pager', '--no-replace-objects', '--literal-pathspecs', '-c', 'protocol.allow=never', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=/dev/null', '-c', 'diff.external=', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '--git-dir', root, ...args], { cwd: '/', env, stdio: ['ignore', 'pipe', 'pipe'] });
     let size = 0, errorBytes = 0; const chunks: Buffer[] = []; let failure: Error | undefined;
     const stop = (message: string) => { failure ??= new Error(message); child.kill('SIGKILL'); };
+    const cancel=()=>stop('Receive inspection was cancelled.');options.signal?.addEventListener('abort',cancel,{once:true});
     const timer = setTimeout(() => stop('Receive inspection exceeded its time limit.'), remaining);
     child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maximum) stop('Receive inspection exceeds the supported result limit.'); else chunks.push(chunk); });
     child.stderr.on('data', (chunk: Buffer) => { errorBytes += chunk.length; if (errorBytes > 32_000) stop('Receive inspection failed.'); });
     child.on('error', () => { failure ??= new Error('The receiving Git executable is unavailable.'); });
-    child.on('close', code => { clearTimeout(timer); if (failure) reject(failure); else accept({ code, data: Buffer.concat(chunks) }); });
+    child.on('close', code => { clearTimeout(timer);options.signal?.removeEventListener('abort',cancel); if (failure) reject(failure); else accept({ code, data: Buffer.concat(chunks) }); });if(options.signal?.aborted)cancel();
   });
   const git = async (args: string[], max?: number) => { const result = await run(args, max); if (result.code !== 0) fail('Git could not completely inspect this receive operation.'); return result.data; };
   if (utf8(await git(['rev-parse', '--is-bare-repository'])).trim() !== 'true') fail('Receive rules require a bare repository.');
@@ -88,7 +92,7 @@ export async function inspectReceive(repositoryPath: string, stdin: string, phas
   }
   const commits: InspectedCommit[] = []; let bytes = 0;
   for (const id of selected) {
-    const raw = await git(['cat-file', 'commit', id], 128_000);
+    const raw = await git(['cat-file', 'commit', id], maximumCommitBytes);
     if (createHash(objectFormat).update(`commit ${raw.length}\0`).update(raw).digest('hex') !== id) fail('Commit content does not match its identity.');
     const text = utf8(raw), split = text.indexOf('\n\n'); if (split < 0) fail('Malformed commit object.');
     const headers = text.slice(0, split).split('\n'), treeId = headers.find(line => line.startsWith('tree '))?.slice(5) ?? '', parentIds = headers.filter(line => line.startsWith('parent ')).map(line => line.slice(7));

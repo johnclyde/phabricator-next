@@ -1,3 +1,5 @@
+import type { RevisionPatchPayload } from '../shared/revision-patch.ts';
+import { revisionPatchIdentity } from './revision-patch.ts';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DrydockLeaseDetail, DrydockWorkingCopy } from '../shared/drydock.ts';
@@ -15,6 +17,7 @@ export type BuildAuthority = AuthContext | BuildActor;
 export interface HarbormasterHooks {
   authorize(context: BuildAuthority, objectId: string | null, write: boolean): void;
   source(revisionId: string, versionId: string, contentHash: string): { version: RevisionVersion; kind: RevisionKind };
+  revisionPatch?(revisionId:string,versionId:string,contentHash:string,actor:BuildAuthority):RevisionPatchPayload;
   mayManagePlan?(context: BuildAuthority, plan: BuildPlan): boolean;
   allowHttp?(endpoint: string, context: BuildAuthority): void;
   httpActor?(endpoint: string, creator: BuildAuthority): BuildActor;
@@ -69,7 +72,8 @@ export class HarbormasterStore {
   private rawTarget(id: string): TargetRow { const row = this.database.prepare('SELECT * FROM harbormaster_targets WHERE id=?').get(id) as unknown as TargetRow | undefined; if (!row) throw new HttpError(404, 'Build target was not found.'); return row; }
   private buildable(id: string): Buildable { const row = this.database.prepare('SELECT data FROM harbormaster_buildables WHERE id=?').get(id) as Row | undefined; if (!row) throw new HttpError(409, 'Buildable history is unavailable.'); return decode(row); }
   private objectId(buildable: Buildable): string { return (buildable.revisionId ?? buildable.repositoryId)!; }
-  private authorizeBuild(id: string, context: BuildAuthority, write: boolean): Build { const build = this.rawBuild(id); this.hooks.authorize(context, this.objectId(this.buildable(build.buildableId)), write); return build; }
+  private authorizeSource(buildable: Buildable, context: BuildAuthority, write: boolean): void { this.hooks.authorize(context, this.objectId(buildable), write); if (buildable.revisionPatch) this.hooks.authorize(context, buildable.repositoryId, write); }
+  private authorizeBuild(id: string, context: BuildAuthority, write: boolean): Build { const build = this.rawBuild(id); this.authorizeSource(this.buildable(build.buildableId), context, write); return build; }
   private targets(buildId: string): BuildTarget[] { return (this.database.prepare('SELECT data FROM harbormaster_targets WHERE build_id=? ORDER BY sequence').all(buildId) as unknown as Row[]).map(row => decode<BuildTarget>(row)); }
   private updateBuild(build: Build): void { build.version++; build.updatedAt = this.timestamp(); this.database.prepare('UPDATE harbormaster_builds SET data=? WHERE id=?').run(JSON.stringify(build), build.id); }
   private updateTarget(target: BuildTarget): void { target.version++; this.database.prepare('UPDATE harbormaster_targets SET data=? WHERE id=?').run(JSON.stringify(target), target.id); }
@@ -128,9 +132,11 @@ export class HarbormasterStore {
       this.hooks.authorize(context, revisionId, true); const plan = this.selectedPlan(input, context), data = input as BuildRunInput;
       const versionId = string(data.versionId, 'Source version ID', 100), contentHash = string(data.contentHash, 'Source content hash', 64);
       if (!/^[a-f0-9]{64}$/.test(contentHash)) throw new HttpError(400, 'Use the immutable source SHA-256 hash.');
-      if (plan.steps.some(step => step.kind === 'working-copy')) throw new HttpError(400, 'Drydock working copies require an immutable Git commit build.');
+      const needsPatch=plan.steps.some(step=>step.kind==='working-copy');
+      if(needsPatch&&!this.hooks.revisionPatch)throw new HttpError(409,'Revision patch working copies are not configured.');
+      const patch=needsPatch?this.hooks.revisionPatch!(revisionId,versionId,contentHash,context):undefined;
       const source = this.hooks.source(revisionId, versionId, contentHash);
-      const buildable = this.saveBuildable({ sourceKind: 'revision', revisionId, repositoryId: null, commitId: null, treeId: null, objectFormat: null, versionId, versionNumber: source.version.number, contentHash, kind: source.kind });
+      const buildable = this.saveBuildable({ sourceKind: 'revision', revisionId, repositoryId: patch?.repositoryId??null, commitId: patch?.baseCommitId??null, treeId: patch?.baseTreeId??null, objectFormat: patch?.objectFormat??null, versionId, versionNumber: source.version.number, contentHash, kind: source.kind, ...(patch?{revisionPatch:revisionPatchIdentity(patch)}:{}) });
       this.source(buildable); return this.startBuild(buildable, plan, context, null);
     }, true);
   }
@@ -165,7 +171,7 @@ export class HarbormasterStore {
   list(context: BuildAuthority, objectId?: string): Build[] {
     this.hooks.authorize(context, objectId ?? null, false);
     const rows = this.database.prepare('SELECT b.data FROM harbormaster_builds b JOIN harbormaster_buildables a ON a.id=b.buildable_id WHERE (? IS NULL OR a.object_id=?) ORDER BY b.sequence DESC').all(objectId ?? null, objectId ?? null) as unknown as Row[];
-    return rows.map(row => decode<Build>(row)).filter(build => { try { this.hooks.authorize(context, this.objectId(this.buildable(build.buildableId)), false); return true; } catch (error) { if (error instanceof HttpError && [403, 404].includes(error.status)) return false; throw error; } });
+    return rows.map(row => decode<Build>(row)).filter(build => { try { this.authorizeSource(this.buildable(build.buildableId), context, false); return true; } catch (error) { if (error instanceof HttpError && [403, 404].includes(error.status)) return false; throw error; } });
   }
   command(id: string, input: unknown, context: BuildAuthority): BuildDetail {
     return this.scope(() => {
@@ -207,6 +213,20 @@ export class HarbormasterStore {
       return { target, leaseToken, leaseUntil: target.leaseUntil, buildable: this.buildable(build.buildableId), step, source, ...(workingCopies?.length ? { workingCopies } : {}) };
     }, true);
   }
+  /** A replayed worker claim still carries a source snapshot and filesystem
+   * handles. Return it only while its exact target lease remains usable. */
+  revalidateClaim(claim: BuildClaim, context: BuildAuthority): void {
+    const row = this.rawTarget(claim.target.id), target = decode<BuildTarget>(row), build = this.authorizeBuild(target.buildId, context, true);
+    const changed = () => new HttpError(409, 'This build lease expired, finished, or belongs to another worker.', 'BUILD_LEASE_CHANGED');
+    if (terminal(build.status) || target.status !== 'building' || target.attempt !== claim.target.attempt || target.buildId !== claim.target.buildId || row.lease_hash !== hash(claim.leaseToken) || row.lease_principal !== context.principalId || row.lease_until === null || row.lease_until <= this.now() || !Number.isFinite(Date.parse(claim.leaseUntil)) || Date.parse(claim.leaseUntil) <= this.now()) throw changed();
+    const buildable = this.buildable(build.buildableId), source = this.source(buildable);
+    if (JSON.stringify(buildable) !== JSON.stringify(claim.buildable) || JSON.stringify(source) !== JSON.stringify(claim.source)) throw changed();
+    const workingCopies = this.hooks.workingCopies?.(build.id, context, this.workingCopyDependencies(build, target)) ?? [];
+    // Renewal may extend a valid copy. All source and assignment pins must stay
+    // identical, and an old response must never outlive its own saved deadline.
+    const pins = (copy: DrydockWorkingCopy) => ({ leaseId: copy.leaseId, resourceId: copy.resourceId, binding: copy.binding, worker: copy.worker, handle: copy.handle, source: copy.source });
+    if (workingCopies.length !== (claim.workingCopies?.length ?? 0) || workingCopies.some((copy, index) => JSON.stringify(pins(copy)) !== JSON.stringify(pins(claim.workingCopies![index]!)) || Date.parse(claim.workingCopies![index]!.expiresAt) <= this.now())) throw changed();
+  }
   report(targetId: string, input: unknown, context: BuildAuthority): BuildDetail {
     return this.scope(() => {
       const data = parsed(buildReportInput, input), row = this.rawTarget(targetId), target = decode<BuildTarget>(row), build = this.authorizeBuild(target.buildId, context, true), fingerprint = hash(JSON.stringify(data));
@@ -232,7 +252,7 @@ export class HarbormasterStore {
   }
   private advance(id: string, context: BuildAuthority): void {
     const build = this.rawBuild(id); if (terminal(build.status) || build.status === 'paused') return;
-    this.hooks.authorize(context, this.objectId(this.buildable(build.buildableId)), true);
+    this.authorizeSource(this.buildable(build.buildableId), context, true);
     const targets = this.targets(id);
     let lostWorkingCopy = false;
     for (const target of targets) {
@@ -261,7 +281,7 @@ export class HarbormasterStore {
           if (target.status !== next || target.drydockLeaseId !== detail.lease.id) {
             if (!target.attempt) { target.attempt = 1; target.startedAt = this.timestamp(); }
             target.drydockLeaseId = detail.lease.id; target.status = next; target.worker = step.worker;
-            if (terminal(next)) { target.finishedAt = this.timestamp(); this.recordReport(target, { leaseToken: 'drydock', reportId: `drydock-${detail.lease.id}`, type: next === 'passed' ? 'pass' : 'fail', log: next === 'passed' ? `Working copy ${detail.resource!.handle} is ready for this immutable commit.` : 'Drydock could not acquire a usable working copy.' }, context); }
+            if (terminal(next)) { target.finishedAt = this.timestamp(); this.recordReport(target, { leaseToken: 'drydock', reportId: `drydock-${detail.lease.id}`, type: next === 'passed' ? 'pass' : 'fail', log: next === 'passed' ? `Working copy ${detail.resource!.handle} is ready for this immutable source.` : 'Drydock could not acquire a usable working copy.' }, context); }
             this.updateTarget(target); this.event(id, 'working-copy', `Drydock lease ${detail.lease.id}: ${detail.lease.status}.`, context, target.id); changed = true;
           }
           continue;

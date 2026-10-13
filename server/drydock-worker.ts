@@ -6,7 +6,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { deflate } from 'node:zlib';
 import { promisify } from 'node:util';
 import type { DrydockClaim, DrydockLeaseDetail, DrydockSource } from '../shared/drydock.ts';
+import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
+import type { SourceFile } from '../shared/types.ts';
+import { isPortableWorkingCopyPath } from '../shared/revision-patch.ts';
 import { createGitObserver } from './git.ts';
+import { buildRevisionPatchTree, revisionPatchIdentity, revisionPatchObjectId, verifyRevisionPatch } from './revision-patch.ts';
 
 export interface DrydockLocalBinding { repositoryId: string; repositoryPath: string; root: string }
 export interface DrydockWorkerConfiguration { server: string; worker: string; bindings: Record<string, DrydockLocalBinding> }
@@ -39,6 +43,8 @@ export class LocalDrydockWorker {
   private async mark(root:string,marker:Marker):Promise<void>{const path=join(root,marker.resourceId,'ownership.json'),handle=await open(path,constants.O_WRONLY|constants.O_TRUNC|constants.O_NOFOLLOW);try{await handle.writeFile(JSON.stringify(marker));}finally{await handle.close();}}
   async provision(claim:DrydockClaim):Promise<{handle:string;path:string}>{
     if(claim.operation!=='provision'||claim.resource.worker!==this.configuration.worker||!safeId(claim.resource.handle)||claim.resource.id!==claim.resource.handle||claim.resource.leaseId!==claim.lease.id||!same(claim.resource.source,claim.lease.source))throw failure();
+    const patch=claim.patch===undefined?undefined:verifyRevisionPatch(claim.patch),patchPin=claim.lease.source.revisionPatch;
+    if(Boolean(patch)!==Boolean(patchPin)||patch&&(!same(revisionPatchIdentity(patch),patchPin)||patch.repositoryId!==claim.lease.source.repositoryId||patch.baseCommitId!==claim.lease.source.commitId||patch.baseTreeId!==claim.lease.source.treeId||patch.objectFormat!==claim.lease.source.objectFormat))throw failure();
     const binding=this.binding(claim.resource.binding,claim.resource.source),root=await this.root(claim.resource.binding,binding),directory=join(root,claim.resource.id),work=join(directory,'work');
     const prior=await this.readMarker(root,claim.resource.id);if(prior){if(prior.leaseId!==claim.lease.id||!same(prior.source,claim.lease.source)||prior.binding!==claim.resource.binding||!prior.ready)throw failure();return {handle:claim.resource.handle,path:work};}
     const marker:Marker={format:1,binding:claim.resource.binding,worker:this.configuration.worker,resourceId:claim.resource.id,leaseId:claim.lease.id,source:claim.lease.source,expiresAt:claim.lease.expiresAt,ready:false};
@@ -50,27 +56,44 @@ export class LocalDrydockWorker {
       const template=join(directory,'empty-template');await mkdir(template,{mode:0o700});
       await git(['init','--initial-branch=main',`--object-format=${claim.lease.source.objectFormat}`,`--template=${template}`,work],signal);
       const gitDir=join(work,'.git'),sourceGit=`--git-dir=${binding.repositoryPath}`,stored=new Set<string>();
-      const storeObject=async(type:'commit'|'tree'|'blob',id:string,maximum:number):Promise<Buffer>=>{
-        const bytes=await git([sourceGit,'cat-file',type,id],signal,maximum),header=Buffer.from(`${type} ${bytes.length}\0`);
+      const storeBytes=async(type:'commit'|'tree'|'blob',id:string,bytes:Buffer):Promise<Buffer>=>{
+        if(signal.aborted)throw failure();const header=Buffer.from(`${type} ${bytes.length}\0`);
         if(createHash(claim.lease.source.objectFormat).update(header).update(bytes).digest('hex')!==id)throw failure();
         if(!stored.has(id)){const directory=join(gitDir,'objects',id.slice(0,2));await mkdir(directory,{recursive:true,mode:0o700});await writeFile(join(directory,id.slice(2)),await compress(Buffer.concat([header,bytes])),{flag:'wx',mode:0o400});stored.add(id);}
         return bytes;
       };
+      const storeObject=async(type:'commit'|'tree'|'blob',id:string,maximum:number):Promise<Buffer>=>storeBytes(type,id,await git([sourceGit,'cat-file',type,id],signal,maximum));
       await storeObject('commit',claim.lease.source.commitId,1_000_000);
       let metadataBytes=(await storeObject('tree',claim.lease.source.treeId,8*1024*1024)).length;
       const inventory=await git([sourceGit,'ls-tree','-r','-t','-z','--full-tree',claim.lease.source.commitId],signal);
       const entries=inventory.toString('utf8').split('\0').filter(Boolean);if(!Buffer.from(inventory.toString('utf8')).equals(inventory)||entries.length>20_000)throw failure();
-      const paths=new Map<string,string>();let totalBytes=0;
-      for(const entry of entries){if(signal.aborted)throw failure();const match=/^(100644|100755|040000) (blob|tree) ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/s.exec(entry);if(!match||(match[1]==='040000')!==(match[2]==='tree'))throw failure();const path=match[4]!,parts=path.split('/');if(path.length>4096||parts.some(part=>!part||part==='.'||part==='..'||part.toLowerCase()==='.git'||/[\\\x00-\x1f:]/.test(part)||/[. ]$/.test(part)||/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)))throw failure();
-        for(let index=0;index<parts.length;index++){const prefix=parts.slice(0,index+1).join('/'),normalized=prefix.normalize('NFC').toLowerCase(),priorPath=paths.get(normalized);if(priorPath&&priorPath!==prefix)throw failure();paths.set(normalized,prefix);}
+      const paths=new Map<string,string>(),baseFiles:SourceFile[]=[];let totalBytes=0;
+      for(const entry of entries){if(signal.aborted)throw failure();const match=/^(100644|100755|040000) (blob|tree) ([a-f0-9]{40}|[a-f0-9]{64})\t(.+)$/s.exec(entry);if(!match||(match[1]==='040000')!==(match[2]==='tree'))throw failure();const path=match[4]!,parts=path.split('/');if(!isPortableWorkingCopyPath(path))throw failure();
+        for(let index=0;index<parts.length;index++){const prefix=parts.slice(0,index+1).join('/'),normalized=prefix.normalize('NFC').toUpperCase().toLowerCase().normalize('NFC'),priorPath=paths.get(normalized);if(priorPath&&priorPath!==prefix)throw failure();paths.set(normalized,prefix);}
         if(match[2]==='tree'){metadataBytes+=(await storeObject('tree',match[3]!,8*1024*1024)).length;if(metadataBytes>8*1024*1024)throw failure();await mkdir(join(work,...parts),{recursive:true,mode:0o700});continue;}
         const bytes=await storeObject('blob',match[3]!,64*1024*1024);totalBytes+=bytes.length;if(totalBytes>256*1024*1024)throw failure();
+        if(patch){if(bytes.includes(0))throw failure();let content:string;try{content=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);}catch{throw failure();}baseFiles.push({path,content});}
         const parent=join(work,...parts.slice(0,-1));await mkdir(parent,{recursive:true,mode:0o700});const handle=await open(join(work,...parts),constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,match[1]==='100755'?0o700:0o600);try{await handle.writeFile(bytes);}finally{await handle.close();}
+      }
+      if(patch){
+        // The server pins a complete baseline, not a selection of files. Verify
+        // that identity against actual Git bytes before writing reviewed edits.
+        if(createHash('sha256').update(sourceSnapshotCanonical(baseFiles)).digest('hex')!==patch.baseContentHash)throw failure();
+        const targetManifest=patch.files.map(file=>({path:file.path,mode:file.mode,objectId:revisionPatchObjectId(patch.objectFormat,'blob',Buffer.from(file.content))}));
+        const target=buildRevisionPatchTree(targetManifest,patch.objectFormat);if(target.treeId!==patch.targetTreeId)throw failure();
+        for(const entry of await readdir(work))if(entry!=='.git')await rm(join(work,entry),{recursive:true,force:false});
+        for(let index=0;index<patch.files.length;index++){
+          if(signal.aborted)throw failure();const file=patch.files[index]!,parts=file.path.split('/'),bytes=Buffer.from(file.content);
+          await storeBytes('blob',targetManifest[index]!.objectId,bytes);
+          await mkdir(join(work,...parts.slice(0,-1)),{recursive:true,mode:0o700});
+          const handle=await open(join(work,...parts),constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,file.mode==='100755'?0o700:0o600);try{await handle.writeFile(bytes);}finally{await handle.close();}
+        }
+        for(const object of target.objects)await storeBytes('tree',object.objectId,object.bytes);
       }
       // A shallow boundary makes the exact checkout usable without copying an
       // unbounded amount of unrelated history into the worker's storage pool.
       await writeFile(join(gitDir,'shallow'),`${claim.lease.source.commitId}\n`,{mode:0o600});
-      await git([`--git-dir=${gitDir}`,`--work-tree=${work}`,'read-tree',claim.lease.source.commitId],signal);
+      await git([`--git-dir=${gitDir}`,`--work-tree=${work}`,'read-tree',patch?.targetTreeId??claim.lease.source.commitId],signal);
       await writeFile(join(gitDir,'HEAD'),`${claim.lease.source.commitId}\n`,{mode:0o600});await chmod(work,0o700);marker.ready=true;await this.mark(root,marker);return {handle:claim.resource.handle,path:work};
     }catch(error){await this.release(claim).catch(()=>undefined);throw error;}
   }
@@ -96,6 +119,6 @@ export async function runDrydockWorkerCycle(worker:LocalDrydockWorker,token:stri
   for(const job of jobs){if(shouldStop())return;let claim:DrydockClaim;try{const response=await request(`/leases/${encodeURIComponent(job.lease.id)}/claim`,{expectedVersion:job.lease.version,worker:worker.configuration.worker});claim=response as unknown as DrydockClaim;if(!claim?.lease||!claim.resource||!claim.token)throw failure();}catch{continue;}
     if(shouldStop())return;
     let type:'active'|'released'|'broken'='broken';try{if(claim.operation==='provision'){await worker.provision(claim);type='active';}else{await worker.release(claim);type='released';}}catch{type='broken';}
-    try{await request(`/leases/${encodeURIComponent(claim.lease.id)}/report`,{token:claim.token,reportId:randomUUID(),type,log:type==='active'?'Exact Git working copy is ready; no source code was executed.':type==='released'?'The worker removed its owned working-copy directory.':'The local worker could not complete the requested operation.'});}catch(error){/* The ready receipt may have committed. Keep owned files until authoritative reconciliation or local expiry. */throw error;}
+    try{await request(`/leases/${encodeURIComponent(claim.lease.id)}/report`,{token:claim.token,reportId:randomUUID(),type,log:type==='active'?(claim.patch?'The exact reviewed revision tree is staged on its verified Git baseline; no source code was executed.':'Exact Git working copy is ready; no source code was executed.'):type==='released'?'The worker removed its owned working-copy directory.':'The local worker could not complete the requested operation.'});}catch(error){/* The ready receipt may have committed. Keep owned files until authoritative reconciliation or local expiry. */throw error;}
   }
 }

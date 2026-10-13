@@ -28,6 +28,7 @@ import DocxWorkspace, { DocxImport } from './DocxWorkspace';
 import RevisionDependencies from './RevisionDependencies';
 import RevisionAuthorship from './RevisionAuthorship';
 import RevisionLifecycle from './RevisionLifecycle';
+import RevisionLanding from './RevisionLanding';
 import { revisionRefreshDirection } from './revision-lifecycle';
 import type { RegisterStack, StackController } from './revision-stack';
 import ReviewFindings, { type FindingController, type RegisterFindings, type FindingSourceAnswer } from './ReviewFindings';
@@ -660,7 +661,8 @@ function RevisionPage({ registerTranscriptEdit, onOpened, id, state, online, mut
     <RevisionAuthorship id={id} state={state} online={online} refreshWorkspace={refreshWorkspace} reloadRevision={load} notify={notify}/>
     <RevisionDependencies registerStack={registerStack} id={id} state={state} online={online} canEdit={canEdit} refreshWorkspace={refreshWorkspace}/>
     <RevisionAssets base={base} version={version} state={state} online={online}/>
-    <RevisionBuilds revisionId={id} versionId={version.id} contentHash={version.contentHash} online={online} accessEpoch={Math.max(state.accessEpoch, detail.accessEpoch ?? -1)}/>
+    <RevisionBuilds detail={detail} version={version} canEdit={canEdit} online={online} accessEpoch={Math.max(state.accessEpoch, detail.accessEpoch ?? -1)}/>
+    {revision.repositoryId && <RevisionLanding detail={detail} version={version} online={online} accessEpoch={Math.max(state.accessEpoch, detail.accessEpoch ?? -1)} refreshRevision={async () => { await load(); await refreshWorkspace(); }}/>}
     {revision.kind === 'paper' && <PaperBuilds key={id} detail={detail} version={version} selectedPath={effectivePath} selectedLine={line} online={online} canEdit={canEdit} accessEpoch={Math.max(state.accessEpoch, detail.accessEpoch ?? -1)} openSource={openThreadSource}/>}
     <section className="panel"><div className="review-tabs"><button className={reviewTab === 'discussion' ? 'selected' : ''} onClick={() => setReviewTab('discussion')}>Discussion <span>{comments.length}</span></button><button className={reviewTab === 'checks' ? 'selected' : ''} onClick={() => setReviewTab('checks')}>Review evidence <span>{detail.reviews.length}</span></button><button className={reviewTab === 'history' ? 'selected' : ''} onClick={() => setReviewTab('history')}>History</button>{revision.kind !== 'code' && <button className={reviewTab === 'references' ? 'selected' : ''} onClick={() => setReviewTab('references')}>References</button>}</div>
       {reviewTab === 'discussion' && <div className="discussion"><ReviewThreads focusRequest={threadFocus} stagePrivate={privateReview.stage} canStagePrivate={privateReview.canStage} principals={state.principals} register={registerDiscussion} detail={detail} version={version} online={online} canEdit={canEdit} canInteract={canInteract} mutate={mutate} saved={async () => { await load(); }} suggestionApplied={refreshCurrent} openSource={openThreadSource}/></div>}

@@ -22,7 +22,7 @@ Both editors retain unsaved drafts under the workspace's existing storage policy
 | Rule evidence | Immutable versions, automatic event deduplication, dry-run transcripts, condition results, action failures and durable repetition state. |
 | Build model | Versioned plans, immutable buildables, frozen plan/source per build, dependent targets, durable events, fenced worker attempts, pause/resume/abort/restart. |
 | Sources | Exact revision version ID/content hash; or repository ID, verified SHA-1/SHA-256 commit and tree identity obtained from the configured Git observer. |
-| Steps | Deterministic local text checks, external workers waiting for reports, operator-configured HTTP dispatch followed by worker reports, and authorized Drydock working copies for exact commits. |
+| Steps | Deterministic local text checks, external workers waiting for reports, operator-configured HTTP dispatch followed by worker reports, and authorized Drydock working copies for exact commits or revision patches. |
 | Results | Append-only work/pass/fail messages, log chunks, unit results, lint findings, URI artifacts and idempotent report identities. |
 | UI | Rule editor/test/history/transcripts, plan editor, exact-source manual runs, build detail and revision build status, mobile controls and draft recovery. |
 
@@ -106,3 +106,5 @@ Schema-38 release validation passed type checking, root and subpath production b
 The schema-38 browser matrix passed 128 checks: 32 cases per desktop/mobile and root/subpath combination, with no failures or skips. It covers Herald push receipts and stored-evidence replay, Drydock authorizations/allocation/renewal/release, Harbormaster working-copy sources, retained offline requests, repository reads, authentication/Google, policy isolation, mounts and workspace navigation. Real Git hooks separately verify accepted/rejected pushes and API-outage rejection; the real Drydock worker provisions and cleans a disposable working copy through the actual HTTP API. Schema-38 migration checks preserve existing tables and rows and reject collisions atomically.
 
 Focused tests cover repetition and dependency cycles, bounded expressions, action/notification rollback, privilege escalation, hidden historical rule projection, immutable source/plan evidence, worker leases, HTTP metadata-only dispatch and shutdown, Conduit cursors and retries, asynchronous Git access revocation, reply/batch comment conditions and schema preservation. External worker tests use controlled fixtures; they do not certify an operator's CI installation. Physical mobile devices and full upstream migration remain unverified.
+
+Schema 39 adds [revision patches and local squash landing](revision-landing.md), connecting exact revision-source working copies to Harbormaster and native Herald pre/post decisions to explicit landing. Remote Git staging/push and full upstream interoperability remain gaps.

@@ -6,7 +6,7 @@ The desktop/mobile application exposes Blueprints, Authorizations, Leases and Re
 
 Leases move through pending, acquired, active, releasing and released states. Expiration or lost authority initiates cleanup. Fenced worker claims and immutable report identities prevent old workers, expired attempts and duplicate reports from publishing another allocation's result. Resource capacity stays occupied until cleanup is reported. Blueprint repository/binding/worker identity cannot be changed underneath approved authorizations; create a new blueprint for those changes. Name, description, capacity and enabled status are versioned.
 
-A Harbormaster **Drydock working copy** step allocates a lease for the build's immutable commit. Dependent external/HTTP steps receive opaque handles only for the working-copy steps they depend on. They require current source authority, active leases and the resource's assigned worker principal. Terminal builds release their resources; aborted, expired or revoked allocations fence unfinished dependent work. Independent branches do not wait for unrelated working copies. Revision-source working copies, patch application and remote commands remain separate work.
+A Harbormaster **Drydock working copy** step allocates a lease for the build's immutable commit or revision patch. Dependent external/HTTP steps receive opaque handles only for the working-copy steps they depend on. They require current source authority, active leases and the resource's assigned worker principal. Terminal builds release their resources; aborted, expired or revoked allocations fence unfinished dependent work. Independent branches do not wait for unrelated working copies. Exact revision-source working copies stage the reviewed target tree over its verified imported baseline. See [revision patches and landing](revision-landing.md); arbitrary remote commands remain separate work.
 
 ## Operator setup
 
@@ -59,7 +59,7 @@ All writes require an `Idempotency-Key`, write scope and current object/Space au
 | `POST /api/drydock/blueprints/:id/authorizations` | Request an account/plan authorization. |
 | `GET /api/drydock/authorizations` and `/:id` | Inspect permitted authorization records. |
 | `POST /api/drydock/authorizations/:id/commands` | Approve, deny or revoke with an expected version. |
-| `GET/POST /api/drydock/leases` | List visible leases; request an exact observed commit. |
+| `GET/POST /api/drydock/leases` | List visible leases; request an exact observed commit or revision patch. |
 | `GET /api/drydock/leases/:id` | Inspect the lease, resource and logs. |
 | `POST /api/drydock/leases/:id/commands` | Renew or release with an expected version. |
 | `GET /api/drydock/resources` and `/:id` | Inspect visible allocated resources. |
@@ -73,6 +73,6 @@ Read results carry the current access epoch. Exact retries recheck current visib
 
 The pinned reference is recorded in [upstream.md](upstream.md). Source research includes `src/docs/user/userguide/drydock*.diviner`, `src/applications/drydock/`, and Harbormaster's working-copy build step.
 
-Implemented here: versioned working-copy blueprints, explicit authorization decisions, durable leases/resources/logs, fenced worker claims, current-policy checks, capacity and expiry, exact local Git materialization/cleanup, Harbormaster step dependencies, and mobile lifecycle controls. Schema 38 adds tables without rewriting existing workspace rows.
+Implemented here: versioned working-copy blueprints, explicit authorization decisions, durable leases/resources/logs, fenced worker claims, current-policy checks, capacity and expiry, exact local Git materialization/cleanup, Harbormaster step dependencies, and mobile lifecycle controls. Schema 38 adds tables without rewriting existing workspace rows. Schema 39 extends this with exact revision patches and local squash landing; see [contracts](revision-landing.md).
 
-Remaining: SSH and Almanac host blueprints, cloud provisioning, shared host resource pools, reusable working-copy pools, Passphrase credentials, repository landing/merge operations, revision patch/staging workflows, arbitrary remote commands, full Drydock Conduit compatibility, upstream object/history import, broad saved-query/policy options and production fleet recovery. Drydock is therefore partial, with a usable local Git provider. No remote fleet is provisioned by installing the application.
+Remaining: SSH and Almanac host blueprints, cloud provisioning, shared host resource pools, reusable working-copy pools, Passphrase credentials, remote repository landing/merge operations and staging interchange, arbitrary remote commands, full Drydock Conduit compatibility, upstream object/history import, broad saved-query/policy options and production fleet recovery. Drydock is therefore partial, with a usable local Git provider. No remote fleet is provisioned by installing the application.

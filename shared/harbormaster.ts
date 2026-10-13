@@ -1,5 +1,6 @@
 import type { DrydockWorkingCopy } from './drydock';
 import type { RevisionKind, RevisionVersion } from './types';
+import type { RevisionPatchIdentity } from './revision-patch';
 
 export type BuildStatus = 'pending' | 'building' | 'passed' | 'failed' | 'aborted' | 'paused';
 export type BuildTargetStatus = 'blocked' | 'pending' | 'building' | 'passed' | 'failed' | 'aborted';
@@ -7,7 +8,7 @@ export type BuildStepKind = 'local-checks' | 'external' | 'http' | 'working-copy
 export interface BuildStep { key: string; name: string; kind: BuildStepKind; dependsOn: string[]; worker: string | null; endpoint?: string; blueprintId?: string }
 export interface BuildPlanInput { name: string; description: string; enabled: boolean; steps: BuildStep[] }
 export interface BuildPlan extends BuildPlanInput { id: string; version: number; ownerId: string; createdAt: string; updatedAt: string }
-export interface Buildable { id: string; sourceKind: 'revision' | 'commit'; revisionId: string | null; repositoryId: string | null; commitId: string | null; treeId: string | null; objectFormat: 'sha1' | 'sha256' | null; versionId: string | null; versionNumber: number | null; contentHash: string; kind: RevisionKind; createdAt: string }
+export interface Buildable { id: string; sourceKind: 'revision' | 'commit'; revisionId: string | null; repositoryId: string | null; commitId: string | null; treeId: string | null; objectFormat: 'sha1' | 'sha256' | null; versionId: string | null; versionNumber: number | null; contentHash: string; kind: RevisionKind; createdAt: string; revisionPatch?: RevisionPatchIdentity }
 export interface Build { id: string; buildableId: string; revisionId: string | null; planId: string; planVersion: number; plan: BuildPlan; version: number; status: BuildStatus; createdBy: string; createdAt: string; updatedAt: string; restartOf: string | null }
 export interface BuildTarget { id: string; buildId: string; stepKey: string; status: BuildTargetStatus; version: number; attempt: number; worker: string | null; leaseUntil: string | null; startedAt: string | null; finishedAt: string | null; drydockLeaseId?: string }
 export interface BuildUnitResult { name: string; result: 'pass' | 'fail' | 'skip' | 'broken' | 'unsound'; duration?: number; details?: string }

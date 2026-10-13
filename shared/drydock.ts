@@ -1,4 +1,5 @@
 import type { GitObjectFormat } from './repositories';
+import type { RevisionPatchIdentity, RevisionPatchPayload } from './revision-patch';
 
 export type DrydockLeaseStatus = 'pending' | 'acquired' | 'active' | 'releasing' | 'released' | 'broken' | 'expired';
 export type DrydockResourceStatus = 'pending' | 'active' | 'releasing' | 'released' | 'broken';
@@ -6,14 +7,14 @@ export interface DrydockBinding { key: string; worker: string; repositoryIds: st
 export interface DrydockBlueprintInput { name: string; description: string; enabled: boolean; repositoryId: string; binding: string; worker: string; limit: number }
 export interface DrydockBlueprint extends DrydockBlueprintInput { id: string; version: number; ownerId: string; type: 'working-copy'; createdAt: string; updatedAt: string }
 export interface DrydockAuthorization { id: string; version: number; blueprintId: string; subjectKind: 'principal' | 'build-plan'; subjectId: string; status: 'pending' | 'approved' | 'denied' | 'revoked'; requestedBy: string; decidedBy: string | null; createdAt: string; updatedAt: string }
-export interface DrydockSource { repositoryId: string; commitId: string; treeId: string; objectFormat: GitObjectFormat }
+export interface DrydockSource { repositoryId: string; commitId: string; treeId: string; objectFormat: GitObjectFormat; revisionPatch?: RevisionPatchIdentity }
 export interface DrydockLease { id: string; version: number; blueprintId: string; blueprintVersion: number; blueprint: DrydockBlueprint; authorizationId: string; source: DrydockSource; status: DrydockLeaseStatus; holderId: string; buildId: string | null; targetId: string | null; resourceId: string | null; createdAt: string; updatedAt: string; expiresAt: string; reason: string }
 export interface DrydockResource { id: string; version: number; blueprintId: string; leaseId: string; status: DrydockResourceStatus; binding: string; worker: string; workerPrincipalId: string; handle: string; source: DrydockSource; createdAt: string; updatedAt: string }
 export interface DrydockLog { id: string; leaseId: string; resourceId: string | null; type: string; message: string; actorId: string; createdAt: string }
 export interface DrydockLeaseDetail { lease: DrydockLease; resource: DrydockResource | null; logs: DrydockLog[] }
 export interface DrydockBlueprintDetail { blueprint: DrydockBlueprint; authorizations: DrydockAuthorization[]; leases: DrydockLease[]; resources: DrydockResource[] }
 export interface DrydockRequestInput { blueprintId: string; blueprintVersion: number; durationSeconds?: number }
-export interface DrydockClaim { operation: 'provision' | 'release'; lease: DrydockLease; resource: DrydockResource; token: string; claimUntil: string }
+export interface DrydockClaim { operation: 'provision' | 'release'; lease: DrydockLease; resource: DrydockResource; token: string; claimUntil: string; patch?: RevisionPatchPayload }
 export interface DrydockReportInput { token: string; reportId: string; type: 'active' | 'released' | 'broken' | 'heartbeat'; log?: string }
 export interface DrydockWorkingCopy { leaseId: string; resourceId: string; binding: string; worker: string; handle: string; source: DrydockSource; expiresAt: string }
 
