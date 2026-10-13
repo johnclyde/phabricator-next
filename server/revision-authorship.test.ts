@@ -200,7 +200,7 @@ test('schema25 preserves every schema24 row and schema definition, establishes t
     assert.equal(store.database.prepare("SELECT json_type(data,'$.attribution') AS type FROM versions WHERE revision_id=? AND number=1").get(encoded)!.type, 'text');
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('historic', 'exact', 201, '{"saved":"bytes"}', '2026-01-01T00:00:00Z');
     oldSchema(store); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 37); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 38); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.deepEqual(store.revisionAuthorship.state(id).author, ref(alice)); assert.equal(store.revisionAuthorship.state(id).version, 0);
@@ -219,7 +219,7 @@ test('schema25 collision rolls back partial schema and version updates, allowing
     create(store); oldSchema(store); store.database.exec("CREATE TABLE revision_author_operations(operator_note TEXT); INSERT INTO revision_author_operations VALUES('Retain operator data')");
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|no such column/);
     db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 24); assert.deepEqual(snapshot(db), before);
-    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 37);
+    db.exec('DROP TABLE revision_author_operations'); db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 38);
   } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

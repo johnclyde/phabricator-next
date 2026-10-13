@@ -1,4 +1,5 @@
 import type { HeraldRule, HeraldTranscript } from '../shared/herald.ts';
+import { heraldPolicyObjectId, type GitReceiveReceipt } from '../shared/git-automation.ts';
 import type { HeraldStore } from './herald.ts';
 import type { PolicyStore } from './policy.ts';
 import { HttpError } from './validation.ts';
@@ -39,7 +40,7 @@ export function visibleHeraldRule(rule: HeraldRule, principalId: string, herald:
 /** Historical transcripts use their exact saved rule configurations. Editing a
  * rule today must never make an older private condition readable. */
 export function presentHeraldTranscript(transcript: HeraldTranscript, principalId: string, herald: HeraldStore, policies: PolicyStore): HeraldTranscript {
-  policies.require(transcript.objectId, principalId, 'view');
+  policies.require(heraldPolicyObjectId(transcript.snapshot), principalId, 'view');
   const saved = new Map<string, HeraldRule | null>();
   for (const result of transcript.rules) {
     try {
@@ -62,4 +63,25 @@ export function presentHeraldTranscript(transcript: HeraldTranscript, principalI
   projected.rules = projected.rules.filter(result => allowed.has(result.ruleId));
   projected.actions = projected.actions.filter(action => allowed.has(action.ruleId)).map(action => ({ ...action, ...(action.references ? { references: action.references.filter(id => !objectReference(id) || policies.access(id, principalId).view) } : {}) }));
   return projected;
+}
+
+/** Rejection messages are rule actions and inherit the same historical
+ * dependency visibility as transcripts. A hidden rule still rejects the push,
+ * but readers only receive a generic explanation of that decision. */
+export function presentGitReceiveReceipt(receipt: GitReceiveReceipt, principalId: string, herald: HeraldStore, policies: PolicyStore): GitReceiveReceipt {
+  policies.require(receipt.repositoryId, principalId, 'view');
+  const result = structuredClone(receipt);
+  if (receipt.phase !== 'pre' || receipt.allowed) return result;
+  const messages = new Set<string>();
+  for (const id of receipt.transcriptIds) {
+    // The receipt's repository has already been authorized. Verify that each
+    // immutable linked transcript belongs to it before projecting any details.
+    const saved = herald.transcript(id, () => true);
+    if (saved.snapshot.repositoryId !== receipt.repositoryId || heraldPolicyObjectId(saved.snapshot) !== receipt.repositoryId) throw new HttpError(409, 'Git receive evidence cannot be verified.', 'GIT_AUTOMATION_INTEGRITY');
+    const projected = presentHeraldTranscript(saved, principalId, herald, policies);
+    for (const action of projected.actions) if (action.status === 'applied' && action.action.type === 'block-push') messages.add(action.action.value);
+  }
+  result.reasons = receipt.reasons.filter(reason => messages.has(reason) || reason === 'A push rule could not be safely evaluated. Inspect the Herald transcript before retrying.');
+  if (result.reasons.length < receipt.reasons.length || !result.reasons.length) result.reasons.push('Herald rejected this push. Some rule details are unavailable under your current access.');
+  return result;
 }

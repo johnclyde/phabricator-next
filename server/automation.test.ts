@@ -101,8 +101,8 @@ test('schema37 adds automation without rewriting any existing schema36 rows and 
     store.createTask({ title: 'Preserve existing work' });
     const tables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'herald_%' OR name LIKE 'harbormaster_%')").all().map(row => String(row.name));
     store.database.exec('PRAGMA foreign_keys=OFF'); for (const table of tables.reverse()) store.database.exec(`DROP TABLE ${table}`); store.database.exec('PRAGMA user_version=36'); const before = snapshot(store.database); store.close();
-    store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 37); const after = snapshot(store.database); for (const table of before) assert.deepEqual(after.find(item => item.name === table.name), table); assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
-    store.database.exec('PRAGMA user_version=38'); store.close(); assert.throws(() => new Store({ path }), /newer than/);
+    store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 38); const after = snapshot(store.database); for (const table of before) assert.deepEqual(after.find(item => item.name === table.name), table); assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
+    store.database.exec('PRAGMA user_version=39'); store.close(); assert.throws(() => new Store({ path }), /newer than/);
   } finally { try { store.close(); } catch { /* Already closed for reopen. */ } rmSync(directory, { recursive: true, force: true }); }
 });
 

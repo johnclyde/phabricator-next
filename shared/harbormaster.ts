@@ -1,14 +1,15 @@
+import type { DrydockWorkingCopy } from './drydock';
 import type { RevisionKind, RevisionVersion } from './types';
 
 export type BuildStatus = 'pending' | 'building' | 'passed' | 'failed' | 'aborted' | 'paused';
 export type BuildTargetStatus = 'blocked' | 'pending' | 'building' | 'passed' | 'failed' | 'aborted';
-export type BuildStepKind = 'local-checks' | 'external' | 'http';
-export interface BuildStep { key: string; name: string; kind: BuildStepKind; dependsOn: string[]; worker: string | null; endpoint?: string }
+export type BuildStepKind = 'local-checks' | 'external' | 'http' | 'working-copy';
+export interface BuildStep { key: string; name: string; kind: BuildStepKind; dependsOn: string[]; worker: string | null; endpoint?: string; blueprintId?: string }
 export interface BuildPlanInput { name: string; description: string; enabled: boolean; steps: BuildStep[] }
 export interface BuildPlan extends BuildPlanInput { id: string; version: number; ownerId: string; createdAt: string; updatedAt: string }
 export interface Buildable { id: string; sourceKind: 'revision' | 'commit'; revisionId: string | null; repositoryId: string | null; commitId: string | null; treeId: string | null; objectFormat: 'sha1' | 'sha256' | null; versionId: string | null; versionNumber: number | null; contentHash: string; kind: RevisionKind; createdAt: string }
 export interface Build { id: string; buildableId: string; revisionId: string | null; planId: string; planVersion: number; plan: BuildPlan; version: number; status: BuildStatus; createdBy: string; createdAt: string; updatedAt: string; restartOf: string | null }
-export interface BuildTarget { id: string; buildId: string; stepKey: string; status: BuildTargetStatus; version: number; attempt: number; worker: string | null; leaseUntil: string | null; startedAt: string | null; finishedAt: string | null }
+export interface BuildTarget { id: string; buildId: string; stepKey: string; status: BuildTargetStatus; version: number; attempt: number; worker: string | null; leaseUntil: string | null; startedAt: string | null; finishedAt: string | null; drydockLeaseId?: string }
 export interface BuildUnitResult { name: string; result: 'pass' | 'fail' | 'skip' | 'broken' | 'unsound'; duration?: number; details?: string }
 export interface BuildLintResult { name: string; code: string; severity: 'error' | 'warning' | 'advice' | 'autofix' | 'disabled'; path: string; line?: number; char?: number; description?: string }
 export interface BuildArtifactInput { key: string; name: string; uri: string }
@@ -20,7 +21,7 @@ export interface BuildDetail { build: Build; buildable: Buildable; targets: Buil
 export interface BuildRunInput { planId: string; planVersion: number; versionId: string; contentHash: string }
 export interface BuildCommandInput { command: 'pause' | 'resume' | 'abort' | 'restart'; expectedVersion: number }
 export interface BuildClaimInput { targetId: string; expectedVersion: number; worker: string }
-export interface BuildClaim { target: BuildTarget; leaseToken: string; leaseUntil: string; buildable: Buildable; step: BuildStep; source: RevisionVersion | null }
+export interface BuildClaim { target: BuildTarget; leaseToken: string; leaseUntil: string; buildable: Buildable; step: BuildStep; source: RevisionVersion | null; workingCopies?: DrydockWorkingCopy[] }
 
 /** Upstream's default buildable behavior: any completed failure wins, otherwise
  * all plans must pass. Our explicit restart keeps old evidence as another build;
@@ -46,20 +47,22 @@ export function buildPlanInput(value: unknown): BuildPlanInput {
   if (typeof data.enabled !== 'boolean' || !Array.isArray(data.steps) || !data.steps.length) throw new Error('A build plan needs a status and at least one step.');
   const keys = new Set<string>();
   const steps = data.steps.map((entry): BuildStep => {
-    const step = record(entry, ['key', 'name', 'kind', 'dependsOn', 'worker', 'endpoint']);
+    const step = record(entry, ['key', 'name', 'kind', 'dependsOn', 'worker', 'endpoint', 'blueprintId']);
     const key = text(step.key, 'step key', 100);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(key) || keys.has(key)) throw new Error('Build step keys must be unique letters, numbers, dots, underscores or dashes.');
     keys.add(key);
-    if (step.kind !== 'local-checks' && step.kind !== 'external' && step.kind !== 'http') throw new Error('Choose deterministic local checks, an external worker or an HTTP request.');
+    if (step.kind !== 'local-checks' && step.kind !== 'external' && step.kind !== 'http' && step.kind !== 'working-copy') throw new Error('Choose deterministic local checks, an external worker or an HTTP request or a Drydock working copy.');
     if (!Array.isArray(step.dependsOn) || step.dependsOn.some(item => typeof item !== 'string') || new Set(step.dependsOn).size !== step.dependsOn.length) throw new Error('Step dependencies must be unique step keys.');
-    const worker = step.kind === 'external' || step.kind === 'http' ? text(step.worker, 'worker label', 100) : null;
+    const worker = step.kind === 'external' || step.kind === 'http' || step.kind === 'working-copy' ? text(step.worker, 'worker label', 100) : null;
     if (step.kind === 'local-checks' && step.worker !== null && step.worker !== undefined) throw new Error('Local checks cannot select an external worker.');
     let endpoint: string | undefined;
     if (step.kind === 'http') {
       endpoint = text(step.endpoint, 'HTTP endpoint', 2_000);
       try { const url = new URL(endpoint); if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.hash) throw new Error(); } catch { throw new Error('HTTP steps need an HTTP(S) URL without credentials or fragments.'); }
     } else if (step.endpoint !== undefined) throw new Error('Only HTTP steps may have an endpoint.');
-    return { key, name: text(step.name, 'step name', 240), kind: step.kind, dependsOn: [...step.dependsOn] as string[], worker, ...(endpoint ? { endpoint } : {}) };
+    const blueprintId = step.kind === 'working-copy' ? text(step.blueprintId, 'Drydock blueprint', 100) : undefined;
+    if (step.kind !== 'working-copy' && step.blueprintId !== undefined) throw new Error('Only working-copy steps may select a Drydock blueprint.');
+    return { key, name: text(step.name, 'step name', 240), kind: step.kind, dependsOn: [...step.dependsOn] as string[], worker, ...(endpoint ? { endpoint } : {}), ...(blueprintId ? { blueprintId } : {}) };
   });
   const incoming = new Map(steps.map(step => [step.key, step.dependsOn.length])), children = new Map<string, string[]>();
   for (const step of steps) for (const dependency of step.dependsOn) {

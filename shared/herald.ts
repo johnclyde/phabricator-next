@@ -1,24 +1,30 @@
 /** Herald rule semantics follow the pinned 2021 engine. Host integrations supply
  * object snapshots, authority, and bounded regular-expression evaluation. */
-export type HeraldContentType = 'revision' | 'task' | 'wiki' | 'paste';
+export type HeraldContentType = 'revision' | 'task' | 'wiki' | 'paste' | 'commit' | 'push-ref' | 'push-content';
 export type HeraldRuleType = 'personal' | 'object' | 'global';
 export type HeraldRepetition = 'every' | 'first' | 'change';
-export type HeraldField = 'always' | 'isNew' | 'title' | 'body' | 'comment' | 'status' | 'priority' | 'actorId' | 'authorId' | 'ownerId' | 'repositoryId' | 'projectIds' | 'subscriberIds' | 'reviewerIds' | 'filePaths' | 'fileContent' | 'rule';
+export type HeraldField = 'always' | 'isNew' | 'title' | 'body' | 'comment' | 'status' | 'priority' | 'actorId' | 'authorId' | 'ownerId' | 'repositoryId' | 'projectIds' | 'subscriberIds' | 'reviewerIds' | 'filePaths' | 'fileContent' | 'rule' | 'refName' | 'refType' | 'refChange' | 'forced' | 'commitId' | 'authorRaw' | 'committerRaw' | 'branches' | 'isMerge' | 'diffAdded' | 'diffRemoved';
 export type HeraldOperator = 'contains' | '!contains' | 'is' | '!is' | 'isany' | '!isany' | 'all' | 'any' | 'none' | 'exists' | '!exists' | 'true' | 'false' | 'regexp' | '!regexp' | 'regexp-pair' | 'conditions' | '!conditions';
 export interface HeraldCondition { field: HeraldField; operator: HeraldOperator; value: string | string[] | boolean | null }
 export type HeraldAction =
   | { type: 'nothing' | 'add-self-subscriber' | 'remove-self-subscriber' | 'add-self-reviewer' | 'assign-self' }
   | { type: 'add-subscribers' | 'remove-subscribers' | 'add-projects' | 'remove-projects' | 'run-build-plans'; targets: string[] }
   | { type: 'add-reviewers'; targets: string[]; required?: boolean }
-  | { type: 'comment' | 'task-status' | 'task-priority'; value: string }
+  | { type: 'comment' | 'task-status' | 'task-priority' | 'block-push'; value: string }
   | { type: 'assign'; value: string | null };
 export interface HeraldRuleInput { name: string; contentType: HeraldContentType; ruleType: HeraldRuleType; objectId: string | null; enabled: boolean; match: 'all' | 'any'; repetition: HeraldRepetition; conditions: HeraldCondition[]; actions: HeraldAction[] }
 export interface HeraldRule extends HeraldRuleInput { id: string; version: number; authorId: string; createdAt: string; updatedAt: string }
 export interface HeraldRuleVersion { rule: HeraldRule; actorId: string; createdAt: string }
+export interface HeraldGitSnapshot {
+  commitId: string | null; refName: string | null; refType: 'branch' | 'tag' | null; refChange: 'create' | 'update' | 'delete' | null;
+  forced: boolean; isMerge: boolean; authorRaw: string; committerRaw: string; branches: string[];
+  diffAdded: { path: string; content: string }[]; diffRemoved: { path: string; content: string }[];
+}
 export interface HeraldSnapshot {
   objectId: string; contentType: HeraldContentType; eventId: string; actorId: string; isNew: boolean;
   title: string; body: string; comment: string; status: string; priority: string | null; authorId: string | null;
   ownerId: string | null; repositoryId: string | null; projectIds: string[]; subscriberIds: string[]; reviewerIds: string[];
+  git?: HeraldGitSnapshot;
   files: { path: string; content: string }[]; version: number; versionId: string | null; contentHash: string | null;
 }
 export interface HeraldRuleState { applied: boolean; matched: boolean }
@@ -30,24 +36,39 @@ export interface HeraldActionResult extends HeraldEffect { status: 'applied' | '
 export interface HeraldEvaluation { rules: HeraldRuleResult[]; effects: HeraldEffect[]; state: Record<string, HeraldRuleState> }
 export interface HeraldTranscript { id: string; eventId: string; objectId: string; contentType: HeraldContentType; createdAt: string; dryRun: boolean; actorId: string; snapshot: HeraldSnapshot; rules: HeraldRuleResult[]; actions: HeraldActionResult[] }
 export interface HeraldFieldDefinition { key: HeraldField; label: string; type: 'boolean' | 'text' | 'identity' | 'list' | 'text-list' | 'text-map' | 'rule'; contentTypes: readonly HeraldContentType[] }
-const allTypes: readonly HeraldContentType[] = ['revision', 'task', 'wiki', 'paste'];
+export const HERALD_CONTENT_TYPES: readonly HeraldContentType[] = ['revision', 'task', 'wiki', 'paste', 'commit', 'push-ref', 'push-content'];
+const allTypes = HERALD_CONTENT_TYPES;
+const objectTypes: readonly HeraldContentType[] = ['revision', 'task', 'wiki', 'paste'];
+const gitTypes: readonly HeraldContentType[] = ['commit', 'push-ref', 'push-content'];
+const gitContentTypes: readonly HeraldContentType[] = ['commit', 'push-content'];
 export const HERALD_FIELDS: readonly HeraldFieldDefinition[] = [
   { key: 'always', label: 'Always', type: 'boolean', contentTypes: allTypes },
   { key: 'isNew', label: 'Object is newly created', type: 'boolean', contentTypes: allTypes },
   { key: 'title', label: 'Title', type: 'text', contentTypes: allTypes },
   { key: 'body', label: 'Description or content', type: 'text', contentTypes: allTypes },
-  { key: 'comment', label: 'Comment content', type: 'text', contentTypes: allTypes },
+  { key: 'comment', label: 'Comment content', type: 'text', contentTypes: objectTypes },
   { key: 'status', label: 'Status', type: 'text', contentTypes: ['revision', 'task', 'wiki', 'paste'] },
   { key: 'priority', label: 'Priority', type: 'text', contentTypes: ['task'] },
   { key: 'actorId', label: 'Acting user', type: 'identity', contentTypes: allTypes },
   { key: 'authorId', label: 'Author', type: 'identity', contentTypes: ['revision', 'task', 'paste'] },
   { key: 'ownerId', label: 'Assigned to', type: 'identity', contentTypes: ['task'] },
-  { key: 'repositoryId', label: 'Repository', type: 'identity', contentTypes: ['revision'] },
-  { key: 'projectIds', label: 'Project tags', type: 'list', contentTypes: ['revision', 'task'] },
-  { key: 'subscriberIds', label: 'Subscribers', type: 'list', contentTypes: allTypes },
+  { key: 'repositoryId', label: 'Repository', type: 'identity', contentTypes: ['revision', ...gitTypes] },
+  { key: 'projectIds', label: 'Project tags', type: 'list', contentTypes: ['revision', 'task', ...gitTypes] },
+  { key: 'subscriberIds', label: 'Subscribers', type: 'list', contentTypes: objectTypes },
   { key: 'reviewerIds', label: 'Reviewers', type: 'list', contentTypes: ['revision'] },
-  { key: 'filePaths', label: 'Source filenames', type: 'text-list', contentTypes: ['revision'] },
-  { key: 'fileContent', label: 'Source file content', type: 'text-map', contentTypes: ['revision'] },
+  { key: 'filePaths', label: 'Source filenames', type: 'text-list', contentTypes: ['revision', ...gitContentTypes] },
+  { key: 'fileContent', label: 'Source file content or commit diff', type: 'text-map', contentTypes: ['revision', ...gitContentTypes] },
+  { key: 'refName', label: 'Full ref name', type: 'text', contentTypes: ['push-ref'] },
+  { key: 'refType', label: 'Ref type (branch or tag)', type: 'text', contentTypes: ['push-ref'] },
+  { key: 'refChange', label: 'Ref change (create, update or delete)', type: 'text', contentTypes: ['push-ref'] },
+  { key: 'forced', label: 'Non-fast-forward update', type: 'boolean', contentTypes: ['push-ref'] },
+  { key: 'commitId', label: 'Commit object ID', type: 'text', contentTypes: gitContentTypes },
+  { key: 'authorRaw', label: 'Commit author (raw name and email)', type: 'text', contentTypes: gitContentTypes },
+  { key: 'committerRaw', label: 'Committer (raw name and email)', type: 'text', contentTypes: gitContentTypes },
+  { key: 'branches', label: 'Affected branches', type: 'text-list', contentTypes: gitContentTypes },
+  { key: 'isMerge', label: 'Merge commit', type: 'boolean', contentTypes: gitContentTypes },
+  { key: 'diffAdded', label: 'Added diff content', type: 'text-map', contentTypes: gitContentTypes },
+  { key: 'diffRemoved', label: 'Removed diff content', type: 'text-map', contentTypes: gitContentTypes },
   { key: 'rule', label: 'Another Herald rule', type: 'rule', contentTypes: allTypes },
 ];
 export const HERALD_OPERATORS: Readonly<Record<HeraldFieldDefinition['type'], readonly HeraldOperator[]>> = {
@@ -58,19 +79,20 @@ export const HERALD_OPERATORS: Readonly<Record<HeraldFieldDefinition['type'], re
 };
 export const HERALD_ACTIONS: readonly { type: HeraldAction['type']; label: string; contentTypes: readonly HeraldContentType[]; personal: boolean }[] = [
   { type: 'nothing', label: 'Do nothing', contentTypes: allTypes, personal: true },
-  { type: 'add-self-subscriber', label: 'Add me as a subscriber', contentTypes: allTypes, personal: true },
-  { type: 'remove-self-subscriber', label: 'Remove me as a subscriber', contentTypes: allTypes, personal: true },
+  { type: 'add-self-subscriber', label: 'Add me as a subscriber', contentTypes: objectTypes, personal: true },
+  { type: 'remove-self-subscriber', label: 'Remove me as a subscriber', contentTypes: objectTypes, personal: true },
   { type: 'add-self-reviewer', label: 'Add me as a reviewer', contentTypes: ['revision'], personal: true },
   { type: 'assign-self', label: 'Assign to me', contentTypes: ['task'], personal: true },
-  { type: 'add-subscribers', label: 'Add subscribers', contentTypes: allTypes, personal: false },
-  { type: 'remove-subscribers', label: 'Remove subscribers', contentTypes: allTypes, personal: false },
+  { type: 'add-subscribers', label: 'Add subscribers', contentTypes: objectTypes, personal: false },
+  { type: 'remove-subscribers', label: 'Remove subscribers', contentTypes: objectTypes, personal: false },
   { type: 'add-reviewers', label: 'Add reviewers', contentTypes: ['revision'], personal: false },
   { type: 'add-projects', label: 'Add project tags', contentTypes: ['revision', 'task'], personal: false },
   { type: 'remove-projects', label: 'Remove project tags', contentTypes: ['revision', 'task'], personal: false },
-  { type: 'run-build-plans', label: 'Run build plans', contentTypes: ['revision'], personal: false },
+  { type: 'run-build-plans', label: 'Run build plans', contentTypes: ['revision', 'commit'], personal: false },
   { type: 'comment', label: 'Add comment', contentTypes: ['revision', 'task', 'paste'], personal: false },
   { type: 'task-status', label: 'Change task status', contentTypes: ['task'], personal: false },
   { type: 'task-priority', label: 'Change task priority', contentTypes: ['task'], personal: false },
+  { type: 'block-push', label: 'Block push with message', contentTypes: ['push-ref', 'push-content'], personal: false },
   { type: 'assign', label: 'Assign task', contentTypes: ['task'], personal: false },
 ];
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value)); }
@@ -101,7 +123,7 @@ export function parseHeraldAction(input: unknown, contentType: HeraldContentType
   }
   exact(input, ['type', 'value']);
   if (type === 'assign') return { type, value: input.value === null ? null : text(input.value, 'Assignee', 200) };
-  const value = text(input.value, 'Action value', type === 'comment' ? 10_000 : 200);
+  const value = text(input.value, 'Action value', type === 'comment' || type === 'block-push' ? 10_000 : 200);
   if (type === 'task-status' && !['open', 'in_progress', 'resolved'].includes(value)) throw new Error('Choose open, in_progress, or resolved; duplicate status requires a merge.');
   if (type === 'task-priority' && !['low', 'normal', 'high', 'urgent'].includes(value)) throw new Error('Choose a valid task priority.');
   return { type, value } as HeraldAction;
@@ -145,7 +167,9 @@ export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: Hera
         } else if (condition.field === 'always') value = true;
         else if (condition.field === 'filePaths') value = snapshot.files.map(file => file.path);
         else if (condition.field === 'fileContent') value = snapshot.files.map(file => file.content);
-        else value = snapshot[condition.field];
+        else if (condition.field === 'diffAdded' || condition.field === 'diffRemoved') { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); value = snapshot.git[condition.field].map(file => file.content); }
+        else if (['refName', 'refType', 'refChange', 'forced', 'commitId', 'authorRaw', 'committerRaw', 'branches', 'isMerge'].includes(condition.field)) { if (!snapshot.git) throw new Error('Exact Git event facts are unavailable.'); value = snapshot.git[condition.field as Exclude<keyof HeraldGitSnapshot, 'diffAdded' | 'diffRemoved'>]; }
+        else value = snapshot[condition.field as Exclude<HeraldField, keyof HeraldGitSnapshot | 'filePaths' | 'fileContent' | 'rule' | 'always'>];
           const values = Array.isArray(value) ? value : value === null ? [] : [String(value)], targets = Array.isArray(condition.value) ? condition.value : [];
           switch (condition.operator) {
             case 'contains': case '!contains': { const found = values.some(value => value.toLocaleLowerCase('en-US').includes(String(condition.value).toLocaleLowerCase('en-US'))); conditionMatched = condition.operator === 'contains' ? found : !found; break; }
@@ -161,7 +185,7 @@ export function evaluateHeraldRules(rules: readonly HeraldRule[], snapshot: Hera
             case 'conditions': conditionMatched = Boolean(value); break;
             case '!conditions': conditionMatched = !value; break;
             case 'regexp': case '!regexp': { if (!options.regexp) throw new Error('Bounded regular-expression evaluation is unavailable.'); const found = options.regexp(String(condition.value), values); conditionMatched = condition.operator === 'regexp' ? found : !found; break; }
-            case 'regexp-pair': { if (!options.regexp) throw new Error('Bounded regular-expression evaluation is unavailable.'); const pair = JSON.parse(String(condition.value)) as [string, string]; conditionMatched = snapshot.files.some(file => options.regexp!(pair[0], [file.path]) && options.regexp!(pair[1], [file.content])); break; }
+            case 'regexp-pair': { if (!options.regexp) throw new Error('Bounded regular-expression evaluation is unavailable.'); const pair = JSON.parse(String(condition.value)) as [string, string]; const files = condition.field === 'diffAdded' || condition.field === 'diffRemoved' ? snapshot.git?.[condition.field] : snapshot.files; if (!files) throw new Error('Exact diff content is unavailable.'); conditionMatched = files.some(file => options.regexp!(pair[0], [file.path]) && options.regexp!(pair[1], [file.content])); break; }
           }
         } catch (error) { result.conditions.push({ index, condition, matched: null, error: error instanceof Error ? error.message : 'Condition evaluation failed.' }); throw error; }
         result.conditions.push({ index, condition, matched: conditionMatched });

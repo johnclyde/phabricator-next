@@ -36,6 +36,7 @@ The server intentionally binds to loopback. Password sign-in is available with `
 
 ## What works
 
+- [Git commit and push rules](docs/git-automation.md): a trusted receive hook enforces ref/content rules, records decisions and starts exact commit builds. [Drydock](docs/drydock.md) adds authorized working-copy blueprints, fenced leases, a real local Git worker and Harbormaster integration. Providers and repository hooks require explicit operator configuration.
 - [Herald and Harbormaster](docs/automation.md): versioned rules with test transcripts, automatic scoped actions, immutable build plans and sources, dependent steps, external worker leases and results, configured HTTP dispatch, and mobile rule/build controls. Remaining upstream adapters and execution capabilities are tracked explicitly.
 
 - Code, paper and prose/legal revisions with immutable source snapshots, content hashes and activity history. [Comparison controls](docs/comparisons.md) keep an exact version pair and file selected, support reverse comparisons and deleted files, and connect bounded literal word/line differences with touch, keyboard and spoken change/file navigation. An optional space/tab navigation filter retains the full literal diff and reports skipped passages. [Passage review threads](docs/review-threads.md) preserve exact source quotations, replies and resolve/reopen history across versions, with explicit uncertainty when text cannot be located uniquely.

@@ -9,7 +9,7 @@ export function projectMatches(project: Pick<ProjectSnapshot, 'id' | 'name' | 'p
   return project.id.toLowerCase() === exact || project.name.toLowerCase() === exact || projectDisplayName(project).toLowerCase() === exact || Boolean(slug && (project.primarySlug === slug || (project.aliases || []).includes(slug)));
 }
 
-export type WorkspaceView = 'herald' | 'harbormaster' | 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files' | 'pastes' | 'notifications' | 'audio';
+export type WorkspaceView = 'herald' | 'harbormaster' | 'drydock' | 'home' | 'drafts' | 'reviews' | 'papers' | 'tasks' | 'projects' | 'repositories' | 'wiki' | 'activity' | 'outbox' | 'spaces' | 'files' | 'pastes' | 'notifications' | 'audio';
 export type FindingVoiceAction = 'findings' | 'currentFinding' | 'nextFinding' | 'previousFinding' | 'findingSource';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
@@ -17,7 +17,7 @@ export type VoiceCommand = { type: 'revisionActive'; kind: RevisionKind } | { ty
 export function parseCommand(input: string): VoiceCommand {
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
-  const aliases: Record<string, WorkspaceView> = { herald: 'herald', rules: 'herald', harbormaster: 'harbormaster', builds: 'harbormaster', audio: 'audio', 'audio inbox': 'audio', recordings: 'audio', home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files', pastes: 'pastes', paste: 'pastes' };
+  const aliases: Record<string, WorkspaceView> = { drydock: 'drydock', 'dry dock': 'drydock', blueprints: 'drydock', herald: 'herald', rules: 'herald', harbormaster: 'harbormaster', builds: 'harbormaster', audio: 'audio', 'audio inbox': 'audio', recordings: 'audio', home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files', pastes: 'pastes', paste: 'pastes' };
   const active = text.match(/^(?:open|show|go to) (?:the )?active (code revisions|revisions|reviews|papers|drafts|documents)$/);
   if (active) return { type: 'revisionActive', kind: active[1] === 'papers' ? 'paper' : active[1] === 'drafts' || active[1] === 'documents' ? 'document' : 'code' };
   const revisionView = original.match(/^(?:open|show|go to) (?:the )?(code revision|code revisions|revision|revisions|review|reviews|paper|papers|draft|drafts|document|documents) (?:saved )?view (.+)$/i);

@@ -322,10 +322,10 @@ export function createApp(options: AppOptions = {}): App {
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
     const access = new AccessLayer(store, auth, policies, context);
-    if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/')) {
+    if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/')) {
       let commit;
-      if (method === 'POST' && path === '/api/harbormaster/builds' && input && typeof input === 'object' && 'repositoryId' in input) {
-        const data = object(input, ['repositoryId', 'commitId', 'planId', 'planVersion']);
+      if (method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases') && input && typeof input === 'object' && 'repositoryId' in input) {
+        const data = object(input, path === '/api/drydock/leases' ? ['repositoryId', 'commitId', 'blueprintId', 'blueprintVersion', 'durationSeconds'] : ['repositoryId', 'commitId', 'planId', 'planVersion']);
         const id = string(data.repositoryId, 'Repository ID', 100), commitId = string(data.commitId, 'Commit ID', 64);
         const authorize = () => { auth.revalidate(context, 'write'); access.require(id, 'edit'); };
         store.read(authorize);
@@ -903,7 +903,7 @@ export function createApp(options: AppOptions = {}): App {
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
-          if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
+          if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
           if (path === '/api/revision-views') {
             if (url.search) throw new HttpError(400, 'Saved revision view lists do not accept query parameters.');
@@ -1339,8 +1339,8 @@ export function createApp(options: AppOptions = {}): App {
       const key = req.headers['idempotency-key'];
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
-      const input = await body(req, req.method === 'POST' && path === '/api/files' ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
+      const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
+      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases' || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);

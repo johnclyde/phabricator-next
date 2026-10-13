@@ -27,7 +27,7 @@ test('schema34 is only a format fence: legacy comments, preferences, receipts an
     store.pastes.comment(paste.id, { body: '@future', contentVersion: 1 }, alice);
     store.database.exec("CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Keep exact bytes'); PRAGMA user_version=33");
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 37);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 38);
     assert.deepEqual(snapshot(store.database), before);
     let resolutions = 0;
     store.configureMentions({ resolve: () => { resolutions++; return { principalId: 'future', displayName: 'Future' }; } });
@@ -43,9 +43,9 @@ test('schema34 is only a format fence: legacy comments, preferences, receipts an
 test('a future mention schema is rejected without modifying any saved record', () => {
   const directory = mkdtempSync(join(tmpdir(), 'mention-future-')), path = join(directory, 'db.sqlite'), store = new Store({ path });
   try {
-    store.createTask({ title: 'Preserve future data' }, alice); store.database.exec('PRAGMA user_version=38');
+    store.createTask({ title: 'Preserve future data' }, alice); store.database.exec('PRAGMA user_version=39');
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /newer|schema|version/i);
     const db = new DatabaseSync(path);
-    try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 38); assert.deepEqual(snapshot(db), before); } finally { db.close(); }
+    try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 39); assert.deepEqual(snapshot(db), before); } finally { db.close(); }
   } finally { if (store.database.isOpen) store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

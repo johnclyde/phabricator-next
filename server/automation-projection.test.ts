@@ -51,3 +51,15 @@ test('source policy revocation blocks even already-loaded transcript presentatio
     assert.throws(() => presentHeraldTranscript(transcript, 'bob', f.herald, f.policies), { status: 404 }); assert.equal(rule.version, 1);
   } finally { f.store.close(); }
 });
+
+test('Git subject transcripts inherit current repository visibility instead of synthetic object IDs', () => {
+  const f = fixture(); try {
+    f.rule({ contentType: 'commit' });
+    const source = { ...f.snapshot, objectId: `GC-${'a'.repeat(64)}`, contentType: 'commit' as const, eventId: 'observed-commit' };
+    const transcript = f.herald.evaluate(source, { canEvaluate: () => true, canApply: () => true, apply: () => ({ changed: false, message: 'No changes.' }) });
+    assert.equal(presentHeraldTranscript(transcript, 'alice', f.herald, f.policies).objectId, source.objectId);
+    assert.throws(() => presentHeraldTranscript(transcript, 'bob', f.herald, f.policies), { status: 404 });
+    const policy = f.policies.policy(f.repository.id, 'alice'); f.policies.setPolicy(f.repository.id, { expectedVersion: policy.version, spaceId: policy.spaceId, ...policy.rules, view: { kind: 'workspace' } }, 'alice');
+    const projected = presentHeraldTranscript(transcript, 'bob', f.herald, f.policies); assert.equal(projected.objectId, source.objectId); assert.deepEqual(projected.snapshot.projectIds, [f.second.id]);
+  } finally { f.store.close(); }
+});

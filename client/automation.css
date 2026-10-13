@@ -43,10 +43,10 @@
 .automation-recovery { padding: 15px; border: 1px solid #e3c477; border-radius: 5px; background: #fff9e9; }
 .automation-recovery h3 { margin-top: 0; }
 .automation-status { text-transform: capitalize; }
-.automation-status-passed, .automation-status-complete, .automation-status-enabled, .automation-status-succeeded { background: #e7f5ea; color: #287443; }
-.automation-status-failed, .automation-status-error, .automation-status-broken { background: #fcebed; color: #a83c48; }
-.automation-status-running, .automation-status-pending, .automation-status-waiting { background: #e8f1fb; color: #245e94; }
-.automation-status-disabled, .automation-status-canceled, .automation-status-aborted, .automation-status-stopped, .automation-status-skipped { background: #eef0f3; color: #637184; }
+.automation-status-passed, .automation-status-complete, .automation-status-enabled, .automation-status-succeeded, .automation-status-active, .automation-status-approved, .automation-status-allowed { background: #e7f5ea; color: #287443; }
+.automation-status-failed, .automation-status-error, .automation-status-broken, .automation-status-blocked, .automation-status-denied { background: #fcebed; color: #a83c48; }
+.automation-status-running, .automation-status-pending, .automation-status-waiting, .automation-status-acquired, .automation-status-releasing { background: #e8f1fb; color: #245e94; }
+.automation-status-disabled, .automation-status-canceled, .automation-status-aborted, .automation-status-stopped, .automation-status-skipped, .automation-status-expired, .automation-status-released, .automation-status-revoked { background: #eef0f3; color: #637184; }
 .automation-table-wrap { max-width: 100%; overflow: auto; }
 .automation-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .automation-table th, .automation-table td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; overflow-wrap: anywhere; }

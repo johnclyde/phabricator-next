@@ -1,12 +1,13 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import type { DrydockLeaseDetail, DrydockWorkingCopy } from '../shared/drydock.ts';
 import type { AuthContext } from '../shared/auth.ts';
 import type { GitCommitResult } from '../shared/repositories.ts';
 import { isGitObjectId } from '../shared/repositories.ts';
 import { analyzeLocally } from '../shared/review.ts';
 import { sourceSnapshotCanonical } from '../shared/source-snapshot.ts';
 import type { RevisionKind, RevisionVersion } from '../shared/types.ts';
-import { buildPlanInput, buildReportInput, type Build, type Buildable, type BuildArtifact, type BuildClaim, type BuildClaimInput, type BuildCommandInput, type BuildDetail, type BuildEvent, type BuildPlan, type BuildPlanInput, type BuildReport, type BuildReportInput, type BuildRunInput, type BuildTarget } from '../shared/harbormaster.ts';
+import { buildPlanInput, buildReportInput, type Build, type Buildable, type BuildArtifact, type BuildClaim, type BuildClaimInput, type BuildCommandInput, type BuildDetail, type BuildEvent, type BuildPlan, type BuildPlanInput, type BuildReport, type BuildReportInput, type BuildRunInput, type BuildTarget, type BuildStep } from '../shared/harbormaster.ts';
 import { HttpError, integer, object, string } from './validation.ts';
 
 export interface BuildActor { principalId: string; displayName: string; workspaceId: string }
@@ -17,6 +18,10 @@ export interface HarbormasterHooks {
   mayManagePlan?(context: BuildAuthority, plan: BuildPlan): boolean;
   allowHttp?(endpoint: string, context: BuildAuthority): void;
   httpActor?(endpoint: string, creator: BuildAuthority): BuildActor;
+  checkWorkingCopy?(step: BuildStep, actor: BuildAuthority): void;
+  workingCopy?(build: Build, source: Buildable, target: BuildTarget, step: BuildStep, actor: BuildAuthority): DrydockLeaseDetail;
+  workingCopies?(buildId: string, actor: BuildAuthority, requiredTargetIds?: string[]): DrydockWorkingCopy[];
+  releaseWorkingCopies?(buildId: string, actor: BuildAuthority): void;
 }
 interface Row { data: string }
 interface TargetRow extends Row { lease_hash: string | null; lease_principal: string | null; lease_until: number | null }
@@ -74,6 +79,7 @@ export class HarbormasterStore {
     this.database.prepare('INSERT INTO harbormaster_events(id,build_id,data) VALUES(?,?,?)').run(event.id, buildId, JSON.stringify(event));
   }
   private endpointAllowed(plan: BuildPlanInput, context: BuildAuthority): void {
+    for (const step of plan.steps) if (step.kind === 'working-copy') { if (!this.hooks.checkWorkingCopy) throw new HttpError(409, 'Drydock working copies are not configured.'); this.hooks.checkWorkingCopy(step, context); }
     for (const step of plan.steps) if (step.kind === 'http') { if (!this.hooks.allowHttp) throw new HttpError(409, 'HTTP build endpoints have not been configured by the operator.'); this.hooks.allowHttp(step.endpoint!, context); }
   }
   private source(buildable: Buildable): RevisionVersion | null {
@@ -122,6 +128,7 @@ export class HarbormasterStore {
       this.hooks.authorize(context, revisionId, true); const plan = this.selectedPlan(input, context), data = input as BuildRunInput;
       const versionId = string(data.versionId, 'Source version ID', 100), contentHash = string(data.contentHash, 'Source content hash', 64);
       if (!/^[a-f0-9]{64}$/.test(contentHash)) throw new HttpError(400, 'Use the immutable source SHA-256 hash.');
+      if (plan.steps.some(step => step.kind === 'working-copy')) throw new HttpError(400, 'Drydock working copies require an immutable Git commit build.');
       const source = this.hooks.source(revisionId, versionId, contentHash);
       const buildable = this.saveBuildable({ sourceKind: 'revision', revisionId, repositoryId: null, commitId: null, treeId: null, objectFormat: null, versionId, versionNumber: source.version.number, contentHash, kind: source.kind });
       this.source(buildable); return this.startBuild(buildable, plan, context, null);
@@ -175,8 +182,15 @@ export class HarbormasterStore {
       build.status = command === 'abort' ? 'aborted' : command === 'pause' ? 'paused' : 'pending';
       if (command === 'abort') for (const target of this.targets(id)) if (!terminal(target.status)) { target.status = 'aborted'; target.finishedAt = this.timestamp(); this.clearLease(target); this.updateTarget(target); }
       this.updateBuild(build); this.event(id, command, command === 'pause' ? 'Paused scheduling; already running targets may finish.' : command === 'resume' ? 'Resumed build scheduling.' : 'Aborted unfinished targets and invalidated their leases.', context);
+      if (command === 'abort') this.hooks.releaseWorkingCopies?.(id, context);
       if (command === 'resume') this.advance(id, context); return this.detail(id, context);
     }, true);
+  }
+  private workingCopyDependencies(build: Build, target: BuildTarget): string[] {
+    const steps = new Map(build.plan.steps.map(step => [step.key, step])), needed = new Set<string>();
+    const queue = [...steps.get(target.stepKey)!.dependsOn];
+    for (let index = 0; index < queue.length; index++) { const key = queue[index]!; if (needed.has(key)) continue; needed.add(key); queue.push(...steps.get(key)!.dependsOn); }
+    return this.targets(build.id).filter(item => needed.has(item.stepKey) && steps.get(item.stepKey)!.kind === 'working-copy').map(item => item.id);
   }
   claim(input: unknown, context: BuildAuthority): BuildClaim {
     return this.scope(() => {
@@ -184,12 +198,13 @@ export class HarbormasterStore {
       if (integer(data.expectedVersion, 'Expected target version') !== target.version) throw new HttpError(409, 'Build target changed. Reload before claiming.');
       if (terminal(build.status) || build.status === 'paused') throw new HttpError(409, 'This build is not accepting work.');
       if (target.status !== 'pending' && !(target.status === 'building' && row.lease_until !== null && row.lease_until <= this.now())) throw new HttpError(409, 'This target is blocked, already leased, or finished.');
-      const worker = string(data.worker, 'Worker label', 100); if (step.kind === 'local-checks' || worker !== step.worker) throw new HttpError(400, 'Choose the worker label configured for this target.');
+      const worker = string(data.worker, 'Worker label', 100); if (step.kind === 'local-checks' || step.kind === 'working-copy' || worker !== step.worker) throw new HttpError(400, 'Choose the worker label configured for this target.');
       this.endpointAllowed({ ...build.plan, steps: [step] }, context); const source = this.source(this.buildable(build.buildableId));
+      const workingCopies = this.hooks.workingCopies?.(build.id, context, this.workingCopyDependencies(build, target));
       const leaseToken = randomBytes(32).toString('hex'), until = this.now() + LEASE_MS; target.status = 'building'; target.attempt++; target.worker = worker; target.leaseUntil = new Date(until).toISOString(); target.startedAt = this.timestamp(); target.finishedAt = null;
       this.updateTarget(target); this.database.prepare('UPDATE harbormaster_targets SET lease_hash=?,lease_principal=?,lease_until=? WHERE id=?').run(hash(leaseToken), context.principalId, until, id);
       build.status = 'building'; this.updateBuild(build); this.event(build.id, 'claimed', `Worker ${worker} claimed attempt ${target.attempt}.`, context, target.id);
-      return { target, leaseToken, leaseUntil: target.leaseUntil, buildable: this.buildable(build.buildableId), step, source };
+      return { target, leaseToken, leaseUntil: target.leaseUntil, buildable: this.buildable(build.buildableId), step, source, ...(workingCopies?.length ? { workingCopies } : {}) };
     }, true);
   }
   report(targetId: string, input: unknown, context: BuildAuthority): BuildDetail {
@@ -199,6 +214,7 @@ export class HarbormasterStore {
       if (prior) { if (prior.fingerprint !== fingerprint || prior.actor_id !== context.principalId) throw new HttpError(409, 'This report identity was already used with different contents or authority.'); return this.detail(build.id, context); }
       if (target.status !== 'building' || terminal(build.status) || row.lease_hash !== hash(data.leaseToken) || row.lease_principal !== context.principalId || row.lease_until === null || row.lease_until <= this.now()) throw new HttpError(409, 'This build lease expired, finished, or belongs to another worker.', 'BUILD_LEASE_CHANGED');
       this.source(this.buildable(build.buildableId));
+      if (data.type !== 'fail') this.hooks.workingCopies?.(build.id, context, this.workingCopyDependencies(build, target));
       this.recordReport(target, data, context);
       if (data.type === 'work') { const until = this.now() + LEASE_MS; target.leaseUntil = new Date(until).toISOString(); this.database.prepare('UPDATE harbormaster_targets SET lease_until=? WHERE id=?').run(until, target.id); }
       else { target.status = data.type === 'pass' ? 'passed' : 'failed'; target.finishedAt = this.timestamp(); this.clearLease(target); }
@@ -217,15 +233,39 @@ export class HarbormasterStore {
   private advance(id: string, context: BuildAuthority): void {
     const build = this.rawBuild(id); if (terminal(build.status) || build.status === 'paused') return;
     this.hooks.authorize(context, this.objectId(this.buildable(build.buildableId)), true);
-    const targets = this.targets(id), byKey = new Map(targets.map(target => [target.stepKey, target])); let changed = true;
+    const targets = this.targets(id);
+    let lostWorkingCopy = false;
+    for (const target of targets) {
+      const step = build.plan.steps.find(item => item.key === target.stepKey)!;
+      if (step.kind !== 'working-copy' || target.status !== 'passed') continue;
+      const lease = this.hooks.workingCopy?.(build, this.buildable(build.buildableId), target, step, context).lease;
+      if (lease?.status === 'active') continue;
+      target.status = 'failed'; target.finishedAt = this.timestamp(); this.updateTarget(target);
+      this.recordReport(target, { leaseToken: 'drydock', reportId: `drydock-lost-${target.id}`, type: 'fail', log: 'The working-copy lease expired or its authorization was withdrawn before the build finished.' }, context);
+      this.event(id, 'working-copy-lost', 'A required working copy is no longer usable.', context, target.id); lostWorkingCopy = true;
+    }
+    if (lostWorkingCopy) for (const target of targets) if (!terminal(target.status)) { target.status = 'aborted'; target.finishedAt = this.timestamp(); this.clearLease(target); this.updateTarget(target); }
+    const byKey = new Map(targets.map(target => [target.stepKey, target])); let changed = true;
     while (changed) {
       changed = false;
       for (const step of build.plan.steps) {
-        const target = byKey.get(step.key)!; if (terminal(target.status) || target.status === 'building') continue;
+        const target = byKey.get(step.key)!; if (terminal(target.status) || target.status === 'building' && step.kind !== 'working-copy') continue;
         const dependencies = step.dependsOn.map(key => byKey.get(key)!);
         if (dependencies.some(dependency => dependency.status === 'failed' || dependency.status === 'aborted')) { target.status = 'aborted'; target.finishedAt = this.timestamp(); this.updateTarget(target); this.event(id, 'dependency-failed', 'A required dependency did not pass.', context, target.id); changed = true; continue; }
         if (dependencies.some(dependency => dependency.status !== 'passed')) continue;
         if (target.status === 'blocked') { target.status = 'pending'; this.updateTarget(target); changed = true; }
+        if (step.kind === 'working-copy') {
+          if (!this.hooks.workingCopy) throw new HttpError(409, 'Drydock working copies are not configured.');
+          const detail = this.hooks.workingCopy(build, this.buildable(build.buildableId), target, step, context);
+          const next = detail.lease.status === 'active' ? 'passed' : ['pending', 'acquired'].includes(detail.lease.status) ? 'building' : 'failed';
+          if (target.status !== next || target.drydockLeaseId !== detail.lease.id) {
+            if (!target.attempt) { target.attempt = 1; target.startedAt = this.timestamp(); }
+            target.drydockLeaseId = detail.lease.id; target.status = next; target.worker = step.worker;
+            if (terminal(next)) { target.finishedAt = this.timestamp(); this.recordReport(target, { leaseToken: 'drydock', reportId: `drydock-${detail.lease.id}`, type: next === 'passed' ? 'pass' : 'fail', log: next === 'passed' ? `Working copy ${detail.resource!.handle} is ready for this immutable commit.` : 'Drydock could not acquire a usable working copy.' }, context); }
+            this.updateTarget(target); this.event(id, 'working-copy', `Drydock lease ${detail.lease.id}: ${detail.lease.status}.`, context, target.id); changed = true;
+          }
+          continue;
+        }
         if (step.kind !== 'local-checks') continue;
         const source = this.source(this.buildable(build.buildableId)); if (!source || source.docx) { target.status = 'failed'; target.attempt++; target.startedAt = this.timestamp(); target.finishedAt = this.timestamp(); this.recordReport(target, { leaseToken: 'local', reportId: `local-${target.attempt}`, type: 'fail', log: 'Local deterministic text checks do not support this source format.' }, context); }
         else {
@@ -236,6 +276,15 @@ export class HarbormasterStore {
       }
     }
     build.status = targets.every(target => terminal(target.status)) ? targets.some(target => target.status === 'failed' || target.status === 'aborted') ? 'failed' : 'passed' : targets.some(target => target.status === 'building') ? 'building' : 'pending'; this.updateBuild(build);
+    if (terminal(build.status)) this.hooks.releaseWorkingCopies?.(id, context);
+  }
+  /** Reconcile resource readiness from the durable allocator; source execution stays in workers. */
+  reconcileWorkingCopies(shouldStop: () => boolean = () => false): void {
+    for (const row of this.database.prepare("SELECT id,actor FROM harbormaster_builds WHERE json_extract(data,'$.status') IN ('pending','building') ORDER BY sequence").all() as { id: string; actor: string }[]) {
+      if (shouldStop()) return;
+      const build = this.rawBuild(row.id); if (!build.plan.steps.some(step => step.kind === 'working-copy')) continue;
+      try { this.scope(() => this.advance(row.id, JSON.parse(row.actor) as BuildActor), true); } catch (error) { if (!(error instanceof HttpError && [401, 403, 404, 409].includes(error.status))) throw error; }
+    }
   }
   /** Metadata only: source never leaves this server through HTTP build dispatch. */
   async dispatchHttp(id: string, context: BuildAuthority, fetcher: typeof fetch = fetch, shouldStop: () => boolean = () => false): Promise<void> {
@@ -252,7 +301,7 @@ export class HarbormasterStore {
       if (worker.workspaceId !== context.workspaceId) throw new HttpError(403, 'The HTTP worker must belong to this workspace.');
       const claim = this.claim({ targetId: target.id, expectedVersion: target.version, worker: step.worker! }, worker);
       try {
-        const response = await fetcher(step.endpoint!, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15_000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'harbormaster.build', buildId: detail.build.id, targetId: target.id, attempt: claim.target.attempt, leaseToken: claim.leaseToken, leaseUntil: claim.leaseUntil, buildable: claim.buildable, step: claim.step }) });
+        const response = await fetcher(step.endpoint!, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15_000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'harbormaster.build', buildId: detail.build.id, targetId: target.id, attempt: claim.target.attempt, leaseToken: claim.leaseToken, leaseUntil: claim.leaseUntil, buildable: claim.buildable, step: claim.step, ...(claim.workingCopies?.length ? { workingCopies: claim.workingCopies } : {}) }) });
         await response.body?.cancel();
         this.report(target.id, { leaseToken: claim.leaseToken, reportId: randomUUID(), type: response.ok ? 'work' : 'fail', log: `HTTP build dispatch returned status ${response.status}.` }, worker);
       } catch (error) {

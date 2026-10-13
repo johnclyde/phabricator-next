@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Script, createContext } from 'node:vm';
 import type { DatabaseSync } from 'node:sqlite';
-import { evaluateHeraldRules, parseHeraldRuleInput, type HeraldAction, type HeraldActionResult, type HeraldContentType, type HeraldRule, type HeraldRuleInput, type HeraldRuleState, type HeraldRuleVersion, type HeraldSnapshot, type HeraldTranscript } from '../shared/herald.ts';
+import { HERALD_CONTENT_TYPES, evaluateHeraldRules, parseHeraldRuleInput, type HeraldAction, type HeraldActionResult, type HeraldContentType, type HeraldRule, type HeraldRuleInput, type HeraldRuleState, type HeraldRuleVersion, type HeraldSnapshot, type HeraldTranscript } from '../shared/herald.ts';
 import { HttpError } from './validation.ts';
 
 export interface HeraldAuthority { canManageGlobal: (actorId: string) => boolean; canEditObject: (actorId: string, objectId: string) => boolean; isEnabledPrincipal: (actorId: string) => boolean }
@@ -106,7 +106,7 @@ export class HeraldStore {
   }
   list(query: { contentType?: HeraldContentType; enabled?: boolean; before?: number; limit?: number } = {}): { rules: HeraldRule[]; nextBefore: number | null } {
     const size = limit(query.limit), cursor = before(query.before);
-    if (query.contentType !== undefined && !['revision', 'task', 'wiki', 'paste'].includes(query.contentType) || query.enabled !== undefined && typeof query.enabled !== 'boolean') throw new HttpError(400, 'Invalid Herald filter.');
+    if (query.contentType !== undefined && !HERALD_CONTENT_TYPES.includes(query.contentType) || query.enabled !== undefined && typeof query.enabled !== 'boolean') throw new HttpError(400, 'Invalid Herald filter.');
     const rows = this.database.prepare('SELECT id,number FROM herald_rules WHERE number<? AND (? IS NULL OR content_type=?) AND (? IS NULL OR json_extract(data,\'$.enabled\')=?) ORDER BY number DESC LIMIT ?').all(cursor, query.contentType ?? null, query.contentType ?? null, query.enabled === undefined ? null : Number(query.enabled), query.enabled === undefined ? null : Number(query.enabled), size + 1) as { id: string; number: number }[];
     const page = rows.slice(0, size); return { rules: page.map(row => this.get(row.id)), nextBefore: rows.length > size ? page.at(-1)!.number : null };
   }

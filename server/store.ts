@@ -1,3 +1,5 @@
+import { initializeGitAutomation } from './git-automation.ts';
+import { initializeDrydock } from './drydock.ts';
 import { initializeHerald } from './herald.ts';
 import { initializeHarbormaster } from './harbormaster.ts';
 import { initializeNotifications, initializeNotificationTargets, NotificationStore } from './notifications.ts';
@@ -228,7 +230,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 37) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 38) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -524,6 +526,10 @@ export class Store {
     }
     if (version < 37) {
       try { this.transaction(() => { initializeHerald(this.database); initializeHarbormaster(this.database); this.database.exec('PRAGMA user_version = 37'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 38) {
+      try { this.transaction(() => { initializeGitAutomation(this.database); initializeDrydock(this.database); this.database.exec('PRAGMA user_version = 38'); }); }
       catch (error) { this.database.close(); throw error; }
     }
     this.revisionViews = new RevisionViewStore(this.database);

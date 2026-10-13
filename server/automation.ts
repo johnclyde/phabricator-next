@@ -1,5 +1,10 @@
-import { visibleHeraldRule, presentHeraldTranscript } from './automation-projection.ts';
+import { DrydockStore } from './drydock.ts';
+import { GitAutomationStore, parseGitReceiveFacts } from './git-automation.ts';
+import { heraldPolicyObjectId } from '../shared/git-automation.ts';
+import type { GitReceiveFacts, GitReceiveReceipt } from '../shared/git-automation.ts';
+import { visibleHeraldRule, presentHeraldTranscript, presentGitReceiveReceipt } from './automation-projection.ts';
 import { createHash, randomUUID } from 'node:crypto';
+import type { DrydockBinding, DrydockBlueprint, DrydockLeaseDetail, DrydockAuthorization, DrydockClaim } from '../shared/drydock.ts';
 import type { AuthContext } from '../shared/auth.ts';
 import type { Activity, RevisionVersion, WikiVersion } from '../shared/types.ts';
 import type { HeraldRule, HeraldSnapshot, HeraldTranscript } from '../shared/herald.ts';
@@ -12,16 +17,28 @@ import { HarbormasterStore, type BuildAuthority, type BuildActor } from './harbo
 import { applyHeraldAction, canApplyHeraldAction } from './herald-effects.ts';
 import { HttpError, object, string, integer } from './validation.ts';
 
-export interface AutomationConfiguration { managers?: string[]; workers?: string[]; httpOrigins?: string[]; httpWorker?: string }
+export interface AutomationConfiguration { managers?: string[]; workers?: string[]; httpOrigins?: string[]; httpWorker?: string; gitReceivers?: Record<string, string[]>; drydockBindings?: DrydockBinding[]; drydockWorkers?: Record<string, string[]> }
 export function automationFromEnvironment(env: Record<string, string | undefined> = process.env): AutomationConfiguration {
   const list = (name: string) => (env[name] ?? '').split(',').map(value => value.trim()).filter(Boolean);
   const httpOrigins = list('APP_HARBORMASTER_HTTP_ORIGINS');
   for (const value of httpOrigins) { const url = new URL(value); if (!['https:', 'http:'].includes(url.protocol) || url.origin !== value) throw new Error('Harbormaster HTTP origins must be exact HTTP(S) origins without paths or credentials.'); }
-  return { managers: list('APP_AUTOMATION_MANAGERS'), workers: list('APP_HARBORMASTER_WORKERS'), httpOrigins, httpWorker: env.APP_HARBORMASTER_HTTP_WORKER };
+  const mapping = (name: string): Record<string, string[]> => {
+    let value: unknown; try { value = JSON.parse(env[name] ?? '{}'); } catch { throw new Error(`${name} must be a JSON mapping to account lists.`); }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.entries(value).some(([key, entries]) => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(key) || !Array.isArray(entries) || !entries.length || entries.some(entry => typeof entry !== 'string' || !entry || entry.length > 200))) throw new Error(`${name} must be a JSON mapping to account lists.`);
+    return value as Record<string, string[]>;
+  };
+  const gitReceivers = mapping('APP_GIT_RECEIVERS');
+  if (Object.keys(gitReceivers).some(id => !/^R[1-9]\d*$/.test(id))) throw new Error('Git receivers must be bound to repository IDs.');
+  const drydockWorkers = mapping('APP_DRYDOCK_WORKERS');
+  let bindings: unknown; try { bindings = JSON.parse(env.APP_DRYDOCK_BINDINGS ?? '[]'); } catch { throw new Error('APP_DRYDOCK_BINDINGS must be a JSON list.'); }
+  if (!Array.isArray(bindings) || bindings.some(value => !value || typeof value !== 'object' || Object.keys(value).some(key => !['key', 'worker', 'repositoryIds'].includes(key)) || typeof value.key !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(value.key) || typeof value.worker !== 'string' || !Object.hasOwn(drydockWorkers, value.worker) || !Array.isArray(value.repositoryIds) || !value.repositoryIds.length || value.repositoryIds.some((id: unknown) => typeof id !== 'string' || !/^R[1-9]\d*$/.test(id))) || new Set(bindings.map(value => value.key)).size !== bindings.length) throw new Error('Drydock bindings require distinct keys, configured workers and repository IDs.');
+  return { gitReceivers, drydockBindings: bindings as DrydockBinding[], drydockWorkers, managers: list('APP_AUTOMATION_MANAGERS'), workers: list('APP_HARBORMASTER_WORKERS'), httpOrigins, httpWorker: env.APP_HARBORMASTER_HTTP_WORKER };
 }
 /** Connects the portable rule engine and build runner to current workspace authority. */
 export class Automation {
   readonly herald: HeraldStore;
+  readonly git: GitAutomationStore;
+  readonly drydock: DrydockStore;
   readonly harbormaster: HarbormasterStore;
   readonly authority: HeraldAuthority;
   private timer?: ReturnType<typeof setInterval>;
@@ -30,6 +47,14 @@ export class Automation {
   constructor(private readonly store: Store, private readonly auth: Auth, private readonly policies: PolicyStore, private readonly config: AutomationConfiguration = {}) {
     this.authority = { canManageGlobal: id => this.manager(id), canEditObject: (id, target) => this.enabled(id) && this.policies.access(target, id).edit, isEnabledPrincipal: id => this.enabled(id) };
     this.herald = new HeraldStore(store.database);
+    this.git = new GitAutomationStore(store.database, this.herald);
+    this.drydock = new DrydockStore(store.database, {
+      authorize: (actor, id, write) => this.authorize(actor, id, write),
+      mayManage: (actor, blueprint) => this.drydockManager(actor, blueprint),
+      allowBinding: blueprint => { const binding = this.config.drydockBindings?.find(item => item.key === blueprint.binding && item.worker === blueprint.worker && item.repositoryIds.includes(blueprint.repositoryId)); if (!binding || !this.config.drydockWorkers?.[binding.worker]?.length) throw new HttpError(403, 'This Drydock binding is not configured by the operator.'); },
+      worker: (actor, label) => { const allowed = this.config.drydockWorkers?.[label]; if (!allowed || !this.boundListed(actor.principalId, allowed)) throw new HttpError(403, 'This account is not configured as this Drydock worker.'); },
+      subject: (actor, kind, id) => { this.authorize(actor, null, true); if (kind === 'principal') { if (!this.enabled(id) || id !== actor.principalId && !this.manager(actor.principalId)) throw new HttpError(403, 'Request authorization for your own active account.'); } else this.harbormaster.plan(id, actor); },
+    });
     this.harbormaster = new HarbormasterStore(store.database, {
       authorize: (actor, id, write) => this.authorize(actor, id, write),
       mayManagePlan: actor => this.manager(actor.principalId),
@@ -40,9 +65,15 @@ export class Automation {
       },
       allowHttp: endpoint => { if (!config.httpOrigins?.includes(new URL(endpoint).origin)) throw new HttpError(403, 'This HTTP build origin is not configured by the operator.'); this.httpActor(); },
       httpActor: () => this.httpActor(),
+      checkWorkingCopy: (step, actor) => this.drydock.checkStep(step, actor),
+      workingCopy: (build, source, target, step, actor) => this.drydock.forBuild(build, source, target, step, actor),
+      workingCopies: (id, actor, targetIds) => this.drydock.buildWorkingCopies(id, actor, targetIds),
+      releaseWorkingCopies: (id, actor) => this.drydock.releaseBuild(id, actor),
     });
     store.configureAutomation(events => this.capture(events));
   }
+  private drydockManager(actor: BuildAuthority, blueprint: DrydockBlueprint | null): boolean { return this.enabled(actor.principalId) && (this.manager(actor.principalId) || blueprint?.ownerId === actor.principalId); }
+  private canManageLease(detail: DrydockLeaseDetail, context: AuthContext): boolean { return context.scopes.includes('write') && this.policies.access(detail.lease.source.repositoryId, context.principalId).edit && (detail.lease.holderId === context.principalId || this.drydockManager(context, this.drydock.blueprint(detail.lease.blueprintId, context))); }
   private httpActor(): BuildActor {
     const selected = this.config.httpWorker;
     const account = selected ? this.store.database.prepare('SELECT id,display_name FROM auth_accounts WHERE (id=? OR username=?) AND disabled=0').get(selected, selected) as { id: string; display_name: string } | undefined : undefined;
@@ -57,6 +88,7 @@ export class Automation {
     const account = this.store.database.prepare('SELECT username FROM auth_accounts WHERE id=? AND disabled=0').get(id) as { username: string } | undefined;
     return list.includes(id) || Boolean(account && list.includes(account.username));
   }
+  private boundListed(id: string, list: string[]): boolean { return this.auth.mode === 'local' && id === `local:${this.auth.workspaceId}` ? list.includes('local') || list.includes(id) : this.listed(id, list); }
   manager(id: string): boolean { return this.listed(id, this.config.managers); }
   private worker(id: string): boolean { return this.listed(id, this.config.workers); }
   private authorize(actor: BuildAuthority, id: string | null, write: boolean): void {
@@ -67,10 +99,26 @@ export class Automation {
   private canEdit(rule: HeraldRule, principalId: string): boolean { return this.enabled(principalId) && (rule.ruleType === 'personal' ? rule.authorId === principalId : rule.ruleType === 'global' ? this.manager(principalId) : Boolean(rule.objectId && this.policies.access(rule.objectId, principalId).edit)); }
   private canViewRule(rule: HeraldRule, principalId: string): boolean { return visibleHeraldRule(rule, principalId, this.herald, this.policies); }
   private rulesForReader(rules: HeraldRule[], context: AuthContext) { return rules.filter(rule => this.canViewRule(rule, context.principalId)).map(rule => ({ ...rule, canEdit: context.scopes.includes('write') && this.canEdit(rule, context.principalId) })); }
+  private receiveAuthority(facts: GitReceiveFacts, context: AuthContext): boolean {
+    this.auth.revalidate(context, 'write');
+    const allowed = this.config.gitReceivers?.[facts.repositoryId];
+    if (!allowed || !this.boundListed(context.principalId, allowed) || !this.enabled(facts.pusherId)) throw new HttpError(403, 'This account is not a configured receiver for this repository and pusher.');
+    this.policies.require(facts.repositoryId, context.principalId, 'edit'); this.policies.require(facts.repositoryId, facts.pusherId, 'edit'); return true;
+  }
+  private policyObject(id: string): string { return this.git.policyObjectId(id) ?? id; }
   private hooks() { return {
-    canEvaluate: (rule: HeraldRule, snapshot: HeraldSnapshot) => this.enabled(rule.authorId) && this.policies.access(snapshot.objectId, rule.authorId).view && (rule.ruleType !== 'global' || this.manager(rule.authorId)) && (rule.ruleType !== 'object' || Boolean(rule.objectId && this.policies.access(rule.objectId, rule.authorId).edit)),
-    canApply: (rule: HeraldRule, action: Parameters<typeof canApplyHeraldAction>[5], snapshot: HeraldSnapshot) => canApplyHeraldAction(this.store, this.auth, this.policies, this.harbormaster, rule, action, snapshot),
-    apply: (rule: HeraldRule, action: Parameters<typeof applyHeraldAction>[5], snapshot: HeraldSnapshot) => applyHeraldAction(this.store, this.auth, this.policies, this.harbormaster, rule, action, snapshot),
+    canEvaluate: (rule: HeraldRule, snapshot: HeraldSnapshot) => this.enabled(rule.authorId) && this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId).view && (!snapshot.git || rule.actions.every(action => action.type === 'nothing') || this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId).edit) && (rule.ruleType !== 'global' || this.manager(rule.authorId)) && (rule.ruleType !== 'object' || Boolean(rule.objectId && this.policies.access(rule.objectId, rule.authorId).edit)),
+    canApply: (rule: HeraldRule, action: Parameters<typeof canApplyHeraldAction>[5], snapshot: HeraldSnapshot) => snapshot.git ? this.enabled(rule.authorId) && this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId)[action.type === 'nothing' ? 'view' : 'edit'] : canApplyHeraldAction(this.store, this.auth, this.policies, this.harbormaster, rule, action, snapshot),
+    apply: (rule: HeraldRule, action: Parameters<typeof applyHeraldAction>[5], snapshot: HeraldSnapshot) => {
+      if (!snapshot.git) return applyHeraldAction(this.store, this.auth, this.policies, this.harbormaster, rule, action, snapshot);
+      if (action.type === 'nothing') return { changed: false, message: 'Rule requested no action.' };
+      if (action.type === 'block-push') return { changed: true, message: action.value };
+      if (action.type !== 'run-build-plans' || snapshot.contentType !== 'commit') throw new HttpError(400, 'Unsupported Git automation action.');
+      const actor = { principalId: rule.authorId, displayName: this.auth.listAccounts().find(account => account.id === rule.authorId)?.displayName ?? 'You', workspaceId: this.auth.workspaceId };
+      const source = this.git.commit(snapshot.objectId), plans = action.targets.map(id => this.harbormaster.plan(id, actor));
+      const builds = plans.map(plan => this.harbormaster.runCommit(source, { planId: plan.id, planVersion: plan.version }, actor));
+      return { changed: builds.length > 0, message: `Started ${builds.length} commit build(s).`, references: builds.map(detail => detail.build.id) };
+    },
   }; }
   snapshot(id: string, eventId: string, actorId: string, isNew = false, comment = ''): HeraldSnapshot {
     const base: HeraldSnapshot = { objectId: id, eventId, actorId, isNew, comment, contentType: 'revision', title: '', body: '', status: '', priority: null, authorId: null, ownerId: null, repositoryId: null, projectIds: [], subscriberIds: [], reviewerIds: [], files: [], version: 0, versionId: null, contentHash: null };
@@ -120,8 +168,22 @@ export class Automation {
   read(path: string, query: URLSearchParams, context: AuthContext): unknown {
     this.auth.revalidate(context, 'read'); const accessEpoch = this.policies.epoch(), canManage = this.manager(context.principalId) && context.scopes.includes('write');
     const number = (name: string) => query.has(name) ? integer(Number(query.get(name)), name) : undefined;
-    const allowed = path === '/api/herald/rules' ? ['before', 'limit', 'contentType', 'enabled'] : path === '/api/herald/transcripts' ? ['before', 'limit', 'objectId'] : path.endsWith('/history') ? ['before', 'limit'] : path === '/api/harbormaster/builds' ? ['revisionId', 'objectId'] : [];
+    const allowed = path === '/api/drydock/worker/jobs' ? ['worker'] : path === '/api/herald/receives' ? ['repositoryId', 'before', 'limit'] : path === '/api/herald/rules' ? ['before', 'limit', 'contentType', 'enabled'] : path === '/api/herald/transcripts' ? ['before', 'limit', 'objectId'] : path.endsWith('/history') ? ['before', 'limit'] : path === '/api/harbormaster/builds' ? ['revisionId', 'objectId'] : [];
     if ([...query.keys()].some(key => !allowed.includes(key) || query.getAll(key).length !== 1)) throw new HttpError(400, 'Unsupported automation query parameters.');
+    if (path.startsWith('/api/drydock/')) {
+      if (path === '/api/drydock/blueprints') return { blueprints: this.drydock.blueprints(context).map(blueprint => ({ ...blueprint, canEdit: context.scopes.includes('write') && this.drydockManager(context, blueprint) && this.policies.access(blueprint.repositoryId, context.principalId).edit })), bindings: (this.config.drydockBindings ?? []).map(binding => ({ ...binding, repositoryIds: binding.repositoryIds.filter(id => this.policies.access(id, context.principalId).view) })).filter(binding => binding.repositoryIds.length), accessEpoch, canManage };
+      const blueprint = /^\/api\/drydock\/blueprints\/([^/]+)$/.exec(path);
+      if (blueprint) { const detail = this.drydock.blueprintDetail(blueprint[1]!, context); return { ...detail, accessEpoch, canManage: context.scopes.includes('write') && this.drydockManager(context, detail.blueprint) && this.policies.access(detail.blueprint.repositoryId, context.principalId).edit }; }
+      if (path === '/api/drydock/authorizations') return { authorizations: this.drydock.authorizations(context), accessEpoch, canManage };
+      const authorization = /^\/api\/drydock\/authorizations\/([^/]+)$/.exec(path);
+      if (authorization) { const item = this.drydock.authorization(authorization[1]!, context), blueprint = this.drydock.blueprint(item.blueprintId, context); return { authorization: item, accessEpoch, canManage: context.scopes.includes('write') && this.drydockManager(context, blueprint) && this.policies.access(blueprint.repositoryId, context.principalId).edit }; }
+      if (path === '/api/drydock/leases') return { leases: this.drydock.leases(context), accessEpoch };
+      if (path === '/api/drydock/resources') return { resources: this.drydock.resources(context), accessEpoch };
+      const detail = /^\/api\/drydock\/(leases|resources)\/([^/]+)$/.exec(path);
+      if (detail) { const result = detail[1] === 'leases' ? this.drydock.detail(detail[2]!, context) : this.drydock.resourceDetail(detail[2]!, context); return { ...result, accessEpoch, canManage: this.canManageLease(result, context) }; }
+      if (path === '/api/drydock/worker/jobs') { if (!context.scopes.includes('write')) throw new HttpError(403, 'Worker polling requires write scope.'); return { jobs: this.drydock.jobs(string(query.get('worker'), 'Worker label', 100), context), accessEpoch }; }
+      throw new HttpError(404, 'Drydock endpoint not found.');
+    }
     if (path === '/api/herald/rules') {
       const enabled = query.get('enabled'); if (enabled !== null && enabled !== 'true' && enabled !== 'false') throw new HttpError(400, 'Invalid enabled filter.');
       const page = this.herald.list({ before: number('before'), limit: number('limit'), ...(enabled === null ? {} : { enabled: enabled === 'true' }), ...(query.has('contentType') ? { contentType: query.get('contentType') as HeraldSnapshot['contentType'] } : {}) });
@@ -129,7 +191,10 @@ export class Automation {
     }
     const rule = /^\/api\/herald\/rules\/(H\d+)(\/history)?$/.exec(path);
     if (rule) { const item = this.herald.get(rule[1]!); if (!this.canViewRule(item, context.principalId)) throw new HttpError(404, 'Rule not found.'); const history = rule[2] ? this.herald.history(item.id, number('before'), number('limit')) : null; return history ? { ...history, versions: history.versions.filter(version => this.canViewRule(version.rule, context.principalId)), accessEpoch } : { rule: { ...item, canEdit: this.canEdit(item, context.principalId) && context.scopes.includes('write') }, accessEpoch, canManage }; }
-    const visible = (id: string) => this.policies.access(id, context.principalId).view;
+    const visible = (id: string) => this.policies.access(this.policyObject(id), context.principalId).view;
+    if (path === '/api/herald/receives') { const page = this.git.receipts({ repositoryId: query.get('repositoryId') ?? undefined, before: number('before'), limit: number('limit') }, visible); return { receives: page.receipts.map(receipt => presentGitReceiveReceipt(receipt, context.principalId, this.herald, this.policies)), nextBefore: page.nextBefore, accessEpoch }; }
+    const receive = /^\/api\/herald\/receives\/([^/]+)$/.exec(path);
+    if (receive) return { receive: presentGitReceiveReceipt(this.git.receipt(receive[1]!, visible), context.principalId, this.herald, this.policies), accessEpoch };
     if (path === '/api/herald/transcripts') { const page = this.herald.transcripts({ before: number('before'), limit: number('limit'), objectId: query.get('objectId') ?? undefined }, visible); return { ...page, transcripts: page.transcripts.map(value => presentHeraldTranscript(value, context.principalId, this.herald, this.policies)), accessEpoch }; }
     const transcript = /^\/api\/herald\/transcripts\/([^/]+)$/.exec(path);
     if (transcript) return { transcript: presentHeraldTranscript(this.herald.transcript(transcript[1]!, visible), context.principalId, this.herald, this.policies), accessEpoch };
@@ -148,15 +213,32 @@ export class Automation {
   mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, commit?: GitCommitResult): MutationResponse {
     if (!rawKey) throw new HttpError(400, 'Automation changes require an Idempotency-Key.');
     const key = context.kind === 'local' ? rawKey : `${context.workspaceId}:${context.principalId}:${rawKey}`, fingerprint = createHash('sha256').update(JSON.stringify([method, path, input])).digest('hex');
-    const authorize = () => { this.auth.revalidate(context, 'write'); if (path.includes('/targets/') && !this.worker(context.principalId)) throw new HttpError(403, 'This account is not configured as a build worker.'); };
+    const authorize = () => { this.auth.revalidate(context, 'write'); if (path === '/api/herald/receive') this.receiveAuthority(parseGitReceiveFacts(input), context); if (path.includes('/targets/') && !this.worker(context.principalId)) throw new HttpError(403, 'This account is not configured as a build worker.'); };
     return this.store.mutate(key, fingerprint, () => {
       const accessEpoch = this.policies.epoch(), canManage = this.manager(context.principalId);
+      if (path.startsWith('/api/drydock/')) {
+        if (method === 'POST' && path === '/api/drydock/blueprints') return { status: 201, body: { blueprint: this.drydock.createBlueprint(input, context), accessEpoch, canManage: true } };
+        const blueprint = /^\/api\/drydock\/blueprints\/([^/]+)(\/authorizations)?$/.exec(path);
+        if (method === 'PUT' && blueprint && !blueprint[2]) return { status: 200, body: { blueprint: this.drydock.updateBlueprint(blueprint[1]!, input, context), accessEpoch, canManage: true } };
+        if (method === 'POST' && blueprint?.[2]) { const authorization = this.drydock.requestAuthorization(blueprint[1]!, input, context); return { status: 201, body: { authorization, accessEpoch, canManage: this.drydockManager(context, this.drydock.blueprint(authorization.blueprintId, context)) } }; }
+        const authorization = /^\/api\/drydock\/authorizations\/([^/]+)\/commands$/.exec(path);
+        if (method === 'POST' && authorization) return { status: 200, body: { authorization: this.drydock.authorizationCommand(authorization[1]!, input, context), accessEpoch, canManage: true } };
+        if (method === 'POST' && path === '/api/drydock/leases') { const { repositoryId, commitId, ...data } = object(input, ['repositoryId', 'commitId', 'blueprintId', 'blueprintVersion', 'durationSeconds']); if (!commit || commit.repositoryId !== repositoryId || commit.commit.id !== commitId) throw new HttpError(400, 'Select a verified immutable Git commit.'); const detail = this.drydock.request(commit, data, context); return { status: 201, body: { ...detail, accessEpoch, canManage: this.canManageLease(detail, context) } }; }
+        const lease = /^\/api\/drydock\/leases\/([^/]+)\/(commands|claim|report)$/.exec(path);
+        if (method === 'POST' && lease) { const result = lease[2] === 'commands' ? this.drydock.command(lease[1]!, input, context) : lease[2] === 'claim' ? this.drydock.claim(lease[1]!, input, context) : this.drydock.report(lease[1]!, input, context); return { status: 200, body: { ...result, accessEpoch, canManage: lease[2] === 'commands' } }; }
+        throw new HttpError(404, 'Drydock endpoint not found.');
+      }
+      if (method === 'POST' && path === '/api/herald/receive') return { status: 200, body: { receive: this.git.receive(input, { ...this.hooks(), canReceive: facts => this.receiveAuthority(facts, context), projectIds: id => { const row = this.store.database.prepare("SELECT data FROM entities WHERE id=? AND kind='repository'").get(id) as { data: string } | undefined; const repo = row ? JSON.parse(row.data) as { projectId?: string | null } : null; return repo?.projectId ? [repo.projectId] : []; } }), accessEpoch } };
       if (method === 'POST' && path === '/api/herald/rules') return { status: 201, body: { rule: this.herald.create(input, context.principalId, this.authority), accessEpoch, canManage } };
       const rule = /^\/api\/herald\/rules\/(H\d+)$/.exec(path);
       if (method === 'PUT' && rule) { const { expectedVersion, ...fields } = object(input, ['expectedVersion', 'name', 'contentType', 'ruleType', 'objectId', 'enabled', 'match', 'repetition', 'conditions', 'actions']); return { status: 200, body: { rule: this.herald.update(rule[1]!, integer(expectedVersion, 'Expected rule version'), fields, context.principalId, this.authority), accessEpoch, canManage } }; }
       if (method === 'POST' && path === '/api/herald/test') {
-        const data = object(input, ['objectId']), id = string(data.objectId, 'Object ID', 100); this.policies.require(id, context.principalId, 'view');
-        return { status: 200, body: { transcript: this.herald.evaluate(this.snapshot(id, `test:${randomUUID()}`, context.principalId), this.hooks(), true), accessEpoch } };
+        const data = object(input, ['objectId', 'transcriptId']);
+        if (Object.keys(data).length !== 1) throw new HttpError(400, 'Select one object or stored transcript.');
+        let snapshot: HeraldSnapshot;
+        if (data.transcriptId !== undefined) { const saved = this.herald.transcript(string(data.transcriptId, 'Transcript ID', 100), id => this.policies.access(this.policyObject(id), context.principalId).view); snapshot = { ...saved.snapshot, eventId: `test:${randomUUID()}` }; }
+        else { const id = string(data.objectId, 'Object ID', 100); this.policies.require(this.policyObject(id), context.principalId, 'view'); snapshot = this.git.policyObjectId(id) ? { ...this.git.snapshot(id), eventId: `test:${randomUUID()}` } : this.snapshot(id, `test:${randomUUID()}`, context.principalId); }
+        return { status: 200, body: { transcript: this.herald.evaluate(snapshot, this.hooks(), true), accessEpoch } };
       }
       if (method === 'POST' && path === '/api/harbormaster/plans') return { status: 201, body: { plan: this.harbormaster.createPlan(input, context), accessEpoch, canManage } };
       const plan = /^\/api\/harbormaster\/plans\/([^/]+)$/.exec(path);
@@ -179,14 +261,24 @@ export class Automation {
       throw new HttpError(404, 'Automation endpoint not found.');
     }, authorize, response => {
       // A replay is private to its principal, but object access may have changed.
-      const value = response.body as { transcript?: HeraldTranscript; buildable?: { revisionId: string | null; repositoryId: string | null }; source?: RevisionVersion; rule?: HeraldRule };
+      const value = response.body as Partial<DrydockLeaseDetail & DrydockClaim> & { blueprint?: DrydockBlueprint; authorization?: DrydockAuthorization; transcript?: HeraldTranscript; buildable?: { revisionId: string | null; repositoryId: string | null }; source?: RevisionVersion; rule?: HeraldRule; receive?: GitReceiveReceipt };
       const id = value.transcript?.objectId ?? value.buildable?.revisionId ?? value.buildable?.repositoryId ?? value.source?.revisionId;
-      if (id) this.policies.require(id, context.principalId, 'view');
+      if (id) this.policies.require(this.policyObject(id), context.principalId, 'view');
+      if (value.receive) this.policies.require(value.receive.repositoryId, context.principalId, 'view');
+      if (value.blueprint) this.drydock.blueprint(value.blueprint.id, context);
+      if (value.authorization) this.drydock.authorization(value.authorization.id, context);
+      if (value.lease) {
+        if (value.operation === 'provision') this.drydock.revalidateProvisionClaim(value as DrydockClaim, context);
+        // Cleanup replies may remain readable only to the resource's assigned
+        // worker after source access is revoked. They carry no source contents.
+        const cleanup = value.resource?.workerPrincipalId === context.principalId && (value.operation === 'release' || path.endsWith('/report') && ['releasing', 'released'].includes(value.lease.status));
+        if (!cleanup) this.drydock.detail(value.lease.id, context);
+      }
       if (value.rule && !this.canViewRule(value.rule, context.principalId)) throw new HttpError(404, 'Rule not found.');
-      return { ...response, body: { ...value, ...(value.transcript ? { transcript: presentHeraldTranscript(value.transcript, context.principalId, this.herald, this.policies) } : {}), accessEpoch: this.policies.epoch() } };
+      return { ...response, body: { ...value, ...(value.receive ? { receive: presentGitReceiveReceipt(presentGitReceiveReceipt(value.receive, context.principalId, this.herald, this.policies), path === '/api/herald/receive' ? parseGitReceiveFacts(input).pusherId : context.principalId, this.herald, this.policies) } : {}), ...(value.transcript ? { transcript: presentHeraldTranscript(value.transcript, context.principalId, this.herald, this.policies) } : {}), accessEpoch: this.policies.epoch() } };
     });
   }
   start(): void { if (!this.timer) { this.timer = setInterval(() => this.pump(), 1_000); this.timer.unref(); this.pump(); } }
-  private pump(): void { if (!this.stopping && !this.pumping) this.pumping = this.harbormaster.dispatchPendingHttp(undefined, () => this.stopping).catch(error => { console.error('Build dispatch failed:', error instanceof HttpError ? error.message : 'unexpected error'); }).finally(() => { this.pumping = undefined; }); }
+  private pump(): void { if (!this.stopping && !this.pumping) this.pumping = Promise.resolve().then(() => { if (!this.stopping) { this.drydock.sweep(); this.harbormaster.reconcileWorkingCopies(() => this.stopping); } }).then(() => this.harbormaster.dispatchPendingHttp(undefined, () => this.stopping)).catch(error => { console.error('Build dispatch failed:', error instanceof HttpError ? error.message : 'unexpected error'); }).finally(() => { this.pumping = undefined; }); }
   async close(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); await this.pumping; }
 }

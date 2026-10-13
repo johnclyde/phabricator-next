@@ -56,7 +56,7 @@ History defaults to 25 commits per page, allows 1–100, and uses a nonnegative 
 
 Responses include a current `accessEpoch` and are served with `Cache-Control: no-store`. A missing or hidden repository has the same `OBJECT_UNAVAILABLE` response. Missing Git objects use `GIT_OBJECT_UNAVAILABLE`, which does not imply that the repository itself became hidden. Invalid inputs use `GIT_INVALID_QUERY`; limit, queue, availability, and cancellation failures have distinct `GIT_*` codes. Errors do not disclose configured host paths.
 
-Repository browsing is read-only. It never changes Git objects or references, and viewing source does not create review evidence. Repository hosting, clone/fetch orchestration, SSH or HTTP serving, push policy, commit-record import and commit review remain separate work. Explicit source import into a revision is described below.
+Repository browsing is read-only. It never changes Git objects or references, and viewing source does not create review evidence. SSH/HTTP serving, general clone/fetch orchestration, historical commit import and commit review remain separate work. [Git receive rules](git-automation.md) can enforce pushes through an explicitly installed trusted hook; [Drydock](drydock.md) can materialize exact working copies through an explicitly configured local worker. Browsing enables neither capability implicitly. Explicit source import into a revision is described below.
 
 ## Compare exact committed trees
 
