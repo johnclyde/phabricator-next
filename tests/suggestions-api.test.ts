@@ -9,6 +9,7 @@ import { Worker } from 'node:worker_threads';
 import { createApp } from '../server/app.ts';
 import { createAuth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
+import { createPassageAnchor } from '../shared/anchors.ts';
 import type { Audience, ObjectAccess } from '../shared/policy.ts';
 import type { RevisionAuthorshipSnapshot } from '../shared/revision-authorship.ts';
 import type { RevisionLifecycleSnapshot } from '../shared/revision-lifecycle.ts';
@@ -183,4 +184,52 @@ test('suggestion application rechecks revocation after waiting for a SQLite writ
       } finally { app.store.transaction = transaction; await worker.terminate(); }
     }
   } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('multi-passage API keeps one proposal atomic through permission checks, thread conflicts and idempotent application', async () => {
+  const app = await start();
+  try {
+    const before = await app.create<RevisionDetail>('alice', '/api/revisions', { ...createInput, access: { spaceId: 'S1', view: workspace, edit: selected(app.alice.id), interact: workspace } });
+    const version = before.versions[0]!, path = `/api/revisions/${before.revision.id}`, start = source.indexOf(quote);
+    const additional = (filePath: string, quote: string, replacement: string, explanation: string) => { const start = version.files.find(file => file.path === filePath)!.content.indexOf(quote); return { anchor: createPassageAnchor(version, filePath, { start, end: start + quote.length, quote }), replacement, explanation }; };
+    const suggestion = { replacement: 'fourteen days', additionalEdits: [additional('citations.bib', 'unchanged', 'updated', 'Update companion terminology.'), additional('motion.md', 'Thank you. 🧪', '', 'Remove the sign-off.')] };
+    const proposed = { body: 'Revise all passages as a single change.', versionId: version.id, filePath: 'motion.md', passage: { start, end: start + quote.length, quote }, suggestion };
+    const pristine = app.store.detail(before.revision.id);
+    const invalid = { ...proposed, suggestion: { ...suggestion, additionalEdits: [suggestion.additionalEdits[0], { ...suggestion.additionalEdits[1], anchor: { ...suggestion.additionalEdits[1]!.anchor, prefix: 'Forged' } }] } };
+    assert.equal((await app.request('bob', `${path}/comments`, 'POST', invalid)).status, 400);
+    assert.deepEqual(app.store.detail(before.revision.id), pristine);
+    const root = await app.create<ReviewComment>('bob', `${path}/comments`, proposed, 'multi-proposal-once');
+    assert.deepEqual(root.suggestion, suggestion);
+    assert.deepEqual(await app.create('bob', `${path}/comments`, proposed, 'multi-proposal-once'), root);
+    const endpoint = `${path}/suggestions/${root.id}/apply`, input = app.input(before), published = app.store.detail(before.revision.id);
+    assert.equal((await app.request('bob', endpoint, 'POST', input)).status, 403);
+    assert.equal((await app.request('reader', endpoint, 'POST', input)).status, 403);
+    assert.deepEqual(app.store.detail(before.revision.id), published);
+    await app.create('bob', `${path}/threads/${root.threadId}/replies`, { body: 'Please review this complete set.', viewedVersionId: version.id });
+    const replied = app.store.detail(before.revision.id);
+    assert.equal((await app.request('alice', endpoint, 'POST', input)).status, 409);
+    assert.equal((await app.request('alice', endpoint, 'POST', { ...input, expectedThreadVersion: 2, suggestion: { replacement: 'Untrusted patch' } })).status, 400);
+    assert.deepEqual(app.store.detail(before.revision.id), replied);
+    const applied = await app.create<RevisionDetail>('alice', endpoint, app.input(replied, 2), 'multi-apply-once');
+    assert.deepEqual(applied.versions[0], version);
+    assert.deepEqual(applied.versions[1]!.files, [{ path: 'motion.md', content: source.replace(quote, 'fourteen days').replace('Thank you. 🧪', '') }, { path: 'citations.bib', content: 'An updated companion file.\r\n' }]);
+    assert.equal(applied.versions.length, 2); assert.equal(applied.suggestionApplications.length, 1); assert.equal(applied.threads[0]!.version, 3);
+    assert.deepEqual(applied.comments.find(comment => comment.id === root.id), root);
+    assert.deepEqual(await app.create('alice', endpoint, app.input(replied, 2), 'multi-apply-once'), applied);
+    assert.equal((await app.request('alice', endpoint, 'POST', app.input(applied, 3), 'multi-again')).status, 409);
+    assert.deepEqual(app.store.detail(before.revision.id).versions, applied.versions);
+  } finally { await app.close(); }
+});
+
+test('an exact multi-passage proposal never rebases when source identity advances', async () => {
+  const app = await start();
+  try {
+    const before = await app.create<RevisionDetail>('alice', '/api/revisions', createInput), version = before.versions[0]!, path = `/api/revisions/${before.revision.id}`, start = source.indexOf(quote);
+    const anchor = createPassageAnchor(version, 'citations.bib', { start: 0, end: 2, quote: 'An' });
+    const root = await app.create<ReviewComment>('bob', `${path}/comments`, { body: 'Update the source and companion.', versionId: version.id, filePath: 'motion.md', passage: { start, end: start + quote.length, quote }, suggestion: { replacement: 'fourteen days', additionalEdits: [{ anchor, replacement: 'The', explanation: 'Use a definite article.' }] } });
+    const newer = await app.create<RevisionDetail>('alice', `${path}/versions`, { expectedVersion: 1, message: 'New immutable identity with the same text.', files: sourceFiles });
+    const saved = app.store.detail(before.revision.id);
+    for (const input of [app.input(before), app.input(newer)]) assert.equal((await app.request('alice', `${path}/suggestions/${root.id}/apply`, 'POST', input)).status, 409);
+    assert.deepEqual(app.store.detail(before.revision.id), saved);
+  } finally { await app.close(); }
 });

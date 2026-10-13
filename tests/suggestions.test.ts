@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPassageAnchor } from '../shared/anchors.ts';
-import { applySuggestedReplacement, validateSuggestion } from '../shared/suggestions.ts';
+import { applySuggestedReplacement, validateSuggestion, validateSuggestionDraft } from '../shared/suggestions.ts';
 import type { PassageAnchor, RevisionVersion, SuggestedReplacement } from '../shared/types.ts';
 
 function fixture(content = 'Before. Original passage. After.', quote = 'Original passage.') {
@@ -102,4 +102,70 @@ test('frozen source, anchor and suggestion remain unchanged through generated Un
     assert.equal(applySuggestedReplacement(version, anchor, suggestion)[0]!.content, `Left ${replacement} right`);
     assert.equal(JSON.stringify({ version, anchor, suggestion }), snapshot);
   }
+});
+
+test('multi-passage edits apply across files using original offsets, preserving proposal order and input bytes', () => {
+  const { version, anchor } = fixture('Left. Original passage. Right 😀.');
+  const at = (filePath: string, quote: string) => { const start = version.files.find(file => file.path === filePath)!.content.indexOf(quote); return createPassageAnchor(version, filePath, { start, end: start + quote.length, quote }); };
+  const suggestion = { replacement: 'A much longer replacement.', additionalEdits: [
+    { anchor: at('motion.md', 'Right 😀'), replacement: '', explanation: 'Remove the closing fragment.' },
+    { anchor: at('other.txt', 'Do not replace'), replacement: 'Keep', explanation: 'Clarify the companion source.' },
+    { anchor: at('motion.md', 'Left'), replacement: 'First', explanation: 'Use a numbered introduction.' },
+  ] };
+  const snapshot = JSON.stringify({ version, anchor, suggestion });
+  assert.deepEqual(applySuggestedReplacement(version, anchor, suggestion, 'Clarify the central claim.'), [
+    { path: 'motion.md', content: 'First. A much longer replacement. .' },
+    { path: 'other.txt', content: 'Keep Original passage. in this file.' },
+  ]);
+  const copy = validateSuggestion(anchor, suggestion);
+  assert.deepEqual(copy, suggestion);
+  assert.notEqual(copy.additionalEdits![0]!.anchor, suggestion.additionalEdits[0]!.anchor);
+  assert.equal(JSON.stringify({ version, anchor, suggestion }), snapshot);
+});
+
+test('adjacent passages are legal while overlapping, duplicate and nested edits reject the whole set', () => {
+  const { version, anchor } = fixture('abcd', 'ab');
+  const adjacent = createPassageAnchor(version, 'motion.md', { start: 2, end: 4, quote: 'cd' });
+  assert.equal(applySuggestedReplacement(version, anchor, { replacement: 'A', additionalEdits: [{ anchor: adjacent, replacement: 'B', explanation: 'Second clause.' }] })[0]!.content, 'AB');
+  for (const range of [{ start: 0, end: 2, quote: 'ab' }, { start: 1, end: 3, quote: 'bc' }, { start: 0, end: 1, quote: 'a' }, { start: 0, end: 4, quote: 'abcd' }]) {
+    const additional = createPassageAnchor(version, 'motion.md', range);
+    assert.throws(() => applySuggestedReplacement(version, anchor, { replacement: 'A', additionalEdits: [{ anchor: additional, replacement: 'B', explanation: 'Conflicting range.' }] }), /overlap/);
+    assert.equal(version.files[0]!.content, 'abcd');
+  }
+});
+
+test('every additional passage must match original source identity, file, offsets, quotation and context', () => {
+  const { version, anchor } = fixture();
+  const extra = createPassageAnchor(version, 'other.txt', { start: 0, end: 2, quote: 'Do' });
+  for (const changed of [
+    { versionId: 'V2' }, { contentHash: 'other' }, { filePath: 'missing.txt' }, { quote: 'No' },
+    { start: 1, end: 3 }, { prefix: 'Forged' }, { suffix: 'Forged' },
+  ]) assert.throws(() => applySuggestedReplacement(version, anchor, { replacement: 'Changed', additionalEdits: [{ anchor: { ...extra, ...changed }, replacement: 'Will', explanation: 'Keep all edits together.' }] }), RangeError);
+  assert.throws(() => applySuggestedReplacement({ ...version, files: [...version.files, version.files[0]!] }, anchor, { replacement: 'Changed' }), /ambiguous/);
+  assert.throws(() => applySuggestedReplacement({ ...version, docx: {} as RevisionVersion['docx'] }, anchor, { replacement: 'Changed' }), /Word/);
+});
+
+test('multi-passage shape, explanations and Unicode remain strictly bounded', () => {
+  const { version, anchor } = fixture();
+  const edit = { anchor: createPassageAnchor(version, 'other.txt', { start: 0, end: 2, quote: 'Do' }), replacement: 'Will', explanation: 'State the intention.' };
+  for (const additionalEdits of [null, {}, 'text', Array(20).fill(edit), [null], [{ ...edit, extra: true }], [{ ...edit, explanation: '' }], [{ ...edit, explanation: ' \n ' }], [{ ...edit, explanation: '\0' }], [{ ...edit, explanation: '\ud800' }], [{ ...edit, replacement: 'Do' }], [{ ...edit, anchor: { ...edit.anchor, extra: true } }], [{ ...edit, anchor: { ...edit.anchor, quote: 'D\ud800' } }]]) {
+    assert.throws(() => validateSuggestion(anchor, { replacement: 'Changed', additionalEdits } as SuggestedReplacement), RangeError);
+  }
+  assert.equal(validateSuggestion(anchor, { replacement: '', additionalEdits: Array(19).fill(edit) }).additionalEdits!.length, 19);
+  const large = { ...edit, replacement: 'R'.repeat(20_000), explanation: 'E'.repeat(20_000) };
+  assert.throws(() => validateSuggestion(anchor, { replacement: 'P'.repeat(20_000), additionalEdits: [large, large] }), /100,000/);
+  assert.throws(() => validateSuggestion(anchor, { replacement: 'P'.repeat(20_000), additionalEdits: [{ ...large, explanation: 'E'.repeat(19_960) }, large] }, 'root explanation included'), /100,000/);
+});
+
+test('raw drafts retain over-publication-budget edits while per-field and passage-count limits remain bounded', () => {
+  const { version, anchor } = fixture();
+  const edit = { anchor: createPassageAnchor(version, 'other.txt', { start: 0, end: 2, quote: 'Do' }), replacement: 'R'.repeat(20_000), explanation: 'E'.repeat(20_000) };
+  const suggestion = { replacement: 'P'.repeat(20_000), additionalEdits: [edit, edit] };
+  const snapshot = JSON.stringify(suggestion);
+  assert.deepEqual(validateSuggestionDraft(anchor, suggestion, 'Primary explanation'), suggestion);
+  assert.equal(JSON.stringify(suggestion), snapshot);
+  assert.throws(() => validateSuggestion(anchor, suggestion, 'Primary explanation'), /100,000/);
+  assert.throws(() => validateSuggestionDraft(anchor, { ...suggestion, replacement: 'x'.repeat(20_001) }), /20,000/);
+  assert.throws(() => validateSuggestionDraft(anchor, { ...suggestion, additionalEdits: Array(20).fill(edit) }), /20 passages/);
+  assert.deepEqual(validateSuggestionDraft(anchor, { replacement: anchor.quote, additionalEdits: [{ ...edit, replacement: edit.anchor.quote, explanation: '' }] }), { replacement: anchor.quote, additionalEdits: [{ ...edit, replacement: edit.anchor.quote, explanation: '' }] });
 });

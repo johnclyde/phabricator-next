@@ -1336,3 +1336,24 @@
   .paragraph-reorder { font-size: 12px; gap: 4px 8px; }
   .paragraph-reorder button { font-size: 12px; }
 }
+
+/* Exact multi-passage proposals keep every original quotation visible for review. */
+.additional-suggested-edits, .suggestion-set-preview, .suggestion-passage-editor, .suggestion-passage-picker, .suggestion-passage-preview { min-width: 0; }
+.suggestion-passage-editor, .suggestion-passage-picker, .suggestion-passage-preview { border-top: 1px solid #ccd9e2; padding-top: 14px; margin-top: 16px; }
+.suggestion-passage-heading { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.suggestion-passage-heading h4, .suggestion-passage-picker h4, .suggestion-passage-preview > h5 { margin: 0 0 8px; overflow-wrap: anywhere; font-size: 13px; }
+.suggestion-passage-heading h4 { flex: 1 1 160px; }
+.additional-suggested-edits .field, .additional-suggested-edits textarea, .suggestion-range-fields > .field { min-width: 0; }
+.additional-suggested-edits button, .additional-suggested-edits select, .suggestion-exact-range summary { min-height: 44px; }
+.suggestion-exact-range summary { display: flex; align-items: center; cursor: pointer; font-size: 13px; color: #3d6686; }
+.suggestion-range-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.suggestion-explanation { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.65; }
+.suggestion-selected-passage pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: 10px; background: white; border: 1px solid #d8e1e8; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.suggestion-selection-source { max-height: 400px; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .additional-suggested-edits .thread-actions { flex-direction: column; }
+  .additional-suggested-edits .thread-actions > button { width: 100%; }
+  .suggestion-passage-heading { align-items: stretch; }
+  .suggestion-passage-heading > button { flex: 1 1 100%; }
+  .suggestion-passage-preview > h5 { line-height: 1.6; }
+}

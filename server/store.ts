@@ -1872,14 +1872,19 @@ export class Store {
         if (line !== null && line !== firstLine) throw new HttpError(400, 'Comment line must match the beginning of the selected passage.');
         line = firstLine;
       }
+      const body = string(data.body, 'Comment', 20_000);
       let suggestion: SuggestedReplacement | undefined;
       if (data.suggestion !== undefined) {
         if (!anchor) throw new HttpError(400, 'A suggested replacement requires an exact passage anchor.');
-        const proposed = object(data.suggestion, ['replacement']);
-        try { suggestion = validateSuggestion(anchor, { replacement: string(proposed.replacement, 'Suggested replacement', 20_000, true) }); }
+        try {
+          suggestion = validateSuggestion(anchor, data.suggestion as SuggestedReplacement, body);
+          // Validate every original anchor before publishing any part of the proposal.
+          // Resulting source size is checked again when the complete set is applied.
+          applySuggestedReplacement(version, anchor, suggestion, body);
+        }
         catch (error) { if (error instanceof RangeError) throw new HttpError(400, error.message); throw error; }
       }
-      return { version, filePath, line, anchor, docxAnchor, suggestion, body: string(data.body, 'Comment', 20_000) };
+      return { version, filePath, line, anchor, docxAnchor, suggestion, body };
   }
   createComment(id: string, input: unknown, attribution?: ActorAttribution): ReviewComment {
     return this.discussionMutation(() => {
@@ -2010,7 +2015,7 @@ export class Store {
         || comment.versionId !== from.id || comment.anchor.versionId !== from.id || comment.anchor.contentHash !== actualHash
         || comment.filePath !== comment.anchor.filePath) throw new HttpError(409, 'The suggestion must match the exact current source version and content. Review the current source before proposing another replacement.');
       let source: SourceFile[];
-      try { source = applySuggestedReplacement(from, comment.anchor, comment.suggestion); }
+      try { source = applySuggestedReplacement(from, comment.anchor, comment.suggestion, comment.body); }
       catch (error) { if (error instanceof RangeError) throw new HttpError(409, 'The saved suggestion no longer matches its original source. Review the source before proposing another replacement.'); throw error; }
       // Validate the complete result, including UTF-8 byte limits, before any
       // source write. Provider/client input cannot supply an alternative patch.

@@ -1,4 +1,5 @@
-import type { ActorAttribution, ReviewComment } from './types';
+import type { ActorAttribution, ReviewComment, SuggestedReplacement } from './types';
+import { validateSuggestion } from './suggestions';
 import { isRevisionId } from './revision-dependencies';
 import { isRevisionAuthorHead, type RevisionAuthorHead } from './revision-authorship';
 import { isRevisionMetadataAttribution } from './revision-metadata';
@@ -7,7 +8,7 @@ export const REVIEW_DRAFT_LIMITS = { entries: 50, body: 20_000, totalCharacters:
 export interface ReviewDraftPassage { start: number; end: number; quote: string }
 export interface ReviewDraftDocxPassage extends ReviewDraftPassage { rangeId: string }
 export type ReviewDraftPayload =
-  | { kind: 'comment'; body: string; versionId: string; contentHash: string; filePath: string | null; line: number | null; passage?: ReviewDraftPassage; docxPassage?: ReviewDraftDocxPassage; suggestion?: { replacement: string } }
+  | { kind: 'comment'; body: string; versionId: string; contentHash: string; filePath: string | null; line: number | null; passage?: ReviewDraftPassage; docxPassage?: ReviewDraftDocxPassage; suggestion?: SuggestedReplacement }
   | { kind: 'summary'; body: string; versionId: string; contentHash: string }
   | { kind: 'reply'; body: string; threadId: string; viewedVersionId: string; viewedContentHash: string };
 export interface ReviewDraftEntry { id: string; revisionId: string; principalId: string; version: number; state: 'active' | 'discarded' | 'published'; payload: ReviewDraftPayload; payloadSha256: string; createdAt: string; updatedAt: string }
@@ -57,8 +58,17 @@ export function reviewDraftPayload(v: unknown): ReviewDraftPayload {
   const p = v.passage === undefined ? undefined : passage(v.passage) as ReviewDraftPassage;
   const d = v.docxPassage === undefined ? undefined : passage(v.docxPassage, true) as ReviewDraftDocxPassage;
   if (d && (v.filePath !== null || v.line !== null || p || v.suggestion !== undefined) || p && !v.filePath || v.line !== null && !v.filePath) return fail();
-  let suggestion: { replacement: string } | undefined;
-  if (v.suggestion !== undefined) { if (!p || !object(v.suggestion) || !keys(v.suggestion, ['replacement']) || !text(v.suggestion.replacement, REVIEW_DRAFT_LIMITS.body)) return fail(); suggestion = { replacement: v.suggestion.replacement }; }
+  let suggestion: SuggestedReplacement | undefined;
+  if (v.suggestion !== undefined) {
+    if (!p) return fail();
+    try { suggestion = validateSuggestion(p, v.suggestion as SuggestedReplacement, v.body); } catch { return fail(); }
+    const edits = [{ filePath: v.filePath, ...p }, ...(suggestion.additionalEdits ?? []).map(edit => edit.anchor)];
+    if (suggestion.additionalEdits?.some(edit => edit.anchor.versionId !== v.versionId || edit.anchor.contentHash !== v.contentHash)) return fail();
+    for (let index = 0; index < edits.length; index++) for (let other = index + 1; other < edits.length; other++) {
+      const left = edits[index]!, right = edits[other]!;
+      if (left.filePath === right.filePath && left.start < right.end && right.start < left.end) return fail();
+    }
+  }
   return { kind: 'comment', body: v.body, versionId: v.versionId, contentHash: v.contentHash, filePath: v.filePath, line: v.line, ...(p ? { passage: p } : {}), ...(d ? { docxPassage: d } : {}), ...(suggestion ? { suggestion } : {}) };
 }
 export function reviewDraftSaveInput(v: unknown): ReviewDraftSaveInput {

@@ -204,3 +204,37 @@ test('aggregate text bounds and a notification delivery failure preserve all sta
     assert.equal(s.notifications.list(alice.principalId, {}, epoch(s)).items.length, 12);
   } finally { s.close(); }
 });
+
+test('private multi-passage edits preserve complete exact payloads through preview, publication and retry', () => {
+  const s = new Store({ path: ':memory:' });
+  try {
+    const f = fixture(s), original = payload(f), anchor = { versionId: f.version.id, contentHash: f.version.contentHash, filePath: 'paper.tex', start: 17, end: 33, quote: 'Second paragraph', prefix: 'Original result.\n', suffix: '.\n' };
+    const draft = { ...original, suggestion: { replacement: 'Revised', additionalEdits: [{ anchor, replacement: 'Companion result', explanation: 'Keep the discussion consistent.\r\n' }] } };
+    const input = { expectedEntryVersion: 0, expectedAccessEpoch: epoch(s), payload: draft }, id = randomUUID(), retry = key(), before = publicEvidence(s);
+    const saved = s.reviewDrafts.save(f.id, id, input, alice, retry);
+    assert.deepEqual(publicEvidence(s), before);
+    assert.deepEqual(saved.entry.payload, draft);
+    assert.deepEqual(s.reviewDrafts.save(f.id, id, input, alice, retry), saved);
+    const preview = s.reviewDrafts.preview(f.id, alice.principalId);
+    assert.deepEqual(preview.entries[0]!.payload, draft); assert.equal(preview.manifest.sources.length, 1);
+    const publishInput = { manifest: preview.manifest }, publishRetry = key();
+    const receipt = s.reviewDrafts.publish(f.id, publishInput, alice, publishRetry);
+    assert.equal(receipt.published.length, 1); assert.deepEqual(receipt.published[0]!.comment.suggestion, draft.suggestion);
+    assert.deepEqual(s.reviewDrafts.publish(f.id, publishInput, alice, publishRetry), receipt);
+    assert.deepEqual(s.reviewDrafts.operation(receipt.operationId).receipt, receipt);
+    assert.equal(s.detail(f.id).versions.length, 1, 'publishing the proposal never applies it');
+  } finally { s.close(); }
+});
+
+test('private multi-passage edits reject omitted explanations, overlap, foreign identity and forged context atomically', () => {
+  const s = new Store({ path: ':memory:' });
+  try {
+    const f = fixture(s), foreign = fixture(s), original = payload(f), before = allEvidence(s);
+    const anchor = { versionId: f.version.id, contentHash: f.version.contentHash, filePath: 'paper.tex', start: 17, end: 33, quote: 'Second paragraph', prefix: 'Original result.\n', suffix: '.\n' };
+    const extra = { anchor, replacement: 'Companion result', explanation: 'Keep the discussion consistent.' };
+    for (const edit of [{ ...extra, explanation: '' }, { ...extra, anchor: { ...anchor, versionId: foreign.version.id } }, { ...extra, anchor: { ...anchor, prefix: 'Forged context' } }, { ...extra, anchor: { ...anchor, start: 0, end: 8, quote: 'Original', prefix: '', suffix: ' result.\nSecond paragraph.\n' } }]) {
+      assert.throws(() => s.reviewDrafts.save(f.id, randomUUID(), { expectedEntryVersion: 0, expectedAccessEpoch: epoch(s), payload: { ...original, suggestion: { replacement: 'Revised', additionalEdits: [edit] } } }, alice, key()), status(400));
+      assert.deepEqual(allEvidence(s), before);
+    }
+  } finally { s.close(); }
+});

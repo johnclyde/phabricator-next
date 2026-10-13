@@ -52,7 +52,8 @@ export interface RevisionVersion { attribution?: ActorAttribution; gitSource?: G
 /** Source offsets are UTF-16 code units, start inclusive and end exclusive. */
 export interface PassageAnchor { versionId: string; contentHash: string; filePath: string; start: number; end: number; quote: string; prefix: string; suffix: string }
 export interface PassageInput { start: number; end: number; quote: string }
-export interface SuggestedReplacement { replacement: string }
+export interface SuggestedPassageEdit { anchor: PassageAnchor; replacement: string; explanation: string }
+export interface SuggestedReplacement { replacement: string; additionalEdits?: SuggestedPassageEdit[] }
 export interface ReviewComment { mentions?: MentionProof; attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; filePath: string | null; line: number | null; body: string; author: string; createdAt: string; threadId?: string; anchor?: PassageAnchor; docxAnchor?: DocxPassageAnchor; viewedVersionId?: string; suggestion?: SuggestedReplacement }
 export interface ReviewThread { id: string; revisionId: string; rootCommentId: string; status: 'open' | 'resolved'; version: number; createdAt: string; updatedAt: string }
 export interface ReviewThreadEvent { attribution?: ActorAttribution; id: string; revisionId: string; threadId: string; action: 'resolved' | 'reopened'; versionId: string; threadVersion: number; actor: string; createdAt: string }

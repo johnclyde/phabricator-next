@@ -11,6 +11,7 @@ import { Store } from '../server/store.ts';
 import { createApp } from '../server/app.ts';
 import { createAuth } from '../server/auth.ts';
 import { reviewDraftsCommand } from '../cli/review-drafts.ts';
+import { createPassageAnchor } from '../shared/anchors.ts';
 import type { PaperCLI } from '../cli/paper-builds.ts';
 import { reviewDraftRequestCanonical, type ReviewDraftPreview, type ReviewDraftSaveInput, type ReviewDraftSnapshot } from '../shared/review-drafts.ts';
 import type { ActorAttribution } from '../shared/types.ts';
@@ -26,7 +27,7 @@ function cli(args: string[], token = '', input?: string | Buffer) {
 const actor: ActorAttribution = { principalId: 'alice', displayName: 'Alice', credentialId: null, requestId: 'cli-fixture' };
 function fixture(store: Store) {
   const detail = store.createRevision({ kind: 'paper', title: 'CLI private review', testPlan: 'Read exact source.', files: [{ path: 'paper.tex', content: 'Original argument.\n' }] }, actor), id = detail.revision.id, version = detail.versions[0]!;
-  const input: ReviewDraftSaveInput = { expectedEntryVersion: 0, expectedAccessEpoch: 1, payload: { kind: 'comment', body: '\ufeff  Exact unpublished reasoning\r\n', versionId: version.id, contentHash: version.contentHash, filePath: 'paper.tex', line: 1, passage: { start: 0, end: 8, quote: 'Original' }, suggestion: { replacement: 'Revised' } } };
+  const input: ReviewDraftSaveInput = { expectedEntryVersion: 0, expectedAccessEpoch: 1, payload: { kind: 'comment', body: '\ufeff  Exact unpublished reasoning\r\n', versionId: version.id, contentHash: version.contentHash, filePath: 'paper.tex', line: 1, passage: { start: 0, end: 8, quote: 'Original' }, suggestion: { replacement: 'Revised', additionalEdits: [{ anchor: createPassageAnchor(version, 'paper.tex', { start: 9, end: 17, quote: 'argument' }), replacement: 'precise claim', explanation: 'Keep the argument wording consistent with the first edit.' }] } } };
   return { id, input };
 }
 function parameters(command: string, args: string[], options: PaperCLI['options'], request: PaperCLI['request'], optionNames = Object.keys(options)): PaperCLI { return { command, args, options, optionNames, request, download: async () => new Uint8Array() }; }
@@ -41,7 +42,7 @@ for (const basePath of ['/', '/mounted/']) test(`private draft CLI stages, disco
     const policy = app.policies.policy(id, author.id); app.policies.setPolicy(id, { expectedVersion: policy.version, spaceId: policy.spaceId, view: { kind: 'workspace' }, interact: { kind: 'workspace' }, edit: { kind: 'principals', principalIds: [author.id] } }, author.id);
     await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve)); const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}${basePath}`;
     const run = (args: string[], token = writer.token, input?: string | Buffer) => cli([...args, '--server', url], token, input);
-    const entryId = randomUUID(), input: ReviewDraftSaveInput = { expectedEntryVersion: 0, expectedAccessEpoch: app.policies.epoch(), payload: { kind: 'comment', body: '\ufeff  Exact unpublished @author text\r\n', versionId: version.id, contentHash: version.contentHash, filePath: 'paper.tex', line: 1, passage: { start: 0, end: 8, quote: 'Original' }, suggestion: { replacement: 'Revised' } } };
+    const entryId = randomUUID(), input: ReviewDraftSaveInput = { expectedEntryVersion: 0, expectedAccessEpoch: app.policies.epoch(), payload: { kind: 'comment', body: '\ufeff  Exact unpublished @author text\r\n', versionId: version.id, contentHash: version.contentHash, filePath: 'paper.tex', line: 1, passage: { start: 0, end: 8, quote: 'Original' }, suggestion: { replacement: 'Revised', additionalEdits: [{ anchor: createPassageAnchor(version, 'paper.tex', { start: 9, end: 17, quote: 'argument' }), replacement: 'precise claim', explanation: 'Keep the argument wording consistent with the first edit.' }] } } };
     const intent = join(directory, 'entry.json'); await writeFile(intent, JSON.stringify(input));
     const saveArgs = ['save-review-draft', id, entryId, '--intent', intent, '--request-id', 'save-exact-entry'];
     assert.notEqual((await run(saveArgs, reader.token)).code, 0);
@@ -55,7 +56,7 @@ for (const basePath of ['/', '/mounted/']) test(`private draft CLI stages, disco
     const preview = await run(['preview-review-drafts', id], reader.token); assert.equal(preview.code, 0, preview.stderr); const prepared = JSON.parse(preview.stdout) as ReviewDraftPreview; assert.equal(prepared.entries.length, 1);
     const previewPath = join(directory, 'review-preview.json'); await writeFile(previewPath, preview.stdout);
     const publishArgs = ['publish-review-drafts', id, '--intent', previewPath, '--request-id', 'publish-exact-review']; assert.notEqual((await run(publishArgs, reader.token)).code, 0);
-    const published = await run(publishArgs); assert.equal(published.code, 0, published.stderr); const receipt = JSON.parse(published.stdout); assert.equal(receipt.published[0].comment.body, input.payload.body); assert.equal(receipt.published[0].comment.anchor.quote, 'Original'); assert.equal(store.detail(id).comments.length, 1);
+    const published = await run(publishArgs); assert.equal(published.code, 0, published.stderr); const receipt = JSON.parse(published.stdout); assert.equal(receipt.published[0].comment.body, input.payload.body); assert.equal(receipt.published[0].comment.anchor.quote, 'Original'); assert.deepEqual(receipt.published[0].comment.suggestion, input.payload.kind === 'comment' ? input.payload.suggestion : undefined); assert.equal(store.detail(id).comments.length, 1);
     store.createVersion(id, { expectedVersion: 1, message: 'Later source', files: [{ path: 'paper.tex', content: 'Later argument.' }] });
     const recovered = await run(publishArgs); assert.equal(recovered.code, 0, recovered.stderr); assert.deepEqual(JSON.parse(recovered.stdout).published, receipt.published); assert.equal(store.detail(id).comments.length, 1);
     assert.notEqual((await run(['publish-review-drafts', id, '--intent', previewPath, '--request-id', 'fresh-stale-review'])).code, 0);
@@ -101,6 +102,8 @@ test('CLI complete preview and publication reject tampered draft hashes, partial
     assert.equal(calls, 0); await writeFile(path, JSON.stringify(preview)); const receipt = store.reviewDrafts.publish(f.id, { manifest: preview.manifest }, actor, digest('publish'));
     const malicious = { ...receipt, published: receipt.published.map(item => ({ ...item, comment: { ...item.comment, body: 'Different published text' } })) };
     await assert.rejects(reviewDraftsCommand(parameters('publish-review-drafts', [f.id], { intent: path, 'request-id': 'publish-fixed' }, async <T>() => malicious as T)), /reviewed text and anchors/);
+    const alteredPassage = { ...receipt, published: receipt.published.map(item => ({ ...item, comment: { ...item.comment, suggestion: { ...item.comment.suggestion!, additionalEdits: item.comment.suggestion!.additionalEdits!.map(edit => ({ ...edit, replacement: 'An unreviewed change' })) } } })) };
+    await assert.rejects(reviewDraftsCommand(parameters('publish-review-drafts', [f.id], { intent: path, 'request-id': 'publish-fixed' }, async <T>() => alteredPassage as T)), /reviewed text and anchors/);
     assert.equal(await reviewDraftsCommand(parameters('publish-review-drafts', [f.id], { intent: path, 'request-id': 'publish-fixed' }, async <T>() => receipt as T)), true);
     await assert.rejects(reviewDraftsCommand(parameters('review-drafts', [f.id], {}, async <T>() => ({ ...preview, entries: [{ ...preview.entries[0]!, payloadSha256: 'a'.repeat(64) }] }) as T)), /does not match/);
   } finally { console.log = previousOut; console.error = previousError; store.close(); await rm(directory, { recursive: true, force: true }); }

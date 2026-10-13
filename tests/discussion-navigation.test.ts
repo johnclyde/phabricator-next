@@ -111,6 +111,22 @@ test('collapsed navigation reads only a header while explicit reading does not m
   assert.equal(discussionThreadNarration(detail, 'a', true), collapsed);
 });
 
+test('multi-passage narration identifies the complete proposal without presenting a thread excerpt as its edit preview', () => {
+  const detail = discussion(), root = detail.comments[0]!;
+  root.suggestion = { replacement: 'Proposed original change.', additionalEdits: [
+    { anchor: { ...root.anchor!, filePath: 'appendix.tex' }, replacement: 'Private replacement text.', explanation: 'Additional explanation.' },
+    { anchor: { ...root.anchor!, start: 50, end: 65 }, replacement: '', explanation: 'Deletion explanation.' },
+  ] };
+  const before = structuredClone(detail);
+  for (const collapsed of [false, true]) {
+    const narration = discussionThreadNarration(detail, root.id, collapsed);
+    assert.match(narration, /3 suggested passages across 2 files/);
+    assert.match(narration, /complete edit preview is available in the discussion/);
+    assert.doesNotMatch(narration, /Private replacement text|Additional explanation/);
+  }
+  assert.deepEqual(detail, before);
+});
+
 test('narration handles legacy general discussion and unavailable originals without reading a replacement version', () => {
   const detail: Discussion = { versions: [version('version-seven', 7)], threads: [], comments: [comment('legacy', 'Legacy general comment.', { filePath: null, line: null })] };
   assert.match(discussionThreadNarration(detail, 'legacy', false), /original version 7\. General discussion\. Open, 1 comment/);

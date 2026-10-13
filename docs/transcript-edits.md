@@ -41,4 +41,4 @@ Browser checks cover exact preview and explicit confirmation, voice cancellation
 
 ## Remaining scope
 
-Full hands-free destination selection and dictation, multi-passage proposals, natural-language transformations, multilingual transcription, Word edits beyond the supported range, durable authenticated offline storage, cross-device synchronization and physical-phone performance qualification remain open. This capability extends the archived upstream feature set; it does not establish full Phabricator parity.
+Full hands-free destination selection and dictation, multi-passage transcript proposals, natural-language transformations, multilingual transcription, Word edits beyond the supported range, durable authenticated offline storage, cross-device synchronization and physical-phone performance qualification remain open. This capability extends the archived upstream feature set; it does not establish full Phabricator parity.

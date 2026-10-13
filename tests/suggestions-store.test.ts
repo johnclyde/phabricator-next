@@ -267,3 +267,85 @@ test('schema 5 migration preserves original bytes and provenance; old replay get
     assert.throws(() => access.present('POST', '/api/revisions/P1/versions', { status: 201, body: { ...old.detail, threadEvents: undefined } }), status(409));
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+function multiProposal(store: Store, detail: RevisionDetail) {
+  const version = detail.versions[0]!;
+  const anchored = (filePath: string, quote: string) => { const start = version.files.find(file => file.path === filePath)!.content.indexOf(quote); return createPassageAnchor(version, filePath, { start, end: start + quote.length, quote }); };
+  return { body: 'Clarify the result and its companion text together.', versionId: version.id, filePath: 'main.tex', passage, suggestion: { replacement, additionalEdits: [
+    { anchor: anchored('appendix.tex', 'Unchanged'), replacement: 'Revised', explanation: 'Keep the appendix consistent.' },
+    { anchor: anchored('main.tex', 'Final paragraph.'), replacement: '', explanation: 'Remove the obsolete conclusion.' },
+    { anchor: anchored('main.tex', 'Introduction.'), replacement: 'Expanded introduction.', explanation: 'Introduce the complete assumptions.' },
+  ] } };
+}
+
+test('a multi-passage proposal creates one immutable source, application, thread advance and notification cause', () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    store.notifications.configure({ eligible: () => true, canView: () => true });
+    const detail = create(store), id = detail.revision.id, input = multiProposal(store, detail);
+    const root = store.createComment(id, input, reviewer);
+    assert.deepEqual(root.suggestion, input.suggestion);
+    const savedComment = JSON.stringify(root);
+    store.saveReview(id, 1, { provider: 'local', model: 'deterministic', summary: 'No blockers.', findings: [] }, author);
+    lifecycleAction(store, id, 'accept_reviewed', author);
+    const before = store.detail(id), applied = store.applySuggestion(id, root.id, expected(before, root.id), author);
+    assert.equal(applied.versions.length, 2);
+    assert.deepEqual(applied.versions[0], detail.versions[0]);
+    assert.equal(applied.versions[1]!.files[0]!.content, source.replace(quote, replacement).replace('Final paragraph.', '').replace('Introduction.', 'Expanded introduction.'));
+    assert.equal(applied.versions[1]!.files[1]!.content, '  Revised appendix.\r\n');
+    assert.equal(applied.revision.status, 'needs_review');
+    assert.equal(applied.suggestionApplications.length, 1);
+    assert.equal(applied.threads[0]!.version, before.threads[0]!.version + 1);
+    assert.equal(applied.threads[0]!.status, before.threads[0]!.status);
+    assert.deepEqual(applied.threadEvents, before.threadEvents);
+    assert.equal(applied.activity.filter(item => item.action === 'suggestion_applied').length, 1);
+    assert.equal(JSON.stringify(applied.comments[0]), savedComment);
+    assert.equal(store.database.prepare("SELECT count(*) AS n FROM notification_events WHERE json_extract(data, '$.kind') = 'suggestion_applied'").get()!.n, 1);
+  } finally { store.close(); }
+});
+
+test('invalid later passages reject the whole proposal before comments, threads or activity are written', () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const detail = create(store), foreign = create(store), id = detail.revision.id, input = multiProposal(store, detail), before = snapshot(store);
+    const valid = input.suggestion.additionalEdits;
+    for (const edit of [
+      { ...valid[0]!, anchor: { ...valid[0]!.anchor, suffix: 'Wrong context' } },
+      { ...valid[0]!, anchor: { ...valid[0]!.anchor, versionId: foreign.versions[0]!.id } },
+      { ...valid[0]!, anchor: { ...valid[0]!.anchor, contentHash: '0'.repeat(64) } },
+      { ...valid[0]!, anchor: { ...valid[0]!.anchor, filePath: 'missing.tex' } },
+      { ...valid[0]!, anchor: createPassageAnchor(detail.versions[0]!, 'main.tex', passage) },
+      { ...valid[0]!, explanation: '' },
+    ]) {
+      assert.throws(() => store.createComment(id, { ...input, suggestion: { replacement, additionalEdits: [valid[1], valid[2], edit] } }, reviewer), status(400));
+      assert.deepEqual(snapshot(store), before);
+    }
+  } finally { store.close(); }
+});
+
+test('multi-passage application rolls back every edit and evidence row, and an identical retry applies only once', () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const detail = create(store), id = detail.revision.id, root = store.createComment(id, multiProposal(store, detail), reviewer);
+    const input = expected(store.detail(id), root.id), before = snapshot(store);
+    const apply = () => store.mutate('batch-apply', 'batch-fingerprint', () => ({ status: 201, body: store.applySuggestion(id, root.id, input, author) }));
+    store.database.exec("CREATE TRIGGER fail_batch BEFORE INSERT ON suggestion_applications BEGIN SELECT RAISE(ABORT, 'batch failure'); END");
+    assert.throws(apply, /batch failure/); assert.deepEqual(snapshot(store), before);
+    store.database.exec('DROP TRIGGER fail_batch');
+    const result = apply(), after = snapshot(store);
+    assert.deepEqual(apply(), result); assert.deepEqual(snapshot(store), after);
+    assert.throws(() => store.applySuggestion(id, root.id, input, author), status(409));
+    assert.deepEqual(snapshot(store), after);
+  } finally { store.close(); }
+});
+
+test('a later-file source size failure rejects every proposed replacement and keeps all evidence unchanged', () => {
+  const store = new Store({ path: ':memory:' });
+  try {
+    const detail = create(store, [sourceFiles[0]!, { path: 'appendix.tex', content: 'x'.repeat(500_000) }]), id = detail.revision.id, version = detail.versions[0]!;
+    const root = store.createComment(id, { body: 'Apply all edits together.', versionId: version.id, filePath: 'main.tex', passage, suggestion: { replacement, additionalEdits: [{ anchor: createPassageAnchor(version, 'appendix.tex', { start: 0, end: 1, quote: 'x' }), replacement: 'xx', explanation: 'Expand the later file.' }] } }, reviewer);
+    const before = snapshot(store);
+    assert.throws(() => store.applySuggestion(id, root.id, expected(store.detail(id), root.id), author), status(400));
+    assert.deepEqual(snapshot(store), before);
+  } finally { store.close(); }
+});

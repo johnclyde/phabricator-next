@@ -7,8 +7,9 @@ import DraftAvailability from './DraftAvailability';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { MessageSquare, RotateCcw, CheckCircle2 } from 'lucide-react';
 import { diffWordsWithSpace } from 'diff';
-import type { ApplySuggestionInput, PassageInput, RevisionDetail, RevisionVersion, ReviewComment, ReviewThread } from '../shared/types';
+import type { ApplySuggestionInput, PassageInput, SuggestedReplacement, RevisionDetail, RevisionVersion, ReviewComment, ReviewThread } from '../shared/types';
 import { lineRange, projectAnchor } from '../shared/anchors';
+import { applySuggestedReplacement } from '../shared/suggestions';
 import type { MutationMethod } from './offline';
 import { useWorkspace } from './SessionGate';
 import { orderedDiscussionThreads, filterDiscussionThreads, moveDiscussionCursor, type DiscussionFilter } from '../shared/discussion-navigation';
@@ -26,6 +27,12 @@ export function SuggestionPreview({ original, replacement }: { original: string;
   const changes = useMemo(() => bounded ? diffWordsWithSpace(original, replacement, { timeout: 80, maxEditLength: 4000 }) : null, [original, replacement, bounded]);
   if (!bounded) return <p className="error-text small">Choose an original passage and replacement of at most 20,000 characters each to preview this suggested edit.</p>;
   return <div className="suggestion-preview"><div className="suggestion-texts"><div><h5>Original passage</h5><pre className="suggestion-original">{original}</pre></div><div><h5>{replacement === '' ? 'Proposed deletion' : 'Proposed replacement'}</h5>{replacement === '' ? <p className="suggestion-deletion">Delete the selected passage. No replacement text.</p> : <pre className="suggestion-replacement">{replacement}</pre>}</div></div><details><summary>Show exact text diff</summary>{changes ? <pre className="suggestion-diff" aria-label="Suggested edit diff">{changes.map((part, index) => part.added ? <ins key={index}>{part.value}</ins> : part.removed ? <del key={index}>{part.value}</del> : <span key={index}>{part.value}</span>)}</pre> : <p className="muted small">The word diff exceeded its processing limit. Both complete texts are shown above.</p>}</details></div>;
+}
+
+export function SuggestionSetPreview({ passage, filePath, suggestion, explanation }: { passage: Pick<PassageInput, 'quote'> & Partial<Pick<PassageInput, 'start' | 'end'>>; filePath: string; suggestion: SuggestedReplacement; explanation: string }) {
+  if (!suggestion.additionalEdits?.length) return <SuggestionPreview original={passage.quote} replacement={suggestion.replacement}/>;
+  const edits = [{ filePath, quote: passage.quote, start: passage.start, end: passage.end, replacement: suggestion.replacement, explanation }, ...suggestion.additionalEdits.map(edit => ({ filePath: edit.anchor.filePath, quote: edit.anchor.quote, start: edit.anchor.start, end: edit.anchor.end, replacement: edit.replacement, explanation: edit.explanation }))];
+  return <div className="suggestion-set-preview" aria-label="Complete suggested edits">{edits.map((edit, index) => <section className="suggestion-passage-preview" key={index} data-suggestion-passage={index + 1}><h5>Passage {index + 1} of {edits.length} · {edit.filePath}</h5>{edit.start !== undefined && edit.end !== undefined && <p className="small muted">Original source characters {edit.start + 1}–{edit.end}.</p>}<p className="suggestion-explanation">{edit.explanation}</p><SuggestionPreview original={edit.quote} replacement={edit.replacement}/></section>)}</div>;
 }
 
 /** The selectable text node is exact source; line numbers never enter its offsets. */
@@ -170,7 +177,13 @@ function ThreadSuggestion({ root, thread, detail, online, canEdit, mutate, saved
   const application = (detail.suggestionApplications || []).find(item => item.commentId === root.id);
   const destination = application && detail.versions.find(version => version.id === application.toVersionId);
   const exactCurrent = current?.id === anchor.versionId && current.contentHash === anchor.contentHash;
-  const eligible = online && canEdit && exactCurrent && !application;
+  const validationError = useMemo(() => {
+    try { if (!original) throw new Error('The exact original source for this proposal is unavailable.'); applySuggestedReplacement(original, anchor, suggestion, root.body); return ''; }
+    catch (failure) { return failure instanceof Error ? failure.message : 'The complete proposal could not be verified.'; }
+  }, [original, anchor, suggestion, root.body]);
+  const passageCount = 1 + (suggestion.additionalEdits?.length ?? 0);
+  const fileCount = new Set([anchor.filePath, ...(suggestion.additionalEdits ?? []).map(edit => edit.anchor.filePath)]).size;
+  const eligible = online && canEdit && exactCurrent && !application && !validationError;
   const expected: ApplySuggestionInput | null = current ? { expectedVersion: detail.revision.currentVersion, expectedVersionId: current.id, expectedContentHash: current.contentHash, expectedThreadVersion: thread.version } : null;
   const confirmationCurrent = Boolean(confirmation && expected && JSON.stringify(confirmation) === JSON.stringify(expected));
   const apply = async () => {
@@ -182,12 +195,12 @@ function ThreadSuggestion({ root, thread, detail, online, canEdit, mutate, saved
     } catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not apply this suggested edit.'); setConfirmation(null); await saved(); }
     finally { setBusy(false); }
   };
-  return <section className="thread-suggestion" aria-label="Suggested edit"><h4>Suggested edit</h4><p className="muted small">Original source: version {original?.number ?? 'unknown'} · {anchor.filePath}. This edit replaces this one anchored passage only.</p><SuggestionPreview original={anchor.quote} replacement={suggestion.replacement}/>
+  return <section className="thread-suggestion" aria-label="Suggested edit"><h4>Suggested edit</h4><p className="muted small">Original source: version {original?.number ?? 'unknown'} · {passageCount === 1 ? `${anchor.filePath}. This edit replaces this one anchored passage only.` : `${passageCount} passages across ${fileCount} ${fileCount === 1 ? 'file' : 'files'}. Every edit is applied together as one new version.`}</p><SuggestionSetPreview passage={anchor} filePath={anchor.filePath} suggestion={suggestion} explanation={root.body}/>{validationError && <p className="error-text small" role="alert">{validationError}</p>}
     {application ? <div className="suggestion-application"><CheckCircle2 size={16}/><span><strong>{application.actor}</strong> applied this edit as version {destination?.number ?? 'unknown'} · {timestamp(application.createdAt)}.</span><button className="text-button" onClick={() => openSource(application.toVersionId, anchor.filePath, null)}>View applied version {destination?.number ?? ''}</button></div> : <>
       {!exactCurrent && <p className="info-strip">The current source has changed since this suggestion was written. Create a new suggestion on the current version after reviewing it; this edit cannot be applied to a relocated passage.</p>}
       {!online && <p className="muted small">Reconnect to apply a suggested edit. Applying source changes is never queued offline.</p>}
       {!canEdit && <p className="muted small">Edit access is required to apply this suggestion.</p>}
-      {!confirmation ? <button className="button" disabled={!eligible} onClick={() => { setConfirmation(expected); setError(''); }}>Review Suggested Edit</button> : <div className="suggestion-confirmation" role="region" aria-label="Confirm suggested edit"><h5>Apply this exact edit as a new version?</h5><p>Replace 1 passage in <strong>{anchor.filePath}</strong> from version <strong>{original?.number ?? 'unknown'}</strong>: {anchor.quote.length} source characters {suggestion.replacement === '' ? 'will be deleted' : `will be replaced with ${suggestion.replacement.length} characters`}. The complete original and proposed text are shown above.</p><p>The new source will need review again. Existing review evidence stays with its original version. This discussion stays {thread.status}.</p>{!confirmationCurrent && <p role="alert" className="error-text">The source or discussion changed after this preview. Cancel and review the suggestion again.</p>}<div className="thread-actions"><button type="button" className="button" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</button><button type="button" className="button primary" disabled={!eligible || !confirmationCurrent || busy} onClick={() => void apply()}>{busy ? 'Applying…' : 'Apply as New Version'}</button></div></div>}
+      {!confirmation ? <button className="button" disabled={!eligible} onClick={() => { setConfirmation(expected); setError(''); }}>Review Suggested Edit</button> : <div className="suggestion-confirmation" role="region" aria-label="Confirm suggested edit"><h5>Apply this exact edit as a new version?</h5><p>{passageCount === 1 ? <>Replace 1 passage in <strong>{anchor.filePath}</strong> from version <strong>{original?.number ?? 'unknown'}</strong>: {anchor.quote.length} source characters {suggestion.replacement === '' ? 'will be deleted' : `will be replaced with ${suggestion.replacement.length} characters`}.</> : <>Apply all <strong>{passageCount} passages</strong> across <strong>{fileCount} {fileCount === 1 ? 'file' : 'files'}</strong> from version <strong>{original?.number ?? 'unknown'}</strong>. The proposal succeeds completely or leaves the source unchanged.</>} The complete original text, proposed replacements and explanations are shown above.</p><p>The new source will need review again. Existing review evidence stays with its original version. This discussion stays {thread.status}.</p>{!confirmationCurrent && <p role="alert" className="error-text">The source or discussion changed after this preview. Cancel and review the suggestion again.</p>}<div className="thread-actions"><button type="button" className="button" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</button><button type="button" className="button primary" disabled={!eligible || !confirmationCurrent || busy} onClick={() => void apply()}>{busy ? 'Applying…' : 'Apply as New Version'}</button></div></div>}
     </>}{error && <p className="error-text" role="alert">{error}</p>}
   </section>;
 }

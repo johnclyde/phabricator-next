@@ -145,7 +145,10 @@ export function discussionThreadNarration(detail: Pick<RevisionDetail, 'comments
   if (!root) return 'The selected discussion thread has no loaded original comment.';
   const original = detail.versions.find(version => version.id === root.versionId && version.revisionId === root.revisionId);
   const location = root.docxAnchor ? 'Original Word passage.' : root.filePath ? `File ${discussionExcerpt(root.filePath, 160, 'Filename')}${root.line !== null ? `, line ${root.line}` : ', passage location'}.` : 'General discussion.';
-  const header = `Thread from original version ${original?.number ?? 'unavailable'}. ${location} ${thread.status === 'resolved' ? 'Resolved' : 'Open'}, ${comments.length} ${comments.length === 1 ? 'comment' : 'comments'}.`;
+  const additional = root.suggestion?.additionalEdits;
+  const proposalFiles = new Set([root.filePath, ...(additional ?? []).map(edit => edit.anchor.filePath)]).size;
+  const proposal = additional?.length ? ` This proposal contains ${additional.length + 1} suggested passages across ${proposalFiles} ${proposalFiles === 1 ? 'file' : 'files'}. The complete edit preview is available in the discussion.` : '';
+  const header = `Thread from original version ${original?.number ?? 'unavailable'}. ${location} ${thread.status === 'resolved' ? 'Resolved' : 'Open'}, ${comments.length} ${comments.length === 1 ? 'comment' : 'comments'}.${proposal}`;
   if (collapsed) return `${header} Collapsed for you. Use read current thread to hear its content without expanding it.`;
   const replies = comments.filter(comment => comment.id !== root.id);
   const selected = [root, ...replies].slice(0, DISCUSSION_COMMENT_LIMIT);
