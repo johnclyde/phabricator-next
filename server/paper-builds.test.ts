@@ -155,7 +155,7 @@ test('schema15 adds empty job/artifact storage without rewriting schema14 eviden
   try{
     const exec=DatabaseSync.prototype.exec;try{DatabaseSync.prototype.exec=function(sql:string){if(sql==='PRAGMA user_version = 15')throw new Error('Injected migration failure');return exec.call(this,sql);};assert.throws(()=>new Store({path}),/Injected migration failure/);}finally{DatabaseSync.prototype.exec=exec;}
     const db=new DatabaseSync(path);assert.equal(db.prepare('PRAGMA user_version').get()!.user_version,14);assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name='paper_builds'").get(),undefined);db.close();
-    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,44);assert.deepEqual(['entities','versions','thread_preferences'].map(table=>store!.database.prepare(`SELECT * FROM ${table}`).all()),old);assert.deepEqual(store.database.prepare('SELECT * FROM paper_builds').all(),[]);assert.deepEqual(store.database.prepare('SELECT * FROM paper_build_artifacts').all(),[]);
+    store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,45);assert.deepEqual(['entities','versions','thread_preferences'].map(table=>store!.database.prepare(`SELECT * FROM ${table}`).all()),old);assert.deepEqual(store.database.prepare('SELECT * FROM paper_builds').all(),[]);assert.deepEqual(store.database.prepare('SELECT * FROM paper_build_artifacts').all(),[]);
   }finally{store?.close();rmSync(directory,{recursive:true,force:true});}
 });
 

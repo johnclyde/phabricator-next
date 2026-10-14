@@ -8,7 +8,7 @@ import { AutomationPanel, automationError, exportAutomation, useAutomationRead }
 import './search.css';
 import { searchRouteQuery } from './search-route';
 
-const names: Record<SearchKind, string> = { task: 'Tasks', revision: 'Code revisions', paper: 'Papers', document: 'Document revisions', wiki: 'Wiki', project: 'Projects', repository: 'Repositories', paste: 'Pastes', file: 'Files', almanac: 'Almanac', conpherence: 'Conversations', calendar: 'Calendar', slowvote: 'Polls', phame: 'Blogs', legalpad: 'Agreements' };
+const names: Record<SearchKind, string> = { task: 'Tasks', revision: 'Code revisions', paper: 'Papers', document: 'Document revisions', wiki: 'Wiki', project: 'Projects', repository: 'Repositories', paste: 'Pastes', file: 'Files', almanac: 'Almanac', conpherence: 'Conversations', calendar: 'Calendar', slowvote: 'Polls', phame: 'Blogs', legalpad: 'Agreements', owners: 'Owners packages' };
 interface SaveIntent { id: string; path: string; body: unknown; label: string }
 function intent(value: unknown): SaveIntent | null {
   if (!value || typeof value !== 'object') return null;

@@ -1,0 +1,242 @@
+import { test, expect } from '@playwright/test';
+import { reviewerApi as api, reviewerSignIn as signIn } from './revision-reviewers-browser';
+import { ownersDefinition, type OwnersDetail, type OwnersDefinition, type OwnersHistory, type OwnersList, type OwnersReceipt } from '../shared/owners';
+import type { AppState, RevisionDetail } from '../shared/types';
+import type { OwnersRoutingHistory } from '../shared/owners-routing';
+
+const nonce = () => crypto.randomUUID().slice(0, 8);
+const definition = (state: AppState, name: string): OwnersDefinition => ({ name, description: '', visibility: 'workspace', status: 'active', owners: [{ kind: 'person', id: state.currentPrincipalId }], dominion: 'strong', autoReview: 'none', auditing: 'none', paths: [] });
+
+test('ownership packages edit paths and owners, explain matching, retain immutable history, and archive cleanly on mobile', async ({ page }, info) => {
+  await page.goto('./#owners');
+  const state = await api<AppState>(page, '/state'), repository = state.repositories.find(item => state.access[item.id]?.capabilities.edit)!;
+  const token = nonce(), name = `Documentation owners ${token}`, root = `/owners-${token}`;
+  await page.getByRole('button', { name: 'New package', exact: true }).click();
+  const editor = page.getByRole('region', { name: 'Ownership package editor', exact: true });
+  await editor.getByLabel('Package name', { exact: true }).fill(name);
+  await editor.getByLabel('Package description', { exact: true }).fill('Responsible for maintained documentation.');
+  const project = state.projects.find(item => item.status === 'active');
+  if (project) await editor.getByLabel('Add an owner', { exact: true }).selectOption(`project:${project.id}`);
+  await editor.getByRole('button', { name: 'Add repository path', exact: true }).click();
+  await editor.getByLabel('Path 1 repository', { exact: true }).selectOption(repository.id);
+  await editor.getByLabel('Path 1', { exact: true }).fill(root);
+  await editor.getByRole('button', { name: 'Add repository path', exact: true }).click();
+  await editor.getByLabel('Path 2 repository', { exact: true }).selectOption(repository.id);
+  await editor.getByLabel('Path 2', { exact: true }).fill(`${root}/generated`);
+  await editor.getByLabel('Path 2 rule', { exact: true }).selectOption('exclude');
+  await editor.getByLabel('Automatic review', { exact: true }).selectOption('review-always');
+  await editor.getByLabel('Commit auditing', { exact: true }).selectOption('all');
+  await editor.getByRole('button', { name: 'Create package', exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+  const created = (await api<OwnersList>(page, '/owners')).packages.find(item => item.name === name)!;
+  expect(created.paths).toEqual([{ repositoryId: repository.id, path: root, excluded: false }, { repositoryId: repository.id, path: `${root}/generated`, excluded: true }]);
+  if (project) expect(created.owners).toContainEqual({ kind: 'project', id: project.id });
+  const preview = page.getByRole('region', { name: 'Ownership matching preview', exact: true });
+  await preview.getByLabel('Preview repository', { exact: true }).selectOption(repository.id);
+  await preview.getByLabel('Paths to check', { exact: true }).fill(`${root}/guide.md\n${root}/generated/index.md`);
+  await preview.getByRole('button', { name: 'Preview ownership', exact: true }).click();
+  const matches = page.getByRole('region', { name: 'Ownership matches', exact: true });
+  await expect(matches.getByRole('link', { name, exact: true })).toBeVisible();
+  await expect(matches).toContainText(`${root}/guide.md`);
+  await expect(matches).not.toContainText(`${root}/generated/index.md`);
+  await page.getByRole('button', { name: 'Edit package', exact: true }).click();
+  await editor.getByLabel('Dominion', { exact: true }).selectOption('weak');
+  await editor.getByLabel('Package description', { exact: true }).fill('Fallback documentation owners.');
+  await editor.getByRole('button', { name: 'Save package', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const history = await api<OwnersHistory>(page, `/owners/${created.id}/history`);
+  expect(history.history.map(entry => entry.package.version)).toEqual([2, 1]);
+  expect(history.history[1]!.package.description).toBe('Responsible for maintained documentation.');
+  expect(history.history[0]!.package.dominion).toBe('weak');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  if (info.project.name === 'mobile') expect((await page.getByRole('button', { name: 'Edit package', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.screenshot({ path: info.outputPath('ownership-package.png'), fullPage: true });
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Archive package', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Reactivate package', exact: true })).toBeVisible();
+  await preview.getByLabel('Paths to check', { exact: true }).fill(`${root}/guide.md`);
+  await preview.getByRole('button', { name: 'Preview ownership', exact: true }).click();
+  await expect(matches.getByRole('link', { name, exact: true })).toHaveCount(0);
+  await page.getByRole('link', { name: 'All packages', exact: true }).click();
+  await page.getByLabel('Filter packages', { exact: true }).fill(name);
+  const packages = page.getByRole('region', { name: 'Ownership packages', exact: true });
+  await expect(packages.getByRole('link', { name, exact: true })).toHaveCount(0);
+  await page.getByLabel('Package list status', { exact: true }).selectOption('archived');
+  await expect(packages.getByRole('link', { name, exact: true })).toBeVisible();
+});
+
+test.describe('ownership recovery', () => {
+  test.use({ serviceWorkers: 'block' });
+  test('typing during successful creation and updates keeps the newer draft on the acknowledged package', async ({ page }) => {
+    await page.goto('./#owners');
+    const initial = `In-flight owners ${nonce()}`, newer = `${initial} continued`;
+    let hold: 'POST' | 'PUT' | null = 'POST', release: (() => void) | null = null;
+    const writes: { method: string; path: string }[] = [];
+    await page.route('**/api/owners{,/**}', async route => {
+      const method = route.request().method();
+      if (!['POST', 'PUT'].includes(method)) return route.continue();
+      writes.push({ method, path: new URL(route.request().url()).pathname });
+      if (method !== hold) return route.continue();
+      hold = null;
+      const result = await route.fetch(); expect(result.ok()).toBe(true);
+      await new Promise<void>(resolve => { release = resolve; });
+      release = null; await route.fulfill({ response: result });
+    });
+    await page.getByRole('button', { name: 'New package', exact: true }).click();
+    const editor = page.getByRole('region', { name: 'Ownership package editor', exact: true });
+    await editor.getByLabel('Package name', { exact: true }).fill(initial);
+    await editor.getByRole('button', { name: 'Create package', exact: true }).click();
+    await expect.poll(() => !!release).toBe(true);
+    await editor.getByLabel('Package name', { exact: true }).fill(newer);
+    release!();
+    await expect(editor.getByRole('heading', { name: 'Edit Package', exact: true })).toBeVisible();
+    await expect(editor.getByLabel('Package name', { exact: true })).toHaveValue(newer);
+    await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeEnabled();
+    const pkg = (await api<OwnersList>(page, '/owners')).packages.find(item => item.name === initial)!;
+    expect(await page.evaluate(() => location.hash)).toBe(`#owners/${pkg.id}`);
+    await editor.getByRole('button', { name: 'Save package', exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    expect((await api<OwnersList>(page, '/owners')).packages.filter(item => item.name.startsWith(initial))).toHaveLength(1);
+    expect((await api<OwnersDetail>(page, `/owners/${pkg.id}`)).package).toMatchObject({ version: 2, name: newer });
+
+    await page.getByRole('button', { name: 'Edit package', exact: true }).click();
+    await editor.getByLabel('Package description', { exact: true }).fill('Submitted description.'); hold = 'PUT';
+    await editor.getByRole('button', { name: 'Save package', exact: true }).click();
+    await expect.poll(() => !!release).toBe(true);
+    await editor.getByLabel('Package description', { exact: true }).fill('Newer description typed while saving.');
+    release!();
+    await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeEnabled();
+    await expect(editor.getByRole('alert')).toHaveCount(0);
+    await expect(editor.getByLabel('Package description', { exact: true })).toHaveValue('Newer description typed while saving.');
+    await editor.getByRole('button', { name: 'Save package', exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    expect((await api<OwnersDetail>(page, `/owners/${pkg.id}`)).package).toMatchObject({ version: 4, description: 'Newer description typed while saving.' });
+    expect(writes.filter(write => write.method === 'POST')).toHaveLength(1);
+    expect(writes.filter(write => write.method === 'PUT').map(write => write.path)).toEqual(Array(3).fill(`${new URL(page.url()).pathname}api/owners/${pkg.id}`));
+  });
+  test('a lost creation receipt retries exactly once and keeps later unsent edits', async ({ page }) => {
+    await page.goto('./#owners');
+    const name = `Recovered owners ${nonce()}`, newer = `${name} newer draft`;
+    const bodies: unknown[] = [], keys: string[] = []; let first = true;
+    await page.route('**/api/owners', async intercepted => {
+      if (intercepted.request().method() !== 'POST') return intercepted.continue();
+      bodies.push(intercepted.request().postDataJSON()); keys.push(intercepted.request().headers()['idempotency-key']!);
+      if (first) { first = false; const result = await intercepted.fetch(); expect(result.ok()).toBe(true); return intercepted.abort('failed'); }
+      return intercepted.continue();
+    });
+    await page.getByRole('button', { name: 'New package', exact: true }).click();
+    const editor = page.getByRole('region', { name: 'Ownership package editor', exact: true });
+    await editor.getByLabel('Package name', { exact: true }).fill(name);
+    await editor.getByRole('button', { name: 'Create package', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Retry exact package request', exact: true })).toBeVisible();
+    await editor.getByLabel('Package name', { exact: true }).fill(newer);
+    await page.reload();
+    await page.getByRole('button', { name: 'Retry exact package request', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Retry exact package request', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+    expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]); expect(keys[1]).toBe(keys[0]);
+    const packages = (await api<OwnersList>(page, '/owners')).packages;
+    expect(packages.filter(item => item.name === name)).toHaveLength(1);
+    expect(packages.some(item => item.name === newer)).toBe(false);
+    await page.getByRole('link', { name: 'All packages', exact: true }).click();
+    await page.getByRole('button', { name: 'New package', exact: true }).click();
+    await expect(editor.getByLabel('Package name', { exact: true })).toHaveValue(newer);
+  });
+});
+
+test('stale package drafts preserve local edits until the author explicitly discards them', async ({ page }) => {
+  await page.goto('./#owners');
+  const state = await api<AppState>(page, '/state'), name = `Concurrent owners ${nonce()}`;
+  const receipt = await api<OwnersReceipt>(page, '/owners', { ...definition(state, name), expectedAccessEpoch: state.accessEpoch }), pkg = receipt.package!;
+  await page.goto(`./#owners/${pkg.id}`);
+  await page.getByRole('button', { name: 'Edit package', exact: true }).click();
+  const editor = page.getByRole('region', { name: 'Ownership package editor', exact: true });
+  await editor.getByLabel('Package description', { exact: true }).fill('Unsent text remains mine.');
+  await api(page, `/owners/${pkg.id}`, { ...ownersDefinition(pkg), description: 'Saved elsewhere.', expectedVersion: pkg.version, expectedAccessEpoch: (await api<AppState>(page, '/state')).accessEpoch }, 'PUT');
+  await page.getByRole('button', { name: 'Refresh owners', exact: true }).click();
+  await expect(editor.getByRole('alert')).toContainText('changed after the draft began');
+  await expect(editor.getByLabel('Package description', { exact: true })).toHaveValue('Unsent text remains mine.');
+  await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeDisabled();
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit package', exact: true }).click();
+  await expect(editor.getByRole('alert')).toContainText('changed after the draft began');
+  page.once('dialog', dialog => dialog.accept());
+  await editor.getByRole('button', { name: 'Discard package draft', exact: true }).click();
+  await expect(editor.getByLabel('Package description', { exact: true })).toHaveValue('Saved elsewhere.');
+  await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeEnabled();
+});
+
+test('shared package withdrawal removes details, history, and matches from another workspace member', async ({ browser }, info) => {
+  const alice = await signIn(browser, info), bob = await signIn(browser, info, 1);
+  try {
+    const state = await api<AppState>(alice.page, '/state'), repository = state.repositories.find(item => state.access[item.id]?.capabilities.edit)!;
+    const token = nonce(), name = `Private owners ${token}`;
+    const created = await api<OwnersReceipt>(alice.page, '/owners', { ...definition(state, name), description: `Restricted owner notes ${token}`, paths: [{ repositoryId: repository.id, path: `/private-${token}`, excluded: false }], expectedAccessEpoch: state.accessEpoch }), pkg = created.package!;
+    await bob.page.goto(`./#owners/${pkg.id}`);
+    await expect(bob.page.getByRole('heading', { name, exact: true })).toBeVisible();
+    await expect(bob.page.getByRole('button', { name: 'Edit package', exact: true })).toHaveCount(0);
+    await api(alice.page, `/owners/${pkg.id}`, { ...ownersDefinition(pkg), visibility: 'private', expectedVersion: pkg.version, expectedAccessEpoch: (await api<AppState>(alice.page, '/state')).accessEpoch }, 'PUT');
+    await bob.page.getByRole('button', { name: 'Refresh owners', exact: true }).click();
+    await expect(bob.page.getByRole('heading', { name, exact: true })).toHaveCount(0);
+    await expect(bob.page.locator('.owners-workspace')).not.toContainText(`Restricted owner notes ${token}`);
+    await bob.page.goto('./#owners');
+    await expect(bob.page.getByRole('link', { name, exact: true })).toHaveCount(0);
+    const preview = bob.page.getByRole('region', { name: 'Ownership matching preview', exact: true });
+    await preview.getByLabel('Preview repository', { exact: true }).selectOption(repository.id);
+    await preview.getByLabel('Paths to check', { exact: true }).fill(`/private-${token}/index.md`);
+    await preview.getByRole('button', { name: 'Preview ownership', exact: true }).click();
+    await expect(bob.page.getByRole('region', { name: 'Ownership matches', exact: true })).not.toContainText(name);
+    expect((await api<OwnersDetail>(alice.page, `/owners/${pkg.id}`)).package.visibility).toBe('private');
+  } finally { await alice.context.close(); await bob.context.close(); }
+});
+
+test('revision routing history links the exact package settings and source used for automatic review', async ({ browser }, info) => {
+  const alice = await signIn(browser, info);
+  try {
+    const state = await api<AppState>(alice.page, '/state'), bob = state.principals.find(person => person.username === 'bob')!, repository = state.repositories.find(item => state.access[item.id]?.capabilities.edit)!;
+    const token = nonce(), name = `Automatic owners ${token}`, sourcePath = `automatic-${token}/source.ts`;
+    const created = await api<OwnersReceipt>(alice.page, '/owners', { ...definition(state, name), owners: [{ kind: 'person', id: bob.id }], autoReview: 'review-always', paths: [{ repositoryId: repository.id, path: `/automatic-${token}`, excluded: false }], expectedAccessEpoch: state.accessEpoch });
+    const revision = await api<RevisionDetail>(alice.page, '/revisions', { title: `Owned source ${token}`, kind: 'code', repositoryId: repository.id, summary: 'Inspect package routing on immutable source.', testPlan: 'Review the exact submitted file.', files: [{ path: sourcePath, content: 'export const value = 1;\n' }] });
+    let history: OwnersRoutingHistory;
+    await expect.poll(async () => { history = await api<OwnersRoutingHistory>(alice.page, `/owners-routing/${revision.revision.id}`); return history.records.flatMap(record => record.packages).some(result => result.package.id === created.package!.id && result.appliedIds.includes(bob.id)); }).toBe(true);
+    await alice.page.goto(`./#${revision.revision.id}`);
+    const panel = alice.page.locator('.automation-panel').filter({ has: alice.page.getByRole('heading', { name: 'Owners routing', exact: true }) });
+    await panel.getByRole('button', { name: 'Show routing history', exact: true }).click();
+    await expect(panel.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(panel).toContainText('package version 1');
+    await expect(panel).toContainText(bob.displayName);
+    await expect(panel).toContainText(revision.versions[0]!.id);
+    await panel.getByText('Matched paths (1)', { exact: true }).click();
+    await expect(panel).toContainText(sourcePath);
+    await panel.getByRole('link', { name, exact: true }).click();
+    await expect(alice.page.getByRole('heading', { name, exact: true })).toBeVisible();
+  } finally { await alice.context.close(); }
+});
+
+test('an existing package draft can be resumed offline and reconnecting never submits it', async ({ page, context }) => {
+  await page.goto('./#owners');
+  const state = await api<AppState>(page, '/state'), name = `Offline owners ${nonce()}`;
+  const created = await api<OwnersReceipt>(page, '/owners', { ...definition(state, name), expectedAccessEpoch: state.accessEpoch }), id = created.package!.id;
+  await page.goto(`./#owners/${id}`);
+  await page.getByRole('button', { name: 'Edit package', exact: true }).click();
+  const editor = page.getByRole('region', { name: 'Ownership package editor', exact: true });
+  await context.setOffline(true);
+  await editor.getByLabel('Package description', { exact: true }).fill('Retained while disconnected.');
+  await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeDisabled();
+  await page.evaluate(() => { location.hash = 'home'; });
+  await expect(editor).toHaveCount(0);
+  await page.evaluate(id => { location.hash = `owners/${id}`; }, id);
+  await page.getByRole('button', { name: 'Resume package draft', exact: true }).click();
+  await expect(editor.getByLabel('Package description', { exact: true })).toHaveValue('Retained while disconnected.');
+  await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeDisabled();
+  let writes = 0;
+  page.on('request', request => { if (request.method() === 'PUT' && request.url().endsWith(`/api/owners/${id}`)) writes++; });
+  await context.setOffline(false);
+  await expect(editor.getByRole('button', { name: 'Save package', exact: true })).toBeEnabled();
+  expect(writes).toBe(0);
+  await editor.getByRole('button', { name: 'Save package', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(writes).toBe(1);
+  expect((await api<OwnersDetail>(page, `/owners/${id}`)).package.description).toBe('Retained while disconnected.');
+});

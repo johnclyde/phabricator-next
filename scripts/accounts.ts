@@ -1,7 +1,9 @@
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
-import { createAuth } from '../server/auth.ts';
+import { createAuth, type Auth } from '../server/auth.ts';
 import { createStore } from '../server/store.ts';
+import { createOwnersStore } from '../server/owners.ts';
+import { PolicyStore } from '../server/policy.ts';
 import type { AuthScope } from '../shared/auth.ts';
 
 const help = `Manage accounts for this local workspace (terminal access required).
@@ -22,7 +24,7 @@ Token secrets are printed once. Store them privately; never commit them.
 Scopes: read, write, review:local, review:hosted. Review scopes are explicit.
 Workspace membership is separate from object and Space permissions.
 Before enabling password sign-in, transfer-local explicitly hands local-only
-policy grants, task and revision ownership, and project membership to the chosen enabled account. It preserves other grants, records
+policy grants, task and revision ownership, Owners packages, and project membership to the chosen enabled account. It preserves other grants, records
 the terminal operator's action, and does not activate password authentication.
 Set APP_AUTH_MODE=password and restart the loopback server to require sign-in.
 `;
@@ -82,7 +84,7 @@ async function main(): Promise<void> {
   if (values['password-stdin'] && !['create', 'reset'].includes(command)) throw new Error('--password-stdin is only used with create or reset.');
   const store = createStore({ path: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite') });
   try {
-    const auth = createAuth({ database: store.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true, transferTaskOwners: (fromId, toId, attribution) => store.transferTaskOwners(fromId, toId, attribution), transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution), transferLocalProjectMemberships: (fromId, toId, attribution) => store.transferLocalProjectMemberships(fromId, toId, attribution) });
+    const auth: Auth = createAuth({ database: store.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true, transferTaskOwners: (fromId, toId, attribution) => store.transferTaskOwners(fromId, toId, attribution), transferRevisionAuthors: (fromId, toId, attribution) => store.transferLocalRevisionAuthors(fromId, toId, attribution), transferLocalProjectMemberships: (fromId, toId, attribution) => store.transferLocalProjectMemberships(fromId, toId, attribution), transferOwnersPackages: (fromId, toId, attribution) => createOwnersStore(store, auth, new PolicyStore(store.database, { principalExists: id => id === 'local:' + auth.workspaceId || auth.listAccounts().some(account => account.id === id && !account.disabled) })).transferLocal(fromId, toId, attribution) });
     if (command === 'list') { console.log(JSON.stringify(auth.listAccounts(), null, 2)); return; }
     if (command === 'create') {
       const created = await auth.createAccount({ username: username!, displayName: values.name ?? username!, password: await password(Boolean(values['password-stdin'])) });
@@ -94,7 +96,7 @@ async function main(): Promise<void> {
     if (command === 'disable' || command === 'enable') { auth.setAccountDisabled(account.id, command === 'disable'); console.log(`${account.username} ${command === 'disable' ? 'disabled; credentials revoked' : 'enabled'}.`); }
     if (command === 'transfer-local') {
       const result = auth.transferLocalPolicies(account.id);
-      console.log(`Transferred local-only grants to ${result.account.username} (${result.account.id}): ${result.spaces} Space(s), ${result.objects} object(s), ${result.tasks} task owner(s), ${result.revisions} revision owner(s), ${result.projectMemberships} project membership(s). Password authentication remains inactive.`);
+      console.log(`Transferred local-only grants to ${result.account.username} (${result.account.id}): ${result.spaces} Space(s), ${result.objects} object(s), ${result.tasks} task owner(s), ${result.revisions} revision owner(s), ${result.projectMemberships} project membership(s), ${result.ownersPackages} Owners package(s). Password authentication remains inactive.`);
     }
     if (command === 'tokens') console.log(JSON.stringify(auth.listTokens(account.id), null, 2));
     if (command === 'revoke') { if (!tokenId) throw new Error('Provide the token ID to revoke.'); auth.revokeToken(account.id, tokenId); console.log('Access token revoked.'); }

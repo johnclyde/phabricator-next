@@ -60,11 +60,11 @@ export interface AutomationIntent { id: string; path: string; method: MutationMe
 function readIntent(value: unknown): AutomationIntent | null {
   if (!value || typeof value !== 'object') return null;
   const input = value as Record<string, unknown>;
-  return typeof input.id === 'string' && typeof input.path === 'string' && (/^(?:\/api\/(?:maniphest|suite|audit|herald|harbormaster|drydock|landings)\/|\/api\/revisions\/[DPL][1-9]\d*\/landings$|\/api\/mail\/preferences$)/.test(input.path)) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
+  return typeof input.id === 'string' && typeof input.path === 'string' && (/^(?:\/api\/owners$|\/api\/(?:owners|maniphest|suite|audit|herald|harbormaster|drydock|landings)\/|\/api\/revisions\/[DPL][1-9]\d*\/landings$|\/api\/mail\/preferences$)/.test(input.path)) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
 }
 
 /** Retain one immutable request before sending it; recovery is always explicit. */
-export function useAutomationMutation(scope: 'maniphest' | `maniphest:${string}` | 'mail' | 'audit' | 'herald' | 'harbormaster' | 'drydock' | `suite:${string}` | `revision-builds:${string}` | `landing:${string}`, online: boolean) {
+export function useAutomationMutation(scope: 'owners' | `owners:${string}` | 'maniphest' | `maniphest:${string}` | 'mail' | 'audit' | 'herald' | 'harbormaster' | 'drydock' | `suite:${string}` | `revision-builds:${string}` | `landing:${string}`, online: boolean) {
   const client = useWorkspace(), key = `draft:automation:${scope}:request`;
   const [pending, setPending] = useState(() => readIntent(client.readStored(key, null))), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const mounted = useRef(true), sending = useRef(false);

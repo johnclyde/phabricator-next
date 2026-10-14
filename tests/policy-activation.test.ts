@@ -95,7 +95,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
     store.database.exec('DROP TRIGGER fail_transfer_audit');
     const epoch = policies.epoch();
     const transferred = operator.transferLocalPolicies(alice.id);
-    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1, tasks: 0, revisions: 0, projectMemberships: 0 });
+    assert.deepEqual(transferred, { account: alice, spaces: 1, objects: 1, tasks: 0, revisions: 0, projectMemberships: 0, ownersPackages: 0 });
     assert.equal(policies.epoch(), epoch + 1);
     const afterPolicy = policies.policy(wiki.id, alice.id);
     const afterSpace = policies.getSpace(space.id, alice.id);
@@ -116,7 +116,7 @@ test('terminal handoff preserves other grants and immutable content, versions ch
       assert.doesNotMatch(audit.detail, /Alice|Bob|Research/);
     }
     before = permissions();
-    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0, revisions: 0, projectMemberships: 0 });
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0, revisions: 0, projectMemberships: 0, ownersPackages: 0 });
     assert.deepEqual(permissions(), before, 'repeat handoff is a no-op, including versions, epoch and audit');
     assert.equal(latch(store), undefined);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
@@ -238,7 +238,7 @@ test('local revision ownership requires explicit terminal handoff and preserves 
     assert.deepEqual(snapshot(), before, 'second ownership failure rolls back first ownership, policy and epoch changes');
     store.database.exec('DROP TRIGGER reject_revision_transfer');
     const epoch = policies.epoch(), result = operator.transferLocalPolicies(alice.id);
-    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 0, revisions: 2, projectMemberships: 0 });
+    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 0, revisions: 2, projectMemberships: 0, ownersPackages: 0 });
     assert.equal(policies.epoch(), epoch + 3, 'each ownership transition and the policy batch advance authority');
     assert.deepEqual(source(), originalSource, 'source, status, original attribution and review evidence are unchanged');
     for (const detail of revisions) {
@@ -289,7 +289,7 @@ test('local task ownership blocks password activation and terminal transfer pres
     const oldHistory = store.database.prepare('SELECT * FROM task_transactions ORDER BY rowid').all();
     const oldSubscriptions = store.database.prepare('SELECT * FROM task_subscriptions ORDER BY rowid').all();
     const result = operator.transferLocalPolicies(alice.id);
-    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 1, revisions: 0, projectMemberships: 0 });
+    assert.deepEqual(result, { account: alice, spaces: 1, objects: 0, tasks: 1, revisions: 0, projectMemberships: 0, ownersPackages: 0 });
     const current = store.taskDetail(task.id).task;
     assert.equal(current.ownerId, alice.id); assert.equal(current.authorId, identity);
     assert.equal(current.version, task.version + 1);
@@ -302,7 +302,7 @@ test('local task ownership blocks password activation and terminal transfer pres
     assert.equal(policies.access(task.id, identity).view, false);
     assert.deepEqual(policies.getSpace(space.id, alice.id).view, selected(alice.id));
     const transferred = snapshot();
-    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0, revisions: 0, projectMemberships: 0 });
+    assert.deepEqual(operator.transferLocalPolicies(alice.id), { account: alice, spaces: 0, objects: 0, tasks: 0, revisions: 0, projectMemberships: 0, ownersPackages: 0 });
     assert.deepEqual(snapshot(), transferred);
     createAuth({ database: store.database, mode: 'password', basePath: '/' });
     assert.ok(latch(store));

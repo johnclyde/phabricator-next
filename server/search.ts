@@ -1,3 +1,4 @@
+import { createOwnersStore, type OwnersStore } from './owners.ts';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { FullTextIndex } from '../shared/search-index.ts';
@@ -55,7 +56,7 @@ export function searchRequest(params: URLSearchParams): SearchRequest {
   const cursor = params.get('cursor'); if (cursor !== null && (cursor.length > 2000 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(cursor))) throw new HttpError(400, 'Invalid search cursor.');
   return { ...queryInput(input), limit, cursor };
 }
-interface SearchDocument extends Omit<SearchResult, 'snippet'> { text: string }
+interface SearchDocument extends Omit<SearchResult, 'snippet'> { text: string; ownerIds?: string[] }
 interface QueryRow { id: string; owner_id: string; name_key: string; visibility: string; version: number; deleted: number; data: string }
 interface Cursor { query: string; snapshot: string; offset: number; principal: string; epoch: number }
 /** The index is a single-request positional full-text snapshot, populated only with currently
@@ -63,7 +64,7 @@ interface Cursor { query: string; snapshot: string; offset: number; principal: s
  * snippets, counts, ranking or page boundaries. */
 export class SearchService {
   private readonly cursorKey = randomBytes(32);
-  constructor(private readonly store: Store, private readonly auth: Auth, private readonly policies: PolicyStore, private readonly suite?: SuiteService) {}
+  constructor(private readonly store: Store, private readonly auth: Auth, private readonly policies: PolicyStore, private readonly suite?: SuiteService, private readonly owners: OwnersStore = createOwnersStore(store, auth, policies)) {}
   private visibleQuery(query: SavedSearchQuery, actor: AuthContext): boolean {
     return (query.ownerId === actor.principalId || query.visibility === 'workspace') && query.query.projectIds.every(id => this.policies.access(id, actor.principalId).view);
   }
@@ -97,7 +98,7 @@ export class SearchService {
   private documents(actor: AuthContext, request: SearchQuery): SearchDocument[] {
     const access = new AccessLayer(this.store, this.auth, this.policies, actor), state = access.state({ configured: false, model: null }), docs: SearchDocument[] = [];
     const wanted = (kind: SearchResult['kind']) => !request.kinds.length || request.kinds.includes(kind);
-    const put = (item: Pick<SearchDocument, 'id' | 'kind' | 'title' | 'text'> & Partial<SearchDocument>) => docs.push({ id: item.id, kind: item.kind, title: item.title, text: item.text, href: item.href ?? `#${item.id}`, status: item.status ?? null, priority: item.priority ?? null, ownerId: item.ownerId ?? null, projectIds: item.projectIds ?? [], createdAt: item.createdAt ?? null, updatedAt: item.updatedAt ?? null });
+    const put = (item: Pick<SearchDocument, 'id' | 'kind' | 'title' | 'text'> & Partial<SearchDocument>) => docs.push({ id: item.id, kind: item.kind, title: item.title, text: item.text, href: item.href ?? `#${item.id}`, status: item.status ?? null, priority: item.priority ?? null, ownerId: item.ownerId ?? null, ...(item.ownerIds ? { ownerIds: item.ownerIds } : {}), projectIds: item.projectIds ?? [], createdAt: item.createdAt ?? null, updatedAt: item.updatedAt ?? null });
     if (wanted('task')) for (const task of state.tasks) {
       const comments = this.store.database.prepare("SELECT json_extract(data,'$.comment') AS body FROM task_transactions WHERE task_id=? AND json_extract(data,'$.kind')='comment'").all(task.id).map(row => typeof row.body === 'string' ? row.body : '');
       const custom = (task as typeof task & { customFields?: Record<string, unknown> }).customFields ?? {};
@@ -113,6 +114,7 @@ export class SearchService {
     }
     if (wanted('wiki')) for (const document of state.documents) if (!document.location || document.location.status === 'active') put({ ...document, kind: 'wiki', text: `${document.slug}\n${document.content}`, status: 'active' });
     if (wanted('project')) for (const project of state.projects) put({ id: project.id, kind: 'project', title: project.displayName, text: [project.description, project.name, project.primarySlug, ...project.aliases].filter(Boolean).join('\n'), status: project.status, ownerId: project.authorId, projectIds: [project.id], createdAt: project.createdAt, updatedAt: project.updatedAt });
+    if (wanted('owners')) for (const pkg of this.owners.list(actor.principalId)) put({ id: pkg.id, kind: 'owners', title: pkg.name, text: [pkg.description, ...pkg.paths.map(path => path.path)].join('\n'), href: `#owners/${pkg.id}`, status: pkg.status, ownerIds: this.owners.resolvedOwners(pkg), createdAt: pkg.createdAt, updatedAt: pkg.updatedAt });
     if (wanted('repository')) for (const repository of state.repositories) put({ id: repository.id, kind: 'repository', title: repository.name, text: [repository.description, repository.remoteUrl, repository.defaultBranch].join('\n') });
     if (wanted('paste')) for (const paste of state.pastes ?? []) { const current = access.paste(paste.id); put({ ...paste, kind: 'paste', text: current.version.content, ownerId: paste.authorId }); }
     if (wanted('file')) for (const file of state.files ?? []) put({ ...file, kind: 'file', title: file.name, text: [file.altText, file.originalName, file.mediaType].join('\n'), ownerId: file.authorId });
@@ -142,7 +144,7 @@ export class SearchService {
     const docs = this.documents(actor, query).filter(item => projectsVisible
       && (!query.statuses.length || item.status !== null && query.statuses.includes(item.status))
       && (!query.priorities.length || item.priority !== null && query.priorities.includes(item.priority))
-      && (!owners.length || owners.includes(item.ownerId ?? 'unassigned'))
+      && (!owners.length || (item.ownerIds ? item.ownerIds.length ? item.ownerIds.some(id => owners.includes(id)) : owners.includes('unassigned') : owners.includes(item.ownerId ?? 'unassigned')))
       && (!query.projectIds.length || query.projectIds.every(id => item.projectIds.includes(id)))
       && (!query.createdAfter || item.createdAt !== null && item.createdAt >= query.createdAfter)
       && (!query.createdBefore || item.createdAt !== null && item.createdAt < query.createdBefore)
@@ -166,7 +168,7 @@ export class SearchService {
       else { const key = query.order === 'updated' ? 'updatedAt' : 'createdAt'; compare = (b.document[key] ?? '').localeCompare(a.document[key] ?? ''); }
       return compare || a.document.id.localeCompare(b.document.id, 'en');
     });
-    const items = ranked.slice(offset, offset + limit).map(({ document: { text: _text, ...item }, snippet }) => ({ ...item, snippet }));
+    const items = ranked.slice(offset, offset + limit).map(({ document: { text: _text, ownerIds: _ownerIds, ...item }, snippet }) => ({ ...item, snippet }));
     let nextCursor: string | null = null;
     if (offset + limit < ranked.length) { const data: Cursor = { query: queryHash, snapshot, offset: offset + limit, principal: actor.principalId, epoch }; const encoded = Buffer.from(JSON.stringify(data)).toString('base64url'); nextCursor = `${encoded}.${createHmac('sha256', this.cursorKey).update(encoded).digest('base64url')}`; }
     return { query, items, total: ranked.length, nextCursor, accessEpoch: epoch };

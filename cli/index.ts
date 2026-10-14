@@ -38,6 +38,7 @@ import { wikiWriteCommand } from './wiki-write';
 import { gitComparisonCommand } from './git-comparison';
 import { gitBlameCommand } from './git-blame';
 import { gitPatchCommand } from './git-patch';
+import { ownersCommand } from './owners';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -65,6 +66,12 @@ const help = `Phabricator Next — arc (initial CLI)
   npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
   npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
   npm run arc -- board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
+  npm run arc -- owners [OWN-UUID]
+  npm run arc -- owners-history OWN-UUID
+  npm run arc -- resolve-owners R1 PATH...
+  npm run arc -- owners-routing D1|GC-COMMIT_ID [--before N] [--limit N]
+  npm run arc -- create-owners --intent REQUEST.json [--request-id KEY]
+  npm run arc -- edit-owners OWN-UUID --intent REQUEST.json [--request-id KEY]
   npm run arc -- repositories [--limit N] [--json]
   npm run arc -- refs R1 [--json]
   npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
@@ -344,6 +351,7 @@ async function main() {
     } finally { await reader.cancel(); reader.releaseLock(); }
     return Buffer.concat(chunks, size);
   };
+  if (await ownersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await docxCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

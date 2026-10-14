@@ -1,3 +1,4 @@
+import { OwnersService } from './owners-routes.ts';
 import { AIProposalService } from './ai-proposals.ts';
 import { SearchService } from './search.ts';
 import { DashboardService } from './dashboard-routes.ts';
@@ -193,6 +194,7 @@ export function createApp(options: AppOptions = {}): App {
   const policies = new PolicyStore(store.database, { principalExists: id =>
     (auth.mode === 'local' && id === `local:${auth.workspaceId}`) || Boolean(store.database.prepare('SELECT id FROM auth_accounts WHERE id = ?').get(id)),
   });
+  const owners = new OwnersService(store, auth, policies);
   const suite = new SuiteService(store, auth, policies);
   const search = new SearchService(store, auth, policies, suite);
   const dashboards = new DashboardService(store, auth, policies);
@@ -381,6 +383,7 @@ export function createApp(options: AppOptions = {}): App {
     if (path.startsWith('/api/suite/')) return suite.mutate(method, path, input, rawKey, context);
     if (path === '/api/search/queries' || path.startsWith('/api/search/queries/')) return search.mutate(method, path, input, rawKey, context);
     if (path === '/api/dashboards' || path.startsWith('/api/dashboards/') || path === '/api/dashboard-home') return dashboards.mutate(method, path, input, rawKey, context);
+    if (path === '/api/owners' || path.startsWith('/api/owners/')) return owners.mutate(method, path, input, rawKey, context);
     if (path.startsWith('/api/maniphest/')) return maniphest.mutate(method, path, input, rawKey, context);
     const access = new AccessLayer(store, auth, policies, context);
     const revisionLanding = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/landings$/.exec(path);
@@ -1054,6 +1057,8 @@ export function createApp(options: AppOptions = {}): App {
           if (path.startsWith('/api/suite/')) { send(res, 200, suite.read(path, url.searchParams, context)); return; }
           if (path === '/api/search' || path === '/api/search/queries' || path.startsWith('/api/search/queries/')) { send(res, 200, search.read(path, url.searchParams, context)); return; }
           if (path === '/api/dashboards' || path.startsWith('/api/dashboards/') || path === '/api/dashboard-home') { send(res, 200, dashboards.read(path, url.searchParams, context)); return; }
+          if (path === '/api/owners' || path.startsWith('/api/owners/')) { send(res, 200, owners.read(path, url.searchParams, context)); return; }
+          if (path.startsWith('/api/owners-routing/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path.startsWith('/api/maniphest/')) { send(res, 200, maniphest.read(path, url.searchParams, context)); return; }
           if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/') || path.startsWith('/api/audit/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }

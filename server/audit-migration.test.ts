@@ -37,7 +37,7 @@ test('schema40 preserves every schema39 schema object and row, adds empty Audit 
     const before = snapshot(store.database);
     store.close(); store = new Store({ path });
     const after = snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 44);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item);
     for (const [table, rows] of Object.entries(before.rows)) assert.deepEqual(after.rows[table], rows, table);
     assert.deepEqual(after.rows.audit_commits, []);

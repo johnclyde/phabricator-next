@@ -55,7 +55,7 @@ test('schema17 migration preserves all evidence and dependent schema, rowids, cu
       CREATE TRIGGER entities_note_update AFTER UPDATE OF operator_note ON entities BEGIN SELECT id FROM dependent_names WHERE id=NEW.id; END;`);
     const max = (db.prepare('SELECT MAX(rowid) AS n FROM entities').get() as { n: number }).n; db.prepare('UPDATE entities SET rowid=? WHERE rowid=?').run(max + 99, max);
     const before = snapshot(db); store.close(); store = new Store({ path }); const after = snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 44); assert.equal(store.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45); assert.equal(store.database.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, `${table} exact historical bytes and rowids`); assert.deepEqual(after.references[table], before.references[table], `${table} foreign keys`); }
     for (const definition of before.schemas.filter(item => item.name !== 'entities')) assert.deepEqual(after.schemas.find(item => item.name === definition.name), definition, definition.name);
     assert.match(after.schemas.find(item => item.name === 'entities')!.sql, /'paste'/); assert.match(after.schemas.find(item => item.name === 'entities')!.sql, /operator_note/);

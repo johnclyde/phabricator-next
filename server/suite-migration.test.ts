@@ -12,7 +12,7 @@ test('six-app migration preserves every existing table and row and survives reop
   try {
     store.createTask({ title: 'Keep existing work', description: 'Exact retained text.' }); downgrade(store.database);
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 44);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
     const after = snapshot(store.database); for (const old of before) assert.deepEqual(after.find(row => row.name === old.name), old);
     assert.equal(after.length, before.length + 2); assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     store.close(); store = new Store({ path }); assert.deepEqual(snapshot(store.database), after);

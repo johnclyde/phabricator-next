@@ -1,5 +1,5 @@
 /** Workspace search contracts contain no server, browser, or React dependencies. */
-export const SEARCH_KINDS = ['task', 'revision', 'paper', 'document', 'wiki', 'project', 'repository', 'paste', 'file', 'almanac', 'conpherence', 'calendar', 'slowvote', 'phame', 'legalpad'] as const;
+export const SEARCH_KINDS = ['task', 'revision', 'paper', 'document', 'wiki', 'project', 'repository', 'paste', 'file', 'almanac', 'conpherence', 'calendar', 'slowvote', 'phame', 'legalpad', 'owners'] as const;
 export type SearchKind = typeof SEARCH_KINDS[number];
 export const SEARCH_ORDERS = ['relevance', 'updated', 'created', 'title'] as const;
 export type SearchOrder = typeof SEARCH_ORDERS[number];

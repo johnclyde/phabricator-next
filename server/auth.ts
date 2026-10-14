@@ -7,11 +7,12 @@ import type { Activity, ActorAttribution } from '../shared/types.ts';
 import { normalizeBasePath } from '../shared/mount.ts';
 import { HttpError, string } from './validation.ts';
 import { hostingConfiguration } from './hosting.ts';
+import { localOwnersPackageIds } from './owners.ts';
 import type { AuthProviders } from '../shared/google-auth.ts';
 import { createGoogleTokenVerifier, googleAuthConfiguration, googleSignInRejected, validGoogleIdentity, GOOGLE_ID_TOKEN_MAX_BYTES, type GoogleAuthConfiguration, type GoogleTokenVerifier } from './google-auth.ts';
 
-export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; publicOrigin?: string; googleAuth?: GoogleAuthConfiguration; googleTokenVerifier?: GoogleTokenVerifier; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferRevisionAuthors?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
-export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number; revisions: number; projectMemberships: number }
+export interface AuthOptions { database: DatabaseSync; mode: AuthMode; basePath: string; publicOrigin?: string; googleAuth?: GoogleAuthConfiguration; googleTokenVerifier?: GoogleTokenVerifier; provisioning?: boolean; now?: () => number; transferTaskOwners?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferRevisionAuthors?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferLocalProjectMemberships?: (fromId: string, toId: string, attribution: ActorAttribution) => number; transferOwnersPackages?: (fromId: string, toId: string, attribution: ActorAttribution) => number }
+export interface LocalPolicyTransfer { account: PublicAccount; spaces: number; objects: number; tasks: number; revisions: number; projectMemberships: number; ownersPackages: number }
 type AccountRow = { id: string; username: string; display_name: string; disabled: number; salt: string; password_hash: string; password_scheme: string };
 type SessionRow = { id: string; account_id: string; context: string; expires_at: number };
 type TokenRow = { id: string; account_id: string; name: string; scopes: string; created_at: number; expires_at: number; revoked: number };
@@ -41,6 +42,7 @@ export class Auth {
   private readonly transferTaskOwners: AuthOptions['transferTaskOwners'];
   private readonly transferRevisionAuthors: AuthOptions['transferRevisionAuthors'];
   private readonly transferLocalProjectMemberships: AuthOptions['transferLocalProjectMemberships'];
+  private readonly transferOwnersPackages: AuthOptions['transferOwnersPackages'];
   private deriving = 0;
   private readonly googleAuth: GoogleAuthConfiguration | undefined;
   private readonly googleTokenVerifier: GoogleTokenVerifier | undefined;
@@ -57,6 +59,7 @@ export class Auth {
     this.transferTaskOwners = options.transferTaskOwners;
     this.transferRevisionAuthors = options.transferRevisionAuthors;
     this.transferLocalProjectMemberships = options.transferLocalProjectMemberships;
+    this.transferOwnersPackages = options.transferOwnersPackages;
     this.basePath = normalizeBasePath(options.basePath);
     this.now = options.now ?? Date.now;
     this.googleTokenVerifier = this.googleAuth ? options.googleTokenVerifier ?? createGoogleTokenVerifier(this.googleAuth, { now: this.now }) : undefined;
@@ -105,6 +108,7 @@ export class Auth {
   private meta(name: string): string | undefined { return (this.database.prepare('SELECT value FROM auth_meta WHERE name = ?').get(name) as { value: string } | undefined)?.value; }
   private requirePortablePolicies(): void {
     const localPrincipal = `local:${this.workspaceId}`;
+    if (localOwnersPackageIds(this.database, localPrincipal).length) throw new Error('Password authentication cannot be activated while Owners packages reference local-only ownership or routing authority. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No packages were transferred.');
     if (this.localRevisionAuthors(localPrincipal)) throw new Error('Password authentication cannot be activated while revision ownership references the local-only principal. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No revision owners were reassigned.');
     if (this.localProjectMemberships(localPrincipal)) throw new Error('Password authentication cannot be activated while project membership references the local-only principal. Keep APP_AUTH_MODE=local and run npm run accounts -- transfer-local USERNAME for a deliberately chosen enabled account before trying again. No memberships were transferred.');
     if (this.database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entities'").get()
@@ -374,7 +378,7 @@ export class Auth {
         if (!Number.isSafeInteger(version) || version < 1 || !Number.isSafeInteger(version + 1)) throw new HttpError(409, 'A policy has reached the supported version limit. No grants were transferred.');
         return version + 1;
       };
-      const result: LocalPolicyTransfer = { account: publicAccount(account), spaces: 0, objects: 0, tasks: 0, revisions: 0, projectMemberships: 0 };
+      const result: LocalPolicyTransfer = { account: publicAccount(account), spaces: 0, objects: 0, tasks: 0, revisions: 0, projectMemberships: 0, ownersPackages: 0 };
       const requestId = randomUUID();
       const createdAt = new Date(this.now()).toISOString();
       const audit = (objectId: string) => {
@@ -425,6 +429,11 @@ export class Auth {
         if (!this.transferLocalProjectMemberships) throw new Error('Project membership transfer requires the current accounts command. No grants, owners or memberships were transferred.');
         result.projectMemberships = this.transferLocalProjectMemberships(localPrincipal, account.id, { principalId: `operator:${this.workspaceId}`, displayName: 'Terminal operator', credentialId: null, requestId });
         if (!Number.isSafeInteger(result.projectMemberships) || result.projectMemberships < 1 || this.localProjectMemberships(localPrincipal)) throw new Error('Project membership transfer was incomplete. No grants, owners or memberships were transferred.');
+      }
+      if (localOwnersPackageIds(this.database, localPrincipal).length) {
+        if (!this.transferOwnersPackages) throw new Error('Owners package transfer requires the current accounts command. No grants or packages were transferred.');
+        result.ownersPackages = this.transferOwnersPackages(localPrincipal, account.id, { principalId: 'operator:' + this.workspaceId, displayName: 'Terminal operator', credentialId: null, requestId });
+        if (!Number.isSafeInteger(result.ownersPackages) || result.ownersPackages < 1 || localOwnersPackageIds(this.database, localPrincipal).length) throw new Error('Owners package transfer was incomplete. No grants or packages were transferred.');
       }
       if (result.spaces || result.objects) {
         const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name = 'epoch'").get() as { value: number }).value;

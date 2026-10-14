@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import { auditStatus, AUDIT_STATUS_LABELS } from '../shared/audit.ts';
-import type { AuditChange, AuditCommand, AuditDetail, AuditEvent, AuditHistory, AuditHistoryQuery, AuditList, AuditListQuery, AuditRecord, Auditor } from '../shared/audit.ts';
+import { isOwnersId } from '../shared/owners.ts';
+import type { AuditChange, AuditCommand, AuditDetail, AuditEvent, AuditHistory, AuditHistoryQuery, AuditList, AuditListQuery, AuditRecord, AuditOwnerPackage, Auditor } from '../shared/audit.ts';
 import { isGitObjectId } from '../shared/repositories.ts';
 import type { GitCommitResult } from '../shared/repositories.ts';
 import type { GitAutomationObject } from '../shared/git-automation.ts';
@@ -17,6 +18,10 @@ export interface AuditHooks {
   principal(id: string, repositoryId: string, actor: BuildAuthority): { id: string; displayName: string } | null;
   /** Resolve only saved post-receive subjects. HTTP callers never supply source. */
   source(id: string): GitCommitResult | null;
+  /** Package details have their own current visibility boundary. */
+  canViewOwnerPackage?(packageId: string, actor: BuildAuthority, packageVersion: number): boolean;
+  /** The decision maker must also belong to the captured ownerIds. */
+  canResolveOwnerPackage?(packageId: string, actor: BuildAuthority): boolean;
 }
 interface Row { sequence: number; id: string; repository_id: string; source: string; data: string }
 interface EventRow { sequence: number; data: string }
@@ -146,7 +151,11 @@ export class AuditStore {
   }
   detail(id: string, actor: BuildAuthority, query: AuditHistoryQuery = {}): AuditDetail {
     const audit = this.checked(id, actor);
-    return { audit, history: this.history(id, query), canEdit: this.editable(audit.source.repositoryId, actor), canInteract: this.canInteract(audit.source.repositoryId, actor) };
+    return { audit: this.project(audit, actor), history: this.history(id, query), canEdit: this.editable(audit.source.repositoryId, actor), canInteract: this.canInteract(audit.source.repositoryId, actor) };
+  }
+  private project(audit: AuditRecord, actor: BuildAuthority): AuditRecord {
+    if (!audit.ownerPackages) return audit;
+    return { ...audit, ownerPackages: audit.ownerPackages.filter(group => this.hooks.canViewOwnerPackage?.(group.packageId, actor, group.packageVersion) === true) };
   }
   list(actor: BuildAuthority, query: AuditListQuery = {}): AuditList {
     this.hooks.authorize(actor, null, false);
@@ -157,18 +166,23 @@ export class AuditStore {
     const visible: { audit: AuditRecord; sequence: number }[] = [];
     let before = page.before, scanned = 0, exhausted = false;
     while (visible.length <= page.limit && scanned < 1000) {
-      const rows = this.database.prepare("SELECT * FROM audit_commits WHERE sequence<? AND (? IS NULL OR repository_id=?) AND (? IS NULL OR json_extract(data,'$.status')=?) AND (? IS NULL OR EXISTS(SELECT 1 FROM json_each(json_extract(data,'$.auditors')) WHERE json_extract(value,'$.principalId')=?)) ORDER BY sequence DESC LIMIT 200").all(before, repositoryId, repositoryId, status, status, auditorId, auditorId) as unknown as Row[];
+      const rows = this.database.prepare("SELECT * FROM audit_commits WHERE sequence<? AND (? IS NULL OR repository_id=?) AND (? IS NULL OR json_extract(data,'$.status')=?) ORDER BY sequence DESC LIMIT 200").all(before, repositoryId, repositoryId, status, status) as unknown as Row[];
       if (!rows.length) { exhausted = true; break; }
       for (const row of rows) {
         before = row.sequence; scanned++;
-        try { visible.push({ audit: this.checked(row.id, actor), sequence: row.sequence }); }
+        try {
+          const audit = this.project(this.checked(row.id, actor), actor);
+          // Apply the owner filter only after package projection. Otherwise a
+          // query could reveal an owner of a private package through matching.
+          if (!auditorId || audit.auditors.some(person => person.principalId === auditorId) || audit.ownerPackages?.some(group => group.ownerIds.includes(auditorId))) visible.push({ audit, sequence: row.sequence });
+        }
         catch (error) { if (!permissionError(error)) throw error; }
         if (visible.length > page.limit) break;
       }
       if (rows.length < 200 && visible.length <= page.limit) { exhausted = true; break; }
     }
     const selected = visible.slice(0, page.limit);
-    return { audits: selected.map(item => item.audit), nextBefore: visible.length > page.limit ? selected[selected.length - 1]!.sequence : !exhausted && scanned >= 1000 ? before : null };
+    return { audits: selected.map(item => this.project(item.audit, actor)), nextBefore: visible.length > page.limit ? selected[selected.length - 1]!.sequence : !exhausted && scanned >= 1000 ? before : null };
   }
   private event(audit: AuditRecord, action: AuditEvent['action'], origin: AuditEvent['origin'], actor: BuildAuthority, comment: string, changes: AuditChange[]): void {
     const event: Omit<AuditEvent, 'sequence'> = { id: randomUUID(), auditId: audit.id, auditVersion: audit.version, action, origin, actorId: actor.principalId, actorName: actor.displayName, comment, changes, status: audit.status, createdAt: audit.updatedAt };
@@ -180,7 +194,7 @@ export class AuditStore {
     if (!isDeepStrictEqual(this.source(audit.id), audit.source)) throw new HttpError(409, 'The saved audit commit source changed.');
     const previous = audit.version;
     audit.version++;
-    audit.status = auditStatus(audit.auditors);
+    audit.status = auditStatus(audit.auditors, audit.ownerPackages);
     audit.updatedAt = this.timestamp();
     const result = this.database.prepare("UPDATE audit_commits SET data=? WHERE id=? AND json_extract(data,'$.version')=?").run(JSON.stringify(audit), audit.id, previous);
     if (result.changes !== 1) throw new HttpError(409, 'The audit changed. Reload before continuing.');
@@ -241,6 +255,22 @@ export class AuditStore {
       return this.detail(id, actor);
     });
   }
+  /** Trusted routing creates one collective request with immutable package and
+   * membership provenance. The ordinary HTTP API cannot manufacture packages. */
+  requestFromOwners(id: string, group: Pick<AuditOwnerPackage, 'packageId' | 'packageVersion' | 'packageName' | 'ownerIds'>, actor: BuildAuthority): AuditDetail {
+    return this.scope(() => {
+      this.observe(id, actor);
+      const audit = this.checked(id, actor, true);
+      if (audit.ownerPackages?.some(item => item.packageId === group.packageId)) return this.detail(id, actor);
+      if (!isOwnersId(group.packageId) || !Number.isSafeInteger(group.packageVersion) || group.packageVersion < 1 || !group.packageName || !Array.isArray(group.ownerIds) || new Set(group.ownerIds).size !== group.ownerIds.length) throw new HttpError(400, 'Choose a valid ownership package and eligible owners.');
+      for (const id of group.ownerIds) if (!this.hooks.principal(id, audit.source.repositoryId, actor)) throw new HttpError(400, 'Each package owner must be an active account with repository access.');
+      const timestamp = this.timestamp();
+      (audit.ownerPackages ??= []).push({ ...structuredClone(group), status: 'requested', requestedBy: actor.principalId, createdAt: timestamp, updatedAt: timestamp, decisionBy: null });
+      // Package metadata is intentionally absent from public audit history.
+      this.save(audit, 'request', 'owners', actor, '', []);
+      return this.detail(id, actor);
+    });
+  }
   command(id: string, input: unknown, actor: BuildAuthority): AuditDetail {
     return this.scope(() => {
       const audit = this.checked(id, actor), data = object(input, ['expectedVersion', 'command', 'comment']);
@@ -263,6 +293,27 @@ export class AuditStore {
           audit.auditors.push(auditor);
         } else { auditor.status = status; auditor.updatedAt = timestamp; }
         changes.push({ principalId: auditor.principalId, displayName: auditor.displayName, before, after: status });
+        for (const group of audit.ownerPackages ?? []) {
+          if (!group.ownerIds.includes(actor.principalId)) continue;
+          if (command === 'resign') {
+            if (group.decisionBy !== actor.principalId) continue;
+            // Withdrawing the latest decision must preserve another eligible
+            // owner's acceptance, including a decision made earlier. A former
+            // owner may withdraw their own vote without retaining new voting
+            // authority through their old package membership.
+            const eligible = audit.auditors.filter(person => group.ownerIds.includes(person.principalId)
+              && this.hooks.principal(person.principalId, audit.source.repositoryId, actor)
+              && this.hooks.canResolveOwnerPackage?.(group.packageId, { principalId: person.principalId, displayName: person.displayName, workspaceId: actor.workspaceId }) === true);
+            const remaining = eligible.find(person => person.status === 'accepted') ?? eligible.find(person => person.status === 'concerned');
+            group.status = remaining?.status === 'accepted' ? 'accepted' : remaining?.status === 'concerned' ? 'concerned' : 'requested';
+            group.decisionBy = remaining?.principalId ?? null;
+          } else {
+            if (this.hooks.canResolveOwnerPackage?.(group.packageId, actor) !== true) continue;
+            group.status = command === 'accept' ? 'accepted' : 'concerned';
+            group.decisionBy = actor.principalId;
+          }
+          group.updatedAt = timestamp;
+        }
       }
       this.save(audit, command, 'manual', actor, comment, changes, true);
       return this.detail(id, actor);

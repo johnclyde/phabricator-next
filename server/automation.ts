@@ -4,6 +4,8 @@ import type { RevisionPatchPayload } from '../shared/revision-patch.ts';
 import { DrydockStore } from './drydock.ts';
 import { GitAutomationStore, parseGitReceiveFacts } from './git-automation.ts';
 import { AuditStore } from './audit.ts';
+import { createOwnersStore } from './owners.ts';
+import { OwnersRouting } from './owners-routing.ts';
 import type { AuditDetail, AuditStatus } from '../shared/audit.ts';
 import { deriveGitReviewEvidence, type GitReviewCandidate } from './git-review-gates.ts';
 import { revisionPatchBaseline } from '../shared/revision-patch.ts';
@@ -47,6 +49,7 @@ export class Automation {
   readonly herald: HeraldStore;
   readonly git: GitAutomationStore;
   readonly audit: AuditStore;
+  readonly ownersRouting: OwnersRouting;
   readonly drydock: DrydockStore;
   readonly harbormaster: HarbormasterStore;
   readonly authority: HeraldAuthority;
@@ -71,7 +74,10 @@ export class Automation {
         if (!this.enabled(id) || !this.policies.access(repositoryId, id).view) return null;
         return { id, displayName: this.auth.listAccounts().find(account => account.id === id)?.displayName ?? 'You' };
       },
+      canViewOwnerPackage: (id, actor, version) => this.ownersRouting.canViewPackage(id, actor.principalId, version),
+      canResolveOwnerPackage: (id, actor) => this.ownersRouting.canResolvePackage(id, actor.principalId),
     });
+    this.ownersRouting = new OwnersRouting(store, auth, policies, createOwnersStore(store, auth, policies), this.audit, this.git);
     this.drydock = new DrydockStore(store.database, {
       authorize: (actor, id, write) => this.authorize(actor, id, write),
       revisionPatch: (id, versionId, contentHash, actor) => this.revisionPatch(id, versionId, contentHash, actor),
@@ -157,7 +163,10 @@ export class Automation {
         const source = { repositoryId: facts.repositoryId, objectFormat: facts.objectFormat, commit: commit.commit };
         return deriveGitReviewEvidence(source, candidates.get(facts.repositoryId)!, revision => this.harbormaster.reviewGateBuilds(source, revision));
       },
-      observeCommit: (id: string, facts: GitReceiveFacts) => this.audit.observe(id, { principalId: facts.pusherId, displayName: this.auth.listAccounts().find(account => account.id === facts.pusherId)?.displayName ?? 'You', workspaceId: this.auth.workspaceId }),
+      observeCommit: (id: string, facts: GitReceiveFacts) => {
+        const actor = { principalId: facts.pusherId, displayName: this.auth.listAccounts().find(account => account.id === facts.pusherId)?.displayName ?? 'You', workspaceId: this.auth.workspaceId };
+        this.audit.observe(id, actor); this.ownersRouting.commit(id, actor);
+      },
     };
   }
   /** Trusted local landing facts, collected by the configured Git transport. */
@@ -209,8 +218,11 @@ export class Automation {
     throw new HttpError(400, 'Select a revision, task, wiki document or paste.');
   }
   private capture(events: Activity[]): void {
+    const sources = new Map<string, Activity>();
+    for (const event of events) if (/^[DPL][1-9]\d*$/.test(event.objectId) && ['created', 'version_created'].includes(event.action)) sources.set(event.objectId, event);
+    const routeOwners = () => { for (const event of sources.values()) this.ownersRouting.revision(event.objectId, event.id, event.attribution?.principalId ?? `local:${this.auth.workspaceId}`); };
     const enabledTypes = new Set((this.store.database.prepare("SELECT DISTINCT content_type FROM herald_rules WHERE json_extract(data,'$.enabled')=1").all() as { content_type: string }[]).map(row => row.content_type));
-    if (!enabledTypes.size) return;
+    if (!enabledTypes.size) { routeOwners(); return; }
     const groups = new Map<string, Activity[]>();
     for (const event of events) if (/^(?:[DPLTW]|PA)[1-9]\d*$/.test(event.objectId) && event.action !== 'draft_saved' && enabledTypes.has(event.objectId.startsWith('PA') ? 'paste' : event.objectId.startsWith('T') ? 'task' : event.objectId.startsWith('W') ? 'wiki' : 'revision')) { const group = groups.get(event.objectId) ?? []; group.push(event); groups.set(event.objectId, group); }
     // Freeze all input before any rule mutates another object. Effects do not recurse.
@@ -229,10 +241,16 @@ export class Automation {
       return this.snapshot(id, event.id, event.attribution?.principalId ?? `local:${this.auth.workspaceId}`, group.some(item => item.action === 'created'), comment);
     });
     for (const snapshot of snapshots) this.herald.evaluate(snapshot, this.hooks());
+    routeOwners();
   }
   read(path: string, query: URLSearchParams, context: AuthContext): unknown {
     this.auth.revalidate(context, 'read'); const accessEpoch = this.policies.epoch(), canManage = this.manager(context.principalId) && context.scopes.includes('write');
     const number = (name: string) => query.has(name) ? integer(Number(query.get(name)), name) : undefined;
+    const routing = /^\/api\/owners-routing\/([^/]+)$/.exec(path);
+    if (routing) {
+      if ([...query.keys()].some(key => !['before', 'limit'].includes(key) || query.getAll(key).length !== 1)) throw new HttpError(400, 'Unsupported routing query parameters.');
+      return { ...this.ownersRouting.history(routing[1]!, context.principalId, number('before'), number('limit')), accessEpoch };
+    }
     const patch=/^\/api\/drydock\/revision-patches\/([DPL][1-9]\d*)$/.exec(path);
     if(patch){if([...query.keys()].some(key=>!['versionId','contentHash'].includes(key)||query.getAll(key).length!==1))throw new HttpError(400,'Unsupported revision patch query parameters.');const payload=this.revisionPatch(patch[1]!,string(query.get('versionId'),'Version ID',100),string(query.get('contentHash'),'Content hash',64),context,false);return {revisionPatch:revisionPatchIdentity(payload),repositoryId:payload.repositoryId,accessEpoch};}
     const allowed = path === '/api/audit/commits' ? ['repositoryId', 'status', 'auditorId', 'before', 'limit'] : /^\/api\/audit\/commits\/[^/]+$/.test(path) ? ['before', 'limit'] : path === '/api/drydock/worker/jobs' ? ['worker'] : path === '/api/herald/receives' ? ['repositoryId', 'before', 'limit'] : path === '/api/herald/rules' ? ['before', 'limit', 'contentType', 'enabled'] : path === '/api/herald/transcripts' ? ['before', 'limit', 'objectId'] : path.endsWith('/history') ? ['before', 'limit'] : path === '/api/harbormaster/builds' ? ['revisionId', 'objectId'] : [];

@@ -25,6 +25,7 @@ The indexed applications are:
 | Phriction | Published active page title, path, and body |
 | Projects | Current name, description, aliases, and primary slug |
 | Diffusion | Repository registry name, description, URL, and default branch |
+| Owners | Current visible package name, description, and configured repository paths |
 | Paste | Current title and current paste content |
 | Files | Current name, original name, media type, and alternative text |
 | Almanac | Current object title, description, address, and properties |
@@ -48,7 +49,7 @@ Historical source versions, unpublished wiki drafts, moved/deleted wiki pages, u
 - `limit`: 1–100 results per page; default 50.
 - `cursor`: the opaque continuation returned by the preceding response.
 
-Status, priority, and owner lists match any selected value. Project lists require all selected direct tags. A project query does not currently expand descendant projects. `ownerIds` accepts an exact account ID, `me`, or `none` (`unassigned` is also accepted). Ownership means task assignee or the application's author/owner where available. Date starts are inclusive and ends are exclusive; an end date at midnight excludes that date. Objects without a timestamp do not match a timestamp filter.
+Status, priority, and owner lists match any selected value. Project lists require all selected direct tags. A project query does not currently expand descendant projects. `ownerIds` accepts an exact account ID, `me`, or `none` (`unassigned` is also accepted). Ownership means task assignee or the application's author/owner where available. Owners packages match current enabled people, including inherited project membership; the package creator is not implicitly an owner. Private package and referenced repository/project visibility apply before indexing. Archived packages remain searchable, and their historical versions do not enter the index. Date starts are inclusive and ends are exclusive; an end date at midnight excludes that date. Objects without a timestamp do not match a timestamp filter.
 
 Counts, ranking, snippets, and page boundaries are computed only after object and field visibility filtering. A newly unavailable selected project produces no search matches. The server never reports hidden-object counts or emits partial pages based on scanning hidden rows.
 

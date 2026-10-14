@@ -11,12 +11,26 @@ export interface Auditor {
   createdAt: string;
   updatedAt: string;
 }
+/** One collective request. A current owner captured in ownerIds can satisfy it;
+ * ownerIds are never expanded into unanimous individual audit requests. */
+export interface AuditOwnerPackage {
+  packageId: string;
+  packageVersion: number;
+  packageName: string;
+  ownerIds: string[];
+  status: 'requested' | 'concerned' | 'accepted';
+  requestedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  decisionBy: string | null;
+}
 /** The identity is the saved post-receive Git commit subject, never a branch. */
 export interface AuditRecord {
   id: string;
   version: number;
   source: GitCommitResult;
   auditors: Auditor[];
+  ownerPackages?: AuditOwnerPackage[];
   status: AuditStatus;
   createdAt: string;
   updatedAt: string;
@@ -33,7 +47,7 @@ export interface AuditEvent {
   auditId: string;
   auditVersion: number;
   action: 'observed' | 'request' | AuditCommand;
-  origin: 'manual' | 'herald' | 'receive';
+  origin: 'manual' | 'herald' | 'receive' | 'owners';
   actorId: string;
   actorName: string;
   comment: string;
@@ -59,9 +73,10 @@ export const AUDIT_REQUEST_STATUS_LABELS: Record<AuditRequestStatus, string> = {
 
 /** Matches the original individual-auditor aggregate: concerns take precedence,
  * partial acceptance remains open, and resigned auditors have no active vote. */
-export function auditStatus(auditors: readonly Pick<Auditor, 'status'>[]): AuditStatus {
-  if (auditors.some(auditor => auditor.status === 'concerned')) return 'concern-raised';
-  const pending = auditors.some(auditor => auditor.status === 'requested');
-  if (auditors.some(auditor => auditor.status === 'accepted')) return pending ? 'partially-audited' : 'audited';
+export function auditStatus(auditors: readonly Pick<Auditor, 'status'>[], ownerPackages: readonly Pick<AuditOwnerPackage, 'status'>[] = []): AuditStatus {
+  const requests = [...auditors, ...ownerPackages];
+  if (requests.some(auditor => auditor.status === 'concerned')) return 'concern-raised';
+  const pending = requests.some(auditor => auditor.status === 'requested');
+  if (requests.some(auditor => auditor.status === 'accepted')) return pending ? 'partially-audited' : 'audited';
   return pending ? 'needs-audit' : 'none';
 }
