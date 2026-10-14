@@ -8,6 +8,7 @@ import { SaxesParser, type SaxesTagNS } from 'saxes';
 import { DOCX_LIMITS, type DocxBlock, type DocxProjection, type DocxReplacement, type DocxRun, type DocxTextRange } from '../shared/docx.ts';
 import { DOCX_DISCUSSION_LIMITS, type DocxPackageComment } from '../shared/docx-discussion.ts';
 import { validateDocxBatch, type DocxPassageReplacement } from '../shared/docx-batch.ts';
+import { validateDocxResolution, type DocxChangeDecision, type DocxResolutionInspection, type DocxResolutionSegment } from '../shared/docx-resolution.ts';
 
 const WORD = new Set(['http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'http://purl.oclc.org/ooxml/wordprocessingml/main']);
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -236,12 +237,13 @@ function unsafeProperties(node:Node):boolean {
   const unsafe=node.children.filter(n=>isWord(n)&&['pPr','tblPr','trPr','tcPr','sectPr'].includes(n.local)).some(visit);
   unsafePropertyCache.set(node,unsafe);return unsafe;
 }
-function safeRun(part: Part, run: Node, text: Node, _paragraph: Node): boolean {
-  if (!text.text.length || text.children.length || run.children.filter(n=>isWord(n,'t')).length !== 1 || run.children.some(n=>!isWord(n) || !['rPr','t'].includes(n.local))) return false;
+function safeRun(part: Part, run: Node, text: Node, _paragraph: Node, revision?: Node): boolean {
+  const textKind = revision && isWord(revision, 'del') ? 'delText' : 't';
+  if (!text.text.length || text.children.length || run.children.filter(n=>isWord(n,textKind)).length !== 1 || run.children.some(n=>!isWord(n) || !['rPr',textKind].includes(n.local))) return false;
   if(run.children.length>2||run.children.at(-1)!==text||(run.children.length===2&&!isWord(run.children[0]!,'rPr'))||/<(?:!--|\?)/.test(part.text.slice(text.openEnd,text.closeStart)))return false;
   if (Object.values(run.attributes).some(a=>a.uri !== 'http://www.w3.org/2000/xmlns/' && !(WORD.has(a.uri) && ['rsidR','rsidRPr','rsidDel'].includes(a.local)))) return false;
   if (Object.values(text.attributes).some(a=>a.uri !== 'http://www.w3.org/2000/xmlns/' && !(a.uri === XML && a.local === 'space'))) return false;
-  for (const p of ancestors(run)) if (!WORD.has(p.uri) || !SAFE_ANCESTORS.has(p.local) || unsafeProperties(p)) return false;
+  for (const p of ancestors(run)) if (p !== revision && (!WORD.has(p.uri) || !SAFE_ANCESTORS.has(p.local) || unsafeProperties(p))) return false;
   const props=child(run,'rPr'); if (props && props.children.some(n=>!isWord(n) || !RUN_PROPERTIES.has(n.local) || n.children.length)) return false;
   let cursor=run.openEnd; for(const n of run.children) { if(part.text.slice(cursor,n.start).trim())return false; cursor=n.end; } if(part.text.slice(cursor,run.closeStart).trim())return false;
   return true;
@@ -445,8 +447,13 @@ async function exportDiscussion(parsed: Parsed, input: DocxPackageComment[]): Pr
   return { bytes: output, projection: checked.projection };
 }
 
-export async function processDocx(bytes: Uint8Array, replacement?: DocxReplacement, attribution?: {author:string;date:string}, comments?: DocxPackageComment[], replacements?: DocxPassageReplacement[]): Promise<{bytes:Uint8Array;projection:DocxProjection}> {
+export async function processDocx(bytes: Uint8Array, replacement?: DocxReplacement, attribution?: {author:string;date:string}, comments?: DocxPackageComment[], replacements?: DocxPassageReplacement[], resolution?: true | DocxChangeDecision[]): Promise<{bytes:Uint8Array;projection:DocxProjection;resolution?:DocxResolutionInspection}> {
   const parsed=build(await readZip(bytes));
+  if (resolution !== undefined) {
+    if (replacement || comments !== undefined || replacements !== undefined) fail('DOCX operations cannot be combined.');
+    const inspection = inspectResolution(parsed);
+    return resolution === true ? { bytes, projection: parsed.projection, resolution: inspection } : resolveChanges(parsed, resolution, inspection);
+  }
   if (replacements !== undefined) { if (replacement || comments !== undefined) fail('DOCX operations cannot be combined.'); return replaceBatch(parsed, replacements, attribution); }
   if(comments!==undefined){if(replacement)fail('DOCX operations cannot be combined.');return exportDiscussion(parsed,comments);} if(!replacement)return {bytes,projection:parsed.projection};
   if(!replacement||typeof replacement.rangeId!=='string'||typeof replacement.quote!=='string'||typeof replacement.replacement!=='string'||!Number.isSafeInteger(replacement.start)||!Number.isSafeInteger(replacement.end))fail('Choose an exact editable DOCX text range.');
@@ -538,6 +545,83 @@ async function replaceBatch(parsed: Parsed, replacements: DocxPassageReplacement
   if (changed.length > DOCX_LIMITS.xmlBytes) fail('Edited DOCX XML exceeds its part limit.');
   const bytes = await writeZip(parsed.entries, part.name, changed), checked = build(await readZip(bytes));
   const after = new Map(checked.entries.map(entry => [entry.name, entry.bytes]));
+  for (const entry of parsed.entries) if (entry.name !== part.name && !entry.bytes.equals(after.get(entry.name)!)) fail('DOCX preservation verification failed.');
+  return { bytes, projection: checked.projection };
+}
+
+function inspectResolution(parsed: Parsed): DocxResolutionInspection {
+  const result: DocxResolutionInspection = { format: 'phabricator.docx.resolution.v1', changes: [], paragraphs: [], unsupportedChanges: [] };
+  const part = parsed.parts.get(parsed.projection.mainPart)!, unsafe = new Set<Node>(), ranges = new Set<string>(); let fields = 0;
+  // Fields and annotation/move ranges can begin in an earlier paragraph.
+  for (const node of part.nodes) {
+    const paragraph = isWord(node, 'p') ? node : ancestry(node, 'p');
+    if (paragraph && (fields || ranges.size)) unsafe.add(paragraph);
+    if (!isWord(node)) continue;
+    if (node.local === 'fldChar') { if (paragraph) unsafe.add(paragraph); if (attr(node, 'fldCharType') === 'begin') fields++; else if (attr(node, 'fldCharType') === 'end') fields = Math.max(0, fields - 1); }
+    const range = /^(commentRange|bookmark|moveFromRange|moveToRange)(Start|End)$/.exec(node.local);
+    if (range) { if (paragraph) unsafe.add(paragraph); let key: string; try { key = `${range[1]}:${commentId(attr(node, 'id'))}`; } catch { key = `${range[1]}:invalid`; }
+      if (range[2] === 'Start') ranges.add(key); else ranges.delete(key);
+    }
+  }
+  for (const paragraph of part.nodes.filter(node => isWord(node, 'p'))) {
+    const revisions = paragraph.children.filter(node => isWord(node) && ['ins', 'del'].includes(node.local));
+    if (!revisions.length || parsed.signed || unsafe.has(paragraph) || !paragraph.parent || !isWord(paragraph.parent, 'body') || paragraph.text.trim() || unsafeProperties(paragraph)) continue;
+    const segments: DocxResolutionSegment[] = []; let valid = true;
+    for (const [index, node] of paragraph.children.entries()) {
+      if (index === 0 && isWord(node, 'pPr')) continue;
+      if (isWord(node, 'r')) {
+        const text = child(node, 't'); if (!text || !safeRun(part, node, text, paragraph)) { valid = false; break; }
+        segments.push({ text: text.text }); continue;
+      }
+      if (!isWord(node) || !['ins', 'del'].includes(node.local) || !node.children.length || node.text.trim()
+        || Object.values(node.attributes).some(attribute => attribute.uri !== 'http://www.w3.org/2000/xmlns/' && !(WORD.has(attribute.uri) && ['id', 'author', 'date'].includes(attribute.local)))) { valid = false; break; }
+      const kind = node.local as 'ins' | 'del', runs: string[] = [];
+      for (const run of node.children) {
+        const text = child(run, kind === 'del' ? 'delText' : 't');
+        if (!isWord(run, 'r') || !text || !safeRun(part, run, text, paragraph, node)) { valid = false; break; }
+        runs.push(text.text);
+      }
+      if (!valid) break;
+      segments.push({ text: runs.join(''), kind, changeId: id('change', part.name, node) });
+    }
+    if (!valid) continue;
+    const blockId = id('block', part.name, paragraph); result.paragraphs.push({ blockId, segments });
+    for (const node of revisions) result.changes.push({ changeId: id('change', part.name, node), blockId, kind: node.local as 'ins' | 'del', text: plainText(node), ...(attr(node, 'author') !== undefined ? { author: attr(node, 'author') } : {}), ...(attr(node, 'date') !== undefined ? { date: attr(node, 'date') } : {}) });
+  }
+  const supported = new Set(result.changes.map(change => change.changeId));
+  result.unsupportedChanges = parsed.projection.changes.filter(change => !supported.has(change.id)).map(change => ({ changeId: change.id, reason: parsed.signed ? 'Signed packages cannot be changed.' : 'Only ordinary main-document paragraph text changes without nested revisions, fields, notes, tables, annotation ranges or complex markup are supported.' }));
+  if (Buffer.byteLength(JSON.stringify(result)) > DOCX_LIMITS.projectionBytes) fail('DOCX change inspection exceeds its 2 MiB limit.');
+  return result;
+}
+
+async function resolveChanges(parsed: Parsed, decisions: DocxChangeDecision[], inspection: DocxResolutionInspection): Promise<{ bytes: Uint8Array; projection: DocxProjection }> {
+  validateDocxResolution(parsed.projection, decisions, inspection);
+  const part = parsed.parts.get(parsed.projection.mainPart)!, nodes = new Map(part.nodes.filter(node => isWord(node) && ['ins', 'del'].includes(node.local)).map(node => [id('change', part.name, node), node]));
+  const patches: { start: number; end: number; text: string }[] = [];
+  for (const decision of decisions) {
+    const node = nodes.get(decision.changeId)!;
+    if (decision.action === (node.local === 'ins' ? 'reject' : 'accept')) { patches.push({ start: node.start, end: node.end, text: '' }); continue; }
+    const inner: { start: number; end: number; text: string }[] = [];
+    const namespaces = Object.values(node.attributes).filter(attribute => attribute.uri === 'http://www.w3.org/2000/xmlns/');
+    for (const run of node.children) {
+      // Removing a revision wrapper must retain namespace bindings used by runs,
+      // properties or text beneath it, including a locally declared default NS.
+      const inherited = namespaces.filter(attribute => !Object.values(run.attributes).some(own => own.name === attribute.name));
+      if (inherited.length) inner.push({ start: run.start, end: run.openEnd, text: part.text.slice(run.start, run.openEnd).replace(/>$/, `${inherited.map(attribute => ` ${attribute.name}="${escapeAttribute(attribute.value)}"`).join('')}>`) });
+      if (node.local === 'del') {
+        const text = child(run, 'delText')!, name = text.name.replace(/(?:^|:)delText$/, match => match.startsWith(':') ? ':t' : 't');
+        inner.push({ start: text.start + 1, end: text.start + 1 + text.name.length, text: name }, { start: text.closeStart + 2, end: text.closeStart + 2 + text.name.length, text: name });
+      }
+    }
+    let cursor = node.openEnd, body = '';
+    for (const patch of inner.sort((a, b) => a.start - b.start)) { body += part.text.slice(cursor, patch.start) + patch.text; cursor = patch.end; }
+    body += part.text.slice(cursor, node.closeStart); patches.push({ start: node.start, end: node.end, text: body });
+  }
+  let cursor = 0, xml = '';
+  for (const patch of patches.sort((a, b) => a.start - b.start)) { xml += part.text.slice(cursor, patch.start) + patch.text; cursor = patch.end; }
+  xml += part.text.slice(cursor);
+  const changed = encode(part, xml); if (changed.length > DOCX_LIMITS.xmlBytes) fail('Resolved DOCX XML exceeds its part limit.');
+  const bytes = await writeZip(parsed.entries, part.name, changed), checked = build(await readZip(bytes)), after = new Map(checked.entries.map(entry => [entry.name, entry.bytes]));
   for (const entry of parsed.entries) if (entry.name !== part.name && !entry.bytes.equals(after.get(entry.name)!)) fail('DOCX preservation verification failed.');
   return { bytes, projection: checked.projection };
 }

@@ -49,6 +49,39 @@ test('lost generation receipt recovers the original request without changing new
   await expect(panel(page).getByLabel('Editing instruction', { exact: true })).toHaveValue('Newer unsent instruction'); expect((await api<RevisionDetail>(page, `/revisions/${id}`)).versions).toHaveLength(1);
 });
 
+test('same-session verification during an exact generation retry preserves the in-flight receipt and newer instruction', async ({ page }) => {
+  const created = await create(page, 'AI same-session recovery'), id = created.revision.id;
+  await open(page, id);
+  const bodies: unknown[] = [], keys: string[] = []; let drop = true;
+  let releaseReceipt!: () => void, observedRetry!: () => void;
+  const receiptGate = new Promise<void>(resolve => { releaseReceipt = resolve; });
+  const retryStarted = new Promise<void>(resolve => { observedRetry = resolve; });
+  await page.route(`**/api/revisions/${id}/ai-proposals`, async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    bodies.push(route.request().postDataJSON()); keys.push(route.request().headers()['idempotency-key']!);
+    const response = await route.fetch();
+    if (drop) { drop = false; return route.abort('failed'); }
+    observedRetry(); await receiptGate; return route.fulfill({ response });
+  });
+  try {
+    await panel(page).getByLabel('Editing instruction', { exact: true }).fill('Original exact request'); await hosted(page).click();
+    const recover = panel(page).getByRole('button', { name: 'Recover generation', exact: true }); await expect(recover).toBeEnabled();
+    await panel(page).getByLabel('Editing instruction', { exact: true }).fill('Newer unsent instructions');
+    await recover.click(); await retryStarted;
+    // SessionGate verifies the same login on focus and replaces its context
+    // wrapper. That is not a source, account or permission change.
+    const verified = page.waitForResponse(response => response.url().endsWith('/api/session') && response.status() === 200);
+    await page.evaluate(() => window.dispatchEvent(new Event('focus'))); await (await verified).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(recover).toBeDisabled(); releaseReceipt();
+    await expect(panel(page).getByRole('region', { name: 'Unconfirmed AI proposal request', exact: true })).toHaveCount(0);
+    await expect(panel(page).getByLabel('Editing instruction', { exact: true })).toHaveValue('Newer unsent instructions');
+    expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]); expect(keys[1]).toBe(keys[0]);
+    expect((await api<AIProposalList>(page, `/revisions/${id}/ai-proposals`)).items).toHaveLength(1);
+    expect((await api<RevisionDetail>(page, `/revisions/${id}`)).versions).toHaveLength(1);
+  } finally { releaseReceipt(); }
+});
+
 test('lost apply receipt retries every edit exactly once and keeps a newer authored instruction', async ({ page }) => {
   const created = await create(page, 'AI apply recovery'), id = created.revision.id; await open(page, id); await generate(page);
   const bodies: unknown[] = [], keys: string[] = []; let failed = false;

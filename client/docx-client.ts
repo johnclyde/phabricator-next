@@ -5,7 +5,8 @@ import { applicationPath } from './mount';
 import { assertSession, lockSession, RequestError } from './session';
 import { digestBytes } from './file-client';
 import { docxBatchInputCanonical, type DocxReplaceBatchInput } from '../shared/docx-batch';
-export interface DocxIntent { id: string; path: string; body: DocxImportInput | DocxReimportInput | DocxReplaceInput | DocxReplaceBatchInput; sourceFile: DocxFileIdentity; draftKey: string; draft: unknown; operationSha256?: string; base?: { id: string; number: number; contentHash: string; packageHash: string } }
+import type { DocxResolveInput } from '../shared/docx-resolution';
+export interface DocxIntent { id: string; path: string; body: DocxImportInput | DocxReimportInput | DocxReplaceInput | DocxReplaceBatchInput | DocxResolveInput; sourceFile: DocxFileIdentity; draftKey: string; draft: unknown; operationSha256?: string; base?: { id: string; number: number; contentHash: string; packageHash: string } }
 export async function docxBatchDigest(input: DocxReplaceBatchInput): Promise<string> { return digestBytes(new TextEncoder().encode(docxBatchInputCanonical(input))); }
 export const sameDocxFile = (a: DocxFileIdentity, b: DocxFileIdentity) => a.fileId === b.fileId && a.sha256 === b.sha256 && a.bytes === b.bytes;
 function boundary(text: string, index: number): boolean { return index > 0 && index < text.length && /[\uD800-\uDBFF]/.test(text[index - 1]!) && /[\uDC00-\uDFFF]/.test(text[index]!); }
@@ -28,6 +29,7 @@ export function docxReceiptVersion(detail: RevisionDetail, intent: DocxIntent): 
   if ('message' in intent.body && version.message !== intent.body.message) return null;
   if ('replacement' in intent.body && (!intent.base || version.docx.sha256 === intent.base.packageHash)) return null;
   if ('replacements' in intent.body && (!intent.base || version.docx.sha256 === intent.base.packageHash || !intent.operationSha256 || version.docxOperation?.kind !== 'replace-batch' || version.docxOperation.inputSha256 !== intent.operationSha256)) return null;
+  if ('decisions' in intent.body && (!intent.base || version.docx.sha256 === intent.base.packageHash || !intent.operationSha256 || version.docxOperation?.kind !== 'resolve' || version.docxOperation.inputSha256 !== intent.operationSha256)) return null;
   return version;
 }
 /** Exact version bytes stay in session memory; no renderer or persistent store receives an API URL. */

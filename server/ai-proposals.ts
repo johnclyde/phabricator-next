@@ -4,11 +4,14 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AuthContext } from '../shared/auth.ts';
 import type { ActorAttribution, RevisionKind, RevisionVersion } from '../shared/types.ts';
 import { createPassageAnchor } from '../shared/anchors.ts';
-import { AI_PROPOSAL_LIMITS, aiProposalApplyInput, aiProposalGenerateInput, aiProposalHead, aiProposalResult, applyAIProposal, isAIProposalDetail, isAIProposalDigest, isAIProposalId, sameAIProposalHead, type AIProposal, type AIProposalApplication, type AIProposalApplyInput, type AIProposalConfiguration, type AIProposalDetail, type AIProposalGenerateInput, type AIProposalList, type AIProposalProvenance, type AIProposalResult, type AIProposalStatus } from '../shared/ai-proposals.ts';
+import { AI_PROPOSAL_LIMITS, aiProposalApplyInput, aiProposalGenerateInput, aiProposalHead, aiProposalResult, aiProposalSourceVersion, aiProposalWordEdits, applyAIProposal, isAIProposalDetail, isAIProposalDigest, isAIProposalId, sameAIProposalHead, type AIProposal, type AIProposalApplication, type AIProposalApplyInput, type AIProposalConfiguration, type AIProposalDetail, type AIProposalGenerateInput, type AIProposalList, type AIProposalProvenance, type AIProposalResult, type AIProposalStatus } from '../shared/ai-proposals.ts';
 import { aiConfiguration } from './ai.ts';
 import { aiProposalSource, AIProposalProviderError, generateAIProposal, type AIProposalGenerator } from './ai-proposal-provider.ts';
 import { isRevisionMetadataAttribution } from '../shared/revision-metadata.ts';
-import { contentHash, type Store } from './store.ts';
+import { contentHash, docxOperationHash, type Store } from './store.ts';
+import { replaceDocxBatch } from './docx-package.ts';
+import type { DocxReplaceBatchInput } from '../shared/docx-batch.ts';
+import type { DocxProjection, DocxRun } from '../shared/docx.ts';
 import { files, HttpError } from './validation.ts';
 
 const definitions = [
@@ -27,7 +30,7 @@ export function initializeAIProposals(database: DatabaseSync): void {
   } catch (error) { database.exec('ROLLBACK TO ai_proposal_schema; RELEASE ai_proposal_schema'); throw error; }
 }
 export type AIProposalAuthorization = 'read' | 'generate:openai' | 'generate:ollama' | 'apply';
-export interface AIProposalOptions { authorize(actor: AuthContext, revisionId: string, action: AIProposalAuthorization): void; configuration?: () => AIProposalConfiguration; provider?: AIProposalGenerator }
+export interface AIProposalOptions { authorize(actor: AuthContext, revisionId: string, action: AIProposalAuthorization): void; configuration?: () => AIProposalConfiguration; provider?: AIProposalGenerator; replaceWordBatch?: typeof replaceDocxBatch }
 interface RequestEvidence { id: string; revisionId: string; principalId: string; retryKeySha256: string; inputSha256: string; input: AIProposalGenerateInput; sourceSha256: string; createdAt: string; actor: ActorAttribution }
 interface ResultEvidence { status: Exclude<AIProposalStatus, 'pending'>; completedAt: string; provenance: AIProposalProvenance; result: AIProposalResult | null; proposalSha256: string | null; failure: string | null }
 interface ApplicationEvidence { proposalId: string; revisionId: string; principalId: string; retryKeySha256: string; inputSha256: string; input: AIProposalApplyInput; application: AIProposalApplication; actor: ActorAttribution }
@@ -61,11 +64,12 @@ export class AIProposalService {
     if (!row) throw invalid();
     const version = JSON.parse(String(row.data)) as RevisionVersion;
     if (version.revisionId !== id || version.contentHash !== contentHash(version.files, version.assets, version.docx)) throw invalid();
+    if (version.docx) this.store.docxBytes(id, version.id);
     return { kind: revision.kind, version };
   }
   private requireHead(id: string, input: { expectedHead: AIProposalGenerateInput['expectedHead']; expectedAccessEpoch: number }): { kind: RevisionKind; version: RevisionVersion } {
     const source = this.source(id); if (this.epoch() !== input.expectedAccessEpoch || !sameAIProposalHead(input.expectedHead, aiProposalHead(source.version))) throw changed();
-    if (source.version.docx) throw new HttpError(409, 'AI text proposals require a text or LaTeX source version.', 'AI_PROPOSAL_SOURCE_UNSUPPORTED'); return source;
+    try { aiProposalSourceVersion(source.version); } catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'This source is unsupported.', 'AI_PROPOSAL_SOURCE_UNSUPPORTED'); } return source;
   }
   private key(key: string | undefined, actor: AuthContext): string { if (!key || key.length > 200 || key.includes('\0')) throw new HttpError(400, 'A bounded Idempotency-Key is required.'); return hash([actor.workspaceId, actor.principalId, key]); }
   private request(id: string, proposalId: string, actor: AuthContext): RequestEvidence {
@@ -79,15 +83,15 @@ export class AIProposalService {
     } catch { throw invalid(); }
   }
   private scope(version: RevisionVersion, input: AIProposalGenerateInput): void {
-    if (input.scope && (!isDeepStrictEqual(createPassageAnchor(version, input.scope.filePath, input.scope), input.scope) || input.scope.versionId !== version.id || input.scope.contentHash !== version.contentHash)) throw changed();
+    if (input.scope && (!isDeepStrictEqual(createPassageAnchor(aiProposalSourceVersion(version), input.scope.filePath, input.scope), input.scope) || input.scope.versionId !== version.id || input.scope.contentHash !== version.contentHash)) throw changed();
   }
-  private application(request: RequestEvidence, proposalSha256: string | null): AIProposalApplication | null {
+  private application(request: RequestEvidence, proposalSha256: string | null): ApplicationEvidence | null {
     const row = this.store.database.prepare('SELECT id,principal_id,retry_key_sha256,input_sha256,data FROM ai_proposal_applications WHERE proposal_id=?').get(request.id) as { id: string; principal_id: string; retry_key_sha256: string; input_sha256: string; data: string } | undefined;
     if (!row) return null;
     try {
       const evidence = JSON.parse(row.data) as ApplicationEvidence, input = aiProposalApplyInput(evidence.input), to = this.source(request.revisionId, evidence.application.toVersionId).version;
       if (!exact(evidence, ['proposalId', 'revisionId', 'principalId', 'retryKeySha256', 'inputSha256', 'input', 'application', 'actor']) || !isRevisionMetadataAttribution(evidence.actor) || !isAIProposalDigest(evidence.retryKeySha256) || !timestamp(evidence.application.createdAt) || evidence.application.operationId !== row.id || evidence.proposalId !== request.id || evidence.revisionId !== request.revisionId || evidence.principalId !== request.principalId || evidence.principalId !== row.principal_id || evidence.actor.principalId !== request.principalId || evidence.retryKeySha256 !== row.retry_key_sha256 || evidence.inputSha256 !== row.input_sha256 || evidence.inputSha256 !== hash([request.id, input]) || input.expectedProposalSha256 !== proposalSha256 || !sameAIProposalHead(input.expectedHead, request.input.expectedHead) || to.number !== evidence.application.toVersion || to.contentHash !== evidence.application.toContentHash || to.number !== request.input.expectedHead.number + 1 || !isDeepStrictEqual(to.attribution, evidence.actor)) throw invalid();
-      return evidence.application;
+      return evidence;
     } catch { throw invalid(); }
   }
   private proposal(request: RequestEvidence): AIProposal {
@@ -97,13 +101,18 @@ export class AIProposalService {
     try {
       const result = JSON.parse(row.data) as ResultEvidence;
       if (!exact(result, ['status', 'completedAt', 'provenance', 'result', 'proposalSha256', 'failure']) || !timestamp(result.completedAt)) throw invalid();
-      const proposal: AIProposal = { ...pending, ...result, applied: this.application(request, result.proposalSha256) };
+      const application = this.application(request, result.proposalSha256);
+      const proposal: AIProposal = { ...pending, ...result, applied: application?.application ?? null };
       if (!isAIProposalDetail({ proposal, currentHead: request.input.expectedHead, accessEpoch: this.epoch(), canApply: false, stale: false }) || result.provenance.sourceSha256 !== request.sourceSha256) throw invalid();
       if (result.result) {
         const source = this.source(request.revisionId, request.input.expectedHead.versionId).version;
         const verified = aiProposalResult({ ...result.result, edits: result.result.edits.map(edit => ({ filePath: edit.anchor.filePath, start: edit.anchor.start, end: edit.anchor.end, quote: edit.anchor.quote, replacement: edit.replacement, explanation: edit.explanation })) }, source, request.input.scope);
         if (!isDeepStrictEqual(verified, result.result) || result.proposalSha256 !== digest(request, result.result, result.provenance)) throw invalid();
-        if (proposal.applied) { const to = this.source(request.revisionId, proposal.applied.toVersionId).version; if (!isDeepStrictEqual(applyAIProposal(source, verified), to.files) || !isDeepStrictEqual(source.assets ?? [], to.assets ?? [])) throw invalid(); }
+        if (application) {
+          const to = this.source(request.revisionId, application.application.toVersionId).version;
+          if (source.docx) this.verifyWordApplication(source, to, proposal, application);
+          else if (to.docx || !isDeepStrictEqual(applyAIProposal(source, verified), to.files) || !isDeepStrictEqual(source.assets ?? [], to.assets ?? [])) throw invalid();
+        }
       }
       return proposal;
     } catch { throw invalid(); }
@@ -153,7 +162,7 @@ export class AIProposalService {
       const generated = await (this.options.provider ?? generateAIProposal)(input, reserved.submission, signal, () => { signal?.throwIfAborted(); this.authorize(id, actor, `generate:${input.provider}`); this.requireHead(id, input); });
       signal?.throwIfAborted();
       const result = parse(() => aiProposalResult(generated.result, reserved.source, input.scope));
-      if (result.edits.length) files(applyAIProposal(reserved.source, result));
+      if (result.edits.length && !reserved.source.docx) files(applyAIProposal(reserved.source, result));
       const provenance: AIProposalProvenance = { provider: input.provider, model: input.model, responseModel: generated.responseModel, providerResponseId: generated.providerResponseId, promptVersion: '1', sourceSha256: request.sourceSha256 };
       const evidence: ResultEvidence = { status: result.edits.length ? 'ready' : 'no_changes', completedAt: new Date().toISOString(), provenance, result, proposalSha256: digest(request, result, provenance), failure: null };
       this.store.transaction(() => {
@@ -173,21 +182,100 @@ export class AIProposalService {
     }
     return this.detail(id, request.id, actor);
   }
+  private applyReplay(id: string, proposalId: string, input: AIProposalApplyInput, retryKeySha256: string, inputSha256: string, actor: AuthContext): { request: RequestEvidence; proposal: AIProposal; replay: boolean } {
+    const request = this.request(id, proposalId, actor), proposal = this.proposal(request);
+    const existing = this.store.database.prepare('SELECT proposal_id,input_sha256,data FROM ai_proposal_applications WHERE principal_id=? AND retry_key_sha256=?').get(actor.principalId, retryKeySha256) as { proposal_id: string; input_sha256: string; data: string } | undefined;
+    if (existing) {
+      if (existing.proposal_id !== proposalId || existing.input_sha256 !== inputSha256) throw new HttpError(409, 'This retry key already names a different proposal application.', 'AI_PROPOSAL_RETRY_MISMATCH');
+      if (!isDeepStrictEqual((JSON.parse(existing.data) as ApplicationEvidence).input, input) || !proposal.applied) throw invalid();
+    }
+    return { request, proposal, replay: !!existing };
+  }
+  private applySource(id: string, input: AIProposalApplyInput, proposal: AIProposal): RevisionVersion {
+    const source = this.requireHead(id, input).version;
+    if (proposal.status !== 'ready' || !proposal.result || proposal.applied || proposal.proposalSha256 !== input.expectedProposalSha256 || !sameAIProposalHead(input.expectedHead, proposal.request.expectedHead)) throw changed();
+    return source;
+  }
+  private message(proposal: AIProposal): string { return `Applied AI-assisted edits proposed by ${proposal.provenance.provider} model ${proposal.provenance.model}.`; }
+  private wordInput(source: RevisionVersion, proposal: AIProposal, input: AIProposalApplyInput): DocxReplaceBatchInput {
+    return { expectedVersion: input.expectedHead.number, expectedVersionId: input.expectedHead.versionId, expectedContentHash: input.expectedHead.contentHash, expectedAccessEpoch: input.expectedAccessEpoch, replacements: aiProposalWordEdits(source, proposal.result!), message: this.message(proposal) };
+  }
+  /** Checks immutable operation identity and the exact tracked textual result. XML
+   * preservation is independently enforced by the package worker before commit. */
+  private verifyWordApplication(source: RevisionVersion, to: RevisionVersion, proposal: AIProposal, evidence: ApplicationEvidence): void {
+    const input = this.wordInput(source, proposal, evidence.input), before = source.docx!, after = to.docx;
+    if (!after || to.files.length || to.assets !== undefined || !isDeepStrictEqual(before.sourceFile, after.sourceFile) || before.fileName !== after.fileName || before.sha256 === after.sha256
+      || !isDeepStrictEqual(to.docxOperation, { kind: 'replace-batch', inputSha256: docxOperationHash(input) }) || to.message !== this.message(proposal)) throw invalid();
+    this.verifyWordProjection(before.projection, after.projection, input, evidence.actor.displayName, evidence.application.createdAt);
+  }
+  private verifyWordProjection(before: DocxProjection, after: DocxProjection, input: DocxReplaceBatchInput, author: string, date: string): void {
+    if (before.mainPart !== after.mainPart || before.blocks.length !== after.blocks.length || !isDeepStrictEqual(before.notes, after.notes) || !isDeepStrictEqual(before.comments, after.comments) || !isDeepStrictEqual(before.warnings, after.warnings)) throw invalid();
+    const semanticRun = ({ rangeId: _rangeId, ...run }: DocxRun) => run;
+    const changes = before.changes.map(({ id: _id, ...change }) => change);
+    for (let index = 0; index < before.blocks.length; index++) {
+      const block = before.blocks[index]!, next = after.blocks[index]!;
+      if (block.part !== next.part || block.kind !== next.kind || block.headingLevel !== next.headingLevel) throw invalid();
+      const edits = input.replacements.filter(edit => edit.blockId === block.id).sort((a, b) => a.start - b.start);
+      if (!edits.length) { if (block.text !== next.text || !isDeepStrictEqual(block.runs.map(semanticRun), next.runs.map(semanticRun))) throw invalid(); continue; }
+      let expected = block.text; for (const edit of [...edits].reverse()) expected = expected.slice(0, edit.start) + edit.replacement + expected.slice(edit.end);
+      if (next.runs.filter(run => run.change !== 'deleted' && run.change !== 'moveFrom').map(run => run.text).join('') !== expected
+        || next.runs.filter(run => run.change !== 'inserted' && run.change !== 'moveTo').map(run => run.text).join('') !== block.text) throw invalid();
+      let offset = 0;
+      for (const run of block.runs) {
+        const end = offset + run.text.length;
+        for (const edit of edits.filter(edit => edit.end > offset && edit.start < end)) {
+          changes.push({ part: block.part, kind: 'del', text: run.text.slice(Math.max(offset, edit.start) - offset, Math.min(end, edit.end) - offset), author, date });
+          if (edit.start >= offset && edit.start < end && edit.replacement) changes.push({ part: block.part, kind: 'ins', text: edit.replacement, author, date });
+        }
+        offset = end;
+      }
+    }
+    const canonical = (values: typeof changes) => values.map(value => JSON.stringify([value.part, value.kind, value.text, value.author ?? null, value.date ?? null])).sort();
+    if (!isDeepStrictEqual(canonical(changes), canonical(after.changes.map(({ id: _id, ...change }) => change)))) throw invalid();
+  }
+  /** Word package preparation is isolated and cancellable, outside any DB lock. */
+  async applyAsync(id: string, proposalId: string, raw: unknown, key: string | undefined, actor: AuthContext, signal?: AbortSignal): Promise<AIProposalDetail> {
+    signal?.throwIfAborted();
+    const input = parse(() => aiProposalApplyInput(raw)), retryKeySha256 = this.key(key, actor), inputSha256 = hash([proposalId, input]);
+    const prepared = this.store.read(() => {
+      this.authorize(id, actor, 'apply');
+      const current = this.applyReplay(id, proposalId, input, retryKeySha256, inputSha256, actor);
+      if (current.replay) return { replay: this.detailFor(current.request, actor) };
+      const source = this.applySource(id, input, current.proposal);
+      if (!source.docx) return { text: true as const };
+      const operationId = randomUUID(), actorProof = attribution(actor, `ai-proposal-apply:${operationId}`), createdAt = new Date().toISOString();
+      return { source, wordInput: this.wordInput(source, current.proposal, input), bytes: this.store.docxBytes(id, source.id), operationId, actorProof, createdAt };
+    });
+    if (prepared.replay) return prepared.replay;
+    if (prepared.text) return this.apply(id, proposalId, raw, key, actor);
+    signal?.throwIfAborted(); this.authorize(id, actor, 'apply'); this.requireHead(id, input);
+    let result: Awaited<ReturnType<typeof replaceDocxBatch>>;
+    try { result = await (this.options.replaceWordBatch ?? replaceDocxBatch)(prepared.bytes!, prepared.wordInput!.replacements, { author: prepared.actorProof!.displayName, date: prepared.createdAt! }, signal); }
+    catch (error) { this.authorize(id, actor, 'apply'); throw error; }
+    signal?.throwIfAborted();
+    return this.commitApply(id, proposalId, input, retryKeySha256, inputSha256, actor, { ...prepared, result } as PreparedWordApplication, signal);
+  }
   apply(id: string, proposalId: string, raw: unknown, key: string | undefined, actor: AuthContext): AIProposalDetail {
     const input = parse(() => aiProposalApplyInput(raw)), retryKeySha256 = this.key(key, actor), inputSha256 = hash([proposalId, input]);
+    return this.commitApply(id, proposalId, input, retryKeySha256, inputSha256, actor);
+  }
+  private commitApply(id: string, proposalId: string, input: AIProposalApplyInput, retryKeySha256: string, inputSha256: string, actor: AuthContext, prepared?: PreparedWordApplication, signal?: AbortSignal): AIProposalDetail {
     return this.store.mutate(undefined, inputSha256, () => {
-      const request = this.request(id, proposalId, actor), proposal = this.proposal(request);
-      const existing = this.store.database.prepare('SELECT proposal_id,input_sha256,data FROM ai_proposal_applications WHERE principal_id=? AND retry_key_sha256=?').get(actor.principalId, retryKeySha256) as { proposal_id: string; input_sha256: string; data: string } | undefined;
-      if (existing) { if (existing.proposal_id !== proposalId || existing.input_sha256 !== inputSha256) throw new HttpError(409, 'This retry key already names a different proposal application.', 'AI_PROPOSAL_RETRY_MISMATCH'); if (!isDeepStrictEqual((JSON.parse(existing.data) as ApplicationEvidence).input, input) || !proposal.applied) throw invalid(); return { status: 200, body: this.detailFor(request, actor) }; }
-      const source = this.requireHead(id, input);
-      if (proposal.status !== 'ready' || !proposal.result || proposal.applied || proposal.proposalSha256 !== input.expectedProposalSha256 || !sameAIProposalHead(input.expectedHead, proposal.request.expectedHead)) throw changed();
-      const updatedFiles = parse(() => applyAIProposal(source.version, proposal.result!)), operationId = randomUUID(), actorProof = attribution(actor, `ai-proposal-apply:${operationId}`);
-      const detail = this.store.createVersion(id, { files: updatedFiles, message: `Applied AI-assisted edits proposed by ${proposal.provenance.provider} model ${proposal.provenance.model}.`, expectedVersion: source.version.number }, actorProof);
+      signal?.throwIfAborted();
+      const { request, proposal, replay } = this.applyReplay(id, proposalId, input, retryKeySha256, inputSha256, actor);
+      if (replay) return { status: 200, body: this.detailFor(request, actor) };
+      const source = this.applySource(id, input, proposal), operationId = prepared?.operationId ?? randomUUID(), actorProof = prepared?.actorProof ?? attribution(actor, `ai-proposal-apply:${operationId}`), createdAt = prepared?.createdAt ?? new Date().toISOString();
+      if (source.docx && !prepared) throw new HttpError(409, 'Word proposal application requires asynchronous package processing.', 'AI_PROPOSAL_WORD_PROCESSING');
+      if (prepared && (!source.docx || !isDeepStrictEqual(prepared.wordInput, this.wordInput(source, proposal, input)))) throw changed();
+      if (prepared) this.verifyWordProjection(source.docx!.projection, prepared.result.projection, prepared.wordInput, actorProof.displayName, createdAt);
+      const detail = prepared ? this.store.replaceDocxBatchVersion(id, prepared.wordInput, prepared.result.bytes, prepared.result.projection, actorProof)
+        : this.store.createVersion(id, { files: parse(() => applyAIProposal(source, proposal.result!)), message: this.message(proposal), expectedVersion: source.number }, actorProof);
       const to = detail.versions.find(version => version.number === detail.revision.currentVersion)!;
-      const application: AIProposalApplication = { operationId, toVersionId: to.id, toVersion: to.number, toContentHash: to.contentHash, createdAt: new Date().toISOString() };
+      const application: AIProposalApplication = { operationId, toVersionId: to.id, toVersion: to.number, toContentHash: to.contentHash, createdAt };
       const evidence: ApplicationEvidence = { proposalId, revisionId: id, principalId: actor.principalId, retryKeySha256, inputSha256, input, application, actor: actorProof };
       this.store.database.prepare('INSERT INTO ai_proposal_applications(id,proposal_id,principal_id,retry_key_sha256,input_sha256,data) VALUES(?,?,?,?,?,?)').run(operationId, proposalId, actor.principalId, retryKeySha256, inputSha256, JSON.stringify(evidence));
       return { status: 200, body: this.detailFor(request, actor) };
-    }, () => this.authorize(id, actor, 'apply')).body as AIProposalDetail;
+    }, () => { signal?.throwIfAborted(); this.authorize(id, actor, 'apply'); }).body as AIProposalDetail;
   }
 }
+interface PreparedWordApplication { wordInput: DocxReplaceBatchInput; operationId: string; actorProof: ActorAttribution; createdAt: string; result: Awaited<ReturnType<typeof replaceDocxBatch>> }

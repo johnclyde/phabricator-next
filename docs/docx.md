@@ -50,10 +50,10 @@ Word comment anchors, hyperlinks, content controls and existing tracked changes
 in a selected paragraph are refused instead of flattened. Unsupported structure
 may only be visible to the original package validator, which rejects the
 complete request. Unrelated structures elsewhere remain untouched. A paragraph
-with a newly tracked edit consequently cannot take another batch edit until its
-changes are accepted outside this application and the resulting package is
-explicitly reimported. The existing single-run editor and endpoint retain their
-earlier supported scope.
+with a newly tracked edit cannot take another batch edit until its supported
+changes are accepted or rejected using the workflow below. Complex changes
+still require editing in Word and explicitly reimporting the resulting package.
+The existing single-run editor and endpoint retain their earlier supported scope.
 
 An edit-set draft pins the original version ID, content hash (including its
 projection), package digest and continuing source File identity. Moving to a
@@ -69,6 +69,60 @@ and exports a DOCX. Import Next Version adds a complete replacement package and
 retains the earlier source and discussion. Application discussion is separate
 from imported Word comments. Editing never implicitly adds those discussions
 to the Word package; a selected discussion export is an explicit operation.
+
+## Accepting and rejecting Word text changes
+
+Choose **Accept or Reject Word Changes**, then **Inspect Supported Word Changes**.
+Inspection reads the exact original package for the selected immutable version;
+it also works with versions imported before this workflow existed. Each
+supported insertion or deletion shows its complete text, imported author/date
+metadata and an explicit accept/reject choice. **Accept All Supported Changes**
+and **Reject All Supported Changes** prepare choices without saving them.
+Unsupported changes remain listed in the count and are preserved.
+
+The preview shows every affected paragraph in full, including on mobile. Its
+before/after text hides unresolved deletions. Accepting an insertion retains its
+text and removes its revision mark; rejecting it removes its text. Accepting a
+deletion removes its text; rejecting it restores ordinary text. Accepting changes
+can therefore leave the previewed final text unchanged while removing their
+revision marks. These text semantics follow the applicable
+[WordprocessingML revision operations](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-accept-all-revisions-in-a-word-processing-document);
+they do not imply support for every revision type described by that format.
+
+**Save … Word Decisions** applies the entire reviewed selection atomically as one
+new immutable version. Each decision identifies an exact projected XML location,
+not an imported `w:id`, which may be duplicated, or an author's display name.
+Every selection is validated before writing output. An unknown, duplicate,
+unsupported or stale final selection rejects the entire request. There is no
+fixed change-count cap; the complete decision JSON must fit within 512 KiB and
+the complete inspection within the existing 2 MiB projection bound.
+
+This workflow supports ordinary text insertions and deletions in paragraphs
+directly inside the main document body. The selected paragraph must contain
+ordinary runs and supported text revisions. Tables, notes/references, fields,
+comment or bookmark ranges, hyperlinks, content controls, nested revisions,
+formatting changes, moves and complex paragraph structure are refused rather
+than flattened. Signed packages cannot be edited. Unselected XML and unrelated
+package parts remain byte-for-byte unchanged; retained text keeps its original
+run formatting, XML encoding and required namespace bindings. ZIP container
+compression metadata may change. Once the supported revisions in an ordinary
+paragraph are resolved, that paragraph can take a new tracked edit.
+
+Choices and inspected previews retain their original version, projection/content
+hash, package digest and source File identity. They remain inspectable offline
+while current cached access permits it. Refreshing an inspection preserves the
+choices; it does not relocate them onto a newer version. Saving requires current
+authority and a current inspected access epoch. Access is checked before and
+after package processing, including the continuing original source File grants.
+Reconnecting never submits a draft. An uncertain save retains its exact request,
+ordered decisions, access epoch and idempotency key for explicit retry; receipt
+verification includes the historical resulting version and operation digest.
+Newer unsent choices or explanations are not erased by that receipt.
+
+Imported Word author metadata is never treated as authenticated authorship or
+review acceptance. Workspace history records the signed-in person who saves the
+decisions. Resolving Word revision marks is a document edit and does not grant
+application-level review acceptance for the resulting version.
 
 ## Comparing Word versions
 
@@ -309,6 +363,8 @@ because it does not write workspace state.
 | Import the next package | `POST /api/revisions/L1/docx/import` |
 | Apply a tracked replacement | `POST /api/revisions/L1/docx/replace` |
 | Apply one complete tracked edit set | `POST /api/revisions/L1/docx/replace-batch` |
+| Inspect supported tracked text changes | `GET /api/revisions/L1/docx/VERSION_ID/changes` |
+| Resolve one complete set of text changes | `POST /api/revisions/L1/docx/resolve` |
 | Download exact version bytes | `GET /api/revisions/L1/docx/VERSION_ID/download` |
 | Create an exact Word passage thread | `POST /api/revisions/L1/comments` with `docxPassage` |
 | Prepare selected threads as Word comments | `POST /api/revisions/L1/docx/export-discussion` |
@@ -328,10 +384,18 @@ processing and final commit both revalidate the original source and current
 authority. The browser supports this endpoint; `arc edit-docx` remains the
 single-run command.
 
+The resolution endpoint takes the same version, content hash, access epoch and
+message pins, plus `decisions: [{ changeId, action: "accept" | "reject" }, ...]`.
+Use the exact `changeId` values returned by the changes inspection. The read
+response includes `versionId`, `contentHash`, `packageHash`, `accessEpoch` and
+`inspection`, whose supported changes and paragraph segments produce the full
+preview. The browser supports this workflow; there is no dedicated CLI resolution
+command yet.
+
 ## Remaining work
 
 D105 remains partial. General rich editing, cross-paragraph replacements, paragraph or
-table restructuring, accepting/rejecting imported changes, editing imported Word
+table restructuring, accepting/rejecting complex revision types, editing imported Word
 comments, modern threaded-comment semantics, cross-run/note/field discussion
 anchors, cross-version mapping and complete page layout are not implemented.
 Automated local/hosted review and citation indexing currently reject DOCX sources

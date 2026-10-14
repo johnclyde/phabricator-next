@@ -1,5 +1,6 @@
 import { initializeAIProposals } from './ai-proposals.ts';
 import { docxBatchInputCanonical, validateDocxBatch, DOCX_BATCH_LIMITS, type DocxReplaceBatchInput } from '../shared/docx-batch.ts';
+import { docxResolutionInputCanonical, validateDocxResolution, DOCX_RESOLUTION_LIMITS, type DocxResolveInput } from '../shared/docx-resolution.ts';
 import { initializeRevisionLanding } from './revision-landing.ts';
 import { initializeGitAutomation } from './git-automation.ts';
 import { initializeAudit } from './audit.ts';
@@ -155,9 +156,19 @@ export function parseDocxReplaceBatchInput(input: unknown): DocxReplaceBatchInpu
   return { ...docxPins(data), replacements, message: string(data.message, 'Message', 10_000) };
 }
 /** Immutable mutation provenance binds receipts to the complete normalized request. */
-export function docxOperationHash(input: DocxImportInput | DocxReimportInput | DocxReplaceInput | DocxReplaceBatchInput): string {
-  const normalized = 'replacements' in input ? parseDocxReplaceBatchInput(input) : 'replacement' in input ? parseDocxReplaceInput(input) : 'expectedVersion' in input ? parseDocxReimportInput(input) : parseDocxImportInput(input);
-  return createHash('sha256').update('replacements' in normalized ? docxBatchInputCanonical(normalized) : JSON.stringify(normalized)).digest('hex');
+export function docxOperationHash(input: DocxImportInput | DocxReimportInput | DocxReplaceInput | DocxReplaceBatchInput | DocxResolveInput): string {
+  const normalized = 'decisions' in input ? parseDocxResolveInput(input) : 'replacements' in input ? parseDocxReplaceBatchInput(input) : 'replacement' in input ? parseDocxReplaceInput(input) : 'expectedVersion' in input ? parseDocxReimportInput(input) : parseDocxImportInput(input);
+  return createHash('sha256').update('decisions' in normalized ? docxResolutionInputCanonical(normalized) : 'replacements' in normalized ? docxBatchInputCanonical(normalized) : JSON.stringify(normalized)).digest('hex');
+}
+export function parseDocxResolveInput(input: unknown): DocxResolveInput {
+  const data = object(input, [...docxPinKeys, 'decisions', 'message']);
+  if (!Array.isArray(data.decisions) || !data.decisions.length || Buffer.byteLength(JSON.stringify(data.decisions)) > DOCX_RESOLUTION_LIMITS.serializedBytes) throw new HttpError(400, 'Choose a complete tracked-change selection within 512 KiB.');
+  const decisions = data.decisions.map(raw => {
+    const decision = object(raw, ['changeId', 'action']);
+    return { changeId: string(decision.changeId, 'Change ID', 2000), action: choice(decision.action, 'action', ['accept', 'reject']) };
+  });
+  if (new Set(decisions.map(decision => decision.changeId)).size !== decisions.length) throw new HttpError(400, 'Choose each tracked change only once.');
+  return { ...docxPins(data), decisions, message: string(data.message, 'Message', 10_000) };
 }
 export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] = [], docx?: DocxSource): string {
   return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets, docx)).digest('hex');
@@ -1701,6 +1712,23 @@ export class Store {
       revision.currentVersion++; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'replace-batch', inputSha256: docxOperationHash(data) });
       this.event(id, 'version_created', `Edited ${data.replacements.length} Word passages as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor); this.notifyRevisionSource(id, 'source_updated', actor);
+      return this.detail(id);
+    });
+  }
+  /** Commit one complete tracked-change resolution from the isolated package worker. */
+  resolveDocxVersion(id: string, input: DocxResolveInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = parseDocxResolveInput(input), actor = this.docxActor(attribution), current = this.requireDocxVersion(id, data), original = current.docx!;
+      this.docxFile(original.sourceFile, false);
+      try { validateDocxResolution(original.projection, data.decisions); }
+      catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'The tracked changes no longer match.', 'DOCX_CHANGE_MISMATCH'); }
+      const source = this.docxSource(bytes, projection, original.fileName, original.sourceFile);
+      if (source.sha256 === original.sha256) throw docxMismatch();
+      const revision = this.get<Revision>('revision', id);
+      if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
+      revision.currentVersion++; revision.updatedAt = new Date().toISOString();
+      this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'resolve', inputSha256: docxOperationHash(data) });
+      this.event(id, 'version_created', `Resolved ${data.decisions.length} Word tracked changes as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor); this.notifyRevisionSource(id, 'source_updated', actor);
       return this.detail(id);
     });
   }

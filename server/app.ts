@@ -26,8 +26,8 @@ import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
-import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseDocxReplaceBatchInput, transcriptEditInput, transcriptDocxReplacement, type MutationResponse, type Store } from './store.ts';
-import { exportDocxDiscussion, inspectDocx, replaceDocx, replaceDocxBatch } from './docx-package.ts';
+import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseDocxReplaceBatchInput, parseDocxResolveInput, transcriptEditInput, transcriptDocxReplacement, type MutationResponse, type Store } from './store.ts';
+import { exportDocxDiscussion, inspectDocx, replaceDocx, replaceDocxBatch, inspectDocxResolution, resolveDocxChanges } from './docx-package.ts';
 import { DOCX_LIMITS, type DocxFileIdentity } from '../shared/docx.ts';
 import { docxDiscussionFilename, type DocxDiscussionExport } from '../shared/docx-discussion.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
@@ -81,7 +81,7 @@ export interface AppOptions {
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
-  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; replaceBatch?: typeof replaceDocxBatch; exportDiscussion?: typeof exportDocxDiscussion };
+  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; replaceBatch?: typeof replaceDocxBatch; inspectResolution?: typeof inspectDocxResolution; resolve?: typeof resolveDocxChanges; exportDiscussion?: typeof exportDocxDiscussion };
   aiProposalProvider?: AIProposalGenerator;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
@@ -225,7 +225,7 @@ export function createApp(options: AppOptions = {}): App {
   const landing = new LandingService(store, auth, policies, automation, options.landingBindings);
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
-  const aiProposals = new AIProposalService(store, { configuration: () => { const config = ai(); return { ...config, localConfigured: config.localConfigured ?? false, localModel: config.localModel ?? null }; }, provider: options.aiProposalProvider, authorize: (actor, id, action) => {
+  const aiProposals = new AIProposalService(store, { configuration: () => { const config = ai(); return { ...config, localConfigured: config.localConfigured ?? false, localModel: config.localModel ?? null }; }, provider: options.aiProposalProvider, replaceWordBatch: options.docxProcessor?.replaceBatch, authorize: (actor, id, action) => {
     auth.revalidate(actor, action === 'read' ? 'read' : 'write');
     if (action.startsWith('generate:')) auth.revalidate(actor, action === 'generate:openai' ? 'review:hosted' : 'review:local');
     new AccessLayer(store, auth, policies, actor).require(id, action === 'read' ? 'view' : action === 'apply' ? 'edit' : 'interact');
@@ -358,7 +358,7 @@ export function createApp(options: AppOptions = {}): App {
     const aiProposal = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/ai-proposals(?:\/([^/]+)\/apply)?$/.exec(path) : null;
     if (aiProposal) {
       if (closing) throw new HttpError(503, 'The application is shutting down.');
-      const value = aiProposal[2] ? aiProposals.apply(aiProposal[1]!, aiProposal[2], input, rawKey, context)
+      const value = aiProposal[2] ? await trackDocxWork(aiProposals.applyAsync(aiProposal[1]!, aiProposal[2], input, rawKey, context, signal))
         : await trackDocxWork(aiProposals.generate(aiProposal[1]!, input, rawKey, context, signal));
       return { status: 200, body: value };
     }
@@ -564,7 +564,7 @@ export function createApp(options: AppOptions = {}): App {
     const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
     const docxCreate = method === 'POST' && path === '/api/revisions/docx';
-    const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace|replace-batch)$/.exec(path) : null;
+    const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace|replace-batch|resolve)$/.exec(path) : null;
     const transcriptEdit = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/transcript-edits$/.exec(path) : null;
     if ((docxCreate || docxWrite || transcriptEdit) && closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
     if ((docxCreate || docxWrite) && !rawKey) throw new HttpError(400, 'Word document mutations require an Idempotency-Key.');
@@ -638,6 +638,14 @@ export function createApp(options: AppOptions = {}): App {
         const requireEpoch = (epoch: number) => {
           if (epoch !== policies.epoch()) throw new HttpError(409, 'Access changed since this document inspection. Reload before saving.', 'ACCESS_EPOCH_CHANGED');
         };
+        if (docxWrite?.[2] === 'resolve') {
+          const id = docxWrite[1]!, data = parseDocxResolveInput(input);
+          const original = store.read(() => { authorize(); const version = store.requireDocxVersion(id, data); return store.docxBytes(id, version.id); });
+          let edited: Awaited<ReturnType<typeof resolveDocxChanges>>;
+          try { edited = await (options.docxProcessor?.resolve ?? resolveDocxChanges)(original, data.decisions, signal); }
+          catch (error) { store.read(authorize); throw error; }
+          return store.mutate(key, fingerprint, () => ({ status: 201, body: store.resolveDocxVersion(id, data, edited.bytes, edited.projection, attribution) }), authorize, present);
+        }
         if (docxWrite?.[2] === 'replace-batch') {
           const id = docxWrite[1]!, data = parseDocxReplaceBatchInput(input);
           const original = store.read(() => { authorize(); const version = store.requireDocxVersion(id, data); return store.docxBytes(id, version.id); });
@@ -973,6 +981,29 @@ export function createApp(options: AppOptions = {}): App {
         if (landingDetail) { const detail = landing.detail(landingDetail[1]!, context); if (url.search) throw new HttpError(400, 'Landing details do not accept query parameters.'); send(res, 200, detail); return; }
         const repository = /^\/api\/repositories\/(R\d+)(?:\/(refs|tree|blob|blame|history|compare(?:\/(?:file|patch))?)|\/(commits)\/([^/]+))?$/.exec(path);
         if (repository) { await repositoryRead(req, res, context, repository[1]!, repository[2] ?? repository[3], repository[4], url); return; }
+        const docxChanges = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/([^/]+)\/changes$/.exec(path);
+        if (docxChanges) {
+          if (closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
+          const controller = new AbortController(), access = new AccessLayer(store, auth, policies, context), id = docxChanges[1]!;
+          const abort = () => controller.abort(), close = () => { if (!res.writableEnded) abort(); };
+          const authorize = () => { auth.revalidate(context, 'read'); access.require(id); };
+          const original = store.read(() => {
+            authorize(); if (url.search) throw new HttpError(400, 'Tracked-change inspection requires an exact version and no query parameters.');
+            const version = store.detail(id).versions.find(item => item.id === docxChanges[2]);
+            if (!version?.docx) throw new HttpError(404, 'Word package version was not found.', 'DOCX_VERSION_UNAVAILABLE');
+            return { version, bytes: store.docxBytes(id, version.id) };
+          });
+          gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+          if (req.aborted || res.destroyed) abort();
+          await trackDocxWork((async () => {
+            try {
+              const inspection = await (options.docxProcessor?.inspectResolution ?? inspectDocxResolution)(original.bytes, controller.signal);
+              store.read(() => { authorize(); if (!res.destroyed && !controller.signal.aborted) send(res, 200, { versionId: original.version.id, contentHash: original.version.contentHash, packageHash: original.version.docx!.sha256, accessEpoch: policies.epoch(), inspection }); });
+            } catch (error) { store.read(authorize); throw error; }
+            finally { gitReads.delete(controller); req.off('aborted', abort); res.off('close', close); }
+          })());
+          return;
+        }
         const docxInspection = /^\/api\/files\/(F[1-9]\d{0,14})\/docx$/.exec(path);
         if (docxInspection) {
           if (closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
@@ -1448,7 +1479,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive' || path === '/api/suite-import/preview' || path === '/api/suite-import/apply') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/ai-proposals$/.test(path) || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
+      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/ai-proposals(?:\/[^/]+\/apply)?$/.test(path) || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch|resolve)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);

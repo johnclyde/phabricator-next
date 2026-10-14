@@ -1,3 +1,5 @@
+import { aiProposalHead, type AIProposalDetail } from '../shared/ai-proposals.ts';
+import { docxResolutionInputCanonical, type DocxResolveInput, type DocxResolutionDetail } from '../shared/docx-resolution.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -6,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { createApp, type AppOptions } from './app.ts';
 import { createAuth } from './auth.ts';
 import { Store } from './store.ts';
-import { inspectDocx, replaceDocx, replaceDocxBatch } from './docx-package.ts';
+import { inspectDocx, replaceDocx, replaceDocxBatch, inspectDocxResolution, resolveDocxChanges } from './docx-package.ts';
 import { docxBatchParagraphs, docxBatchInputCanonical, type DocxReplaceBatchInput } from '../shared/docx-batch.ts';
 import type { FileRecord } from '../shared/files.ts';
 import type { DocxImportInput, DocxInspection, DocxReplaceInput } from '../shared/docx.ts';
@@ -187,6 +189,79 @@ test('application close awaits disconnected Word processing and its final author
     await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(closed, false, 'shutdown must retain the Store until processing settles');
     release(); await closing; await pending; assert.equal(closed, true);
   } finally { release(); await app.close(); }
+});
+
+test('Word resolution accepts and rejects exact changes, keeps historical receipts, and makes the next editing round possible', async () => {
+  for (const action of ['accept', 'reject'] as const) {
+    const app = await start();
+    try {
+      const file = await app.upload(), initial = await app.importDocument(file), id = initial.detail.revision.id, original = head(initial.detail);
+      const edit = app.replacement(initial.detail), saved = await app.request<RevisionDetail>(`/api/revisions/${id}/docx/replace`, 'POST', edit, 'alice', 'edit');
+      assert.equal(saved.status, 201); const edited = head(saved.body);
+      const inspection = await app.request<DocxResolutionDetail>(`/api/revisions/${id}/docx/${edited.id}/changes`);
+      assert.equal(inspection.status, 200, JSON.stringify(inspection.body)); assert.equal(inspection.body.versionId, edited.id); assert.equal(inspection.body.contentHash, edited.contentHash); assert.equal(inspection.body.packageHash, edited.docx!.sha256);
+      const decisions = inspection.body.inspection.changes.filter(change => change.author === 'Alice Reviewer').map(change => ({ changeId: change.changeId, action })); assert.equal(decisions.length, 2);
+      const input: DocxResolveInput = { expectedVersion: edited.number, expectedVersionId: edited.id, expectedContentHash: edited.contentHash, expectedAccessEpoch: app.policies.epoch(), decisions, message: `Explicitly ${action} the tracked edit` }, path = `/api/revisions/${id}/docx/resolve`;
+      assert.equal((await app.request(path, 'POST', input, 'reader', 'readonly')).status, 403);
+      assert.equal((await app.request(path, 'POST', { ...input, decisions: [...decisions, decisions[0]] }, 'alice', 'duplicate')).status, 400);
+      assert.equal((await app.request(path, 'POST', { ...input, decisions: [...decisions, { changeId: 'unknown', action }] }, 'alice', 'unknown')).status >= 400, true);
+      assert.equal(app.store.detail(id).versions.length, 2, 'invalid final decisions cannot partially resolve changes');
+      const resolved = await app.request<RevisionDetail>(path, 'POST', input, 'alice', 'resolve'); assert.equal(resolved.status, 201, JSON.stringify(resolved.body)); const settled = head(resolved.body);
+      assert.equal(settled.number, 3); assert.equal(settled.docxOperation?.kind, 'resolve'); assert.equal(settled.docxOperation.inputSha256, createHash('sha256').update(docxResolutionInputCanonical(input)).digest('hex'));
+      assert.equal(settled.docx!.projection.changes.length, original.docx!.projection.changes.length); assert.deepEqual(settled.docx!.sourceFile, original.docx!.sourceFile);
+      const nextRange = settled.docx!.projection.editableRanges.find(range => range.text === (action === 'accept' ? edit.replacement : edit.quote)); assert.ok(nextRange, 'settled text is available to the next editing round');
+      assert.deepEqual(Buffer.from(app.store.docxBytes(id, original.id)), bytes); assert.deepEqual(resolved.body.versions.slice(0, 2), saved.body.versions);
+      const next = { ...edit, expectedVersion: settled.number, expectedVersionId: settled.id, expectedContentHash: settled.contentHash, expectedAccessEpoch: app.policies.epoch(), rangeId: nextRange.id, start: 0, end: nextRange.text.length, quote: nextRange.text, replacement: 'A second review round.' };
+      const nextSaved = await app.request<RevisionDetail>(`/api/revisions/${id}/docx/replace`, 'POST', next, 'alice', 'next-round'); assert.equal(nextSaved.status, 201, JSON.stringify(nextSaved.body)); assert.equal(head(nextSaved.body).number, 4);
+      const retry = await app.request<RevisionDetail>(path, 'POST', input, 'aliceOther', 'resolve'); assert.equal(retry.status, 201); assert.deepEqual(retry.body, resolved.body); assert.equal(app.store.detail(id).versions.length, 4);
+      assert.equal((await app.request(path, 'POST', input, 'alice', 'stale-new-request')).status, 409);
+      assert.equal((await app.request(path, 'POST', { ...input, decisions: decisions.map(item => ({ ...item, action: action === 'accept' ? 'reject' : 'accept' })) }, 'alice', 'resolve')).status, 409);
+    } finally { await app.close(); }
+  }
+});
+
+test('Word change inspection rechecks source access before returning a delayed private projection', async () => {
+  let entered!: () => void, release!: () => void; const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const app = await start({ docxProcessor: { inspect: inspectDocx, replace: replaceDocx, inspectResolution: async (source, signal) => { const result = await inspectDocxResolution(source, signal); entered(); await gate; return result; } } });
+  try {
+    const file = await app.upload(); app.policy(file.id, { view: workspace });
+    const { detail } = await app.importDocument(file, false), id = detail.revision.id, version = head(detail);
+    const pending = app.request(`/api/revisions/${id}/docx/${version.id}/changes`, 'GET', undefined, 'bob'); await started;
+    app.policy(file.id, { view: members(app.alice.id) }); release(); const result = await pending; assert.equal(result.status, 404); assert.equal('inspection' in result.body, false); assert.equal(app.store.detail(id).versions.length, 1);
+  } finally { release(); await app.close(); }
+});
+
+test('Word resolution discards prepared bytes after a concurrent source update and preserves the original selection', async () => {
+  let entered!: () => void, release!: () => void; const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const app = await start({ docxProcessor: { inspect: inspectDocx, replace: replaceDocx, resolve: async (source, decisions, signal) => { const result = await resolveDocxChanges(source, decisions, signal); entered(); await gate; return result; } } });
+  try {
+    const file = await app.upload(), { detail } = await app.importDocument(file), id = detail.revision.id, version = head(detail);
+    const inspection = await app.request<DocxResolutionDetail>(`/api/revisions/${id}/docx/${version.id}/changes`); assert.equal(inspection.status, 200); assert.ok(inspection.body.inspection.changes.length);
+    const input: DocxResolveInput = { expectedVersion: version.number, expectedVersionId: version.id, expectedContentHash: version.contentHash, expectedAccessEpoch: app.policies.epoch(), decisions: inspection.body.inspection.changes.map(change => ({ changeId: change.changeId, action: 'accept' })), message: 'Resolve old changes' };
+    const pending = app.request(`/api/revisions/${id}/docx/resolve`, 'POST', input, 'alice', 'raced-resolution'); await started;
+    const concurrent = await app.request<RevisionDetail>(`/api/revisions/${id}/docx/replace`, 'POST', app.replacement(detail), 'alice', 'concurrent'); assert.equal(concurrent.status, 201);
+    release(); const result = await pending; assert.equal(result.status, 409); assert.equal(app.store.detail(id).versions.length, 2); assert.deepEqual(Buffer.from(app.store.docxBytes(id, version.id)), bytes);
+    assert.equal(app.store.database.prepare("SELECT COUNT(*) AS n FROM idempotency WHERE key LIKE '%:raced-resolution'").get()?.n, 0);
+  } finally { release(); await app.close(); }
+});
+
+test('Word AI HTTP proposals submit paragraph text and apply one tracked package with private exact historical recovery', async () => {
+  let generated = 0, processed = 0;
+  const app = await start({ aiConfiguration: () => ({ configured: true, model: 'fixture-model', localConfigured: false, localModel: null }),
+    aiProposalProvider: async (_input, source) => { generated++; const file = source.files[0]!; assert.match(file.path, /^docx\/paragraph-/); assert.ok(source.files.every(item => item.path.startsWith('docx/paragraph-'))); return { result: { summary: 'Clarify the selected paragraph.', limitations: 'Synthetic fixture, not model evaluation.', edits: [{ filePath: file.path, start: 0, end: file.content.length, quote: file.content, replacement: 'A proposed clarification.', explanation: 'Requested clarification.' }] }, responseModel: 'fixture-model', providerResponseId: 'word-fixture' }; },
+    docxProcessor: { inspect: inspectDocx, replace: replaceDocx, replaceBatch: async (...args) => { processed++; return replaceDocxBatch(...args); } } });
+  try {
+    const file = await app.upload(), { detail } = await app.importDocument(file), id = detail.revision.id, version = head(detail), path = `/api/revisions/${id}/ai-proposals`;
+    const generation = { provider: 'openai', model: 'fixture-model', instruction: 'Clarify one paragraph.', expectedHead: aiProposalHead(version), expectedAccessEpoch: app.policies.epoch(), scope: null, allowHosted: true };
+    const proposed = await app.request<AIProposalDetail>(path, 'POST', generation, 'alice', 'word-proposal'); assert.equal(proposed.status, 200, JSON.stringify(proposed.body)); assert.equal(proposed.body.proposal.status, 'ready'); assert.equal(generated, 1); assert.equal(processed, 0);
+    const applyPath = `${path}/${proposed.body.proposal.id}/apply`, application = { expectedHead: aiProposalHead(version), expectedAccessEpoch: app.policies.epoch(), expectedProposalSha256: proposed.body.proposal.proposalSha256 };
+    const applied = await app.request<AIProposalDetail>(applyPath, 'POST', application, 'alice', 'word-apply'); assert.equal(applied.status, 200, JSON.stringify(applied.body)); assert.equal(applied.body.proposal.applied?.toVersion, 2); assert.equal(processed, 1);
+    const updated = app.store.detail(id); assert.equal(head(updated).docxOperation?.kind, 'replace-batch'); assert.deepEqual(head(updated).docx!.sourceFile, version.docx!.sourceFile); assert.deepEqual(updated.versions[0], version); assert.ok(head(updated).docx!.projection.changes.some(change => change.text === 'A proposed clarification.'));
+    assert.deepEqual((await app.request<AIProposalDetail>(applyPath, 'POST', application, 'aliceOther', 'word-apply')).body, applied.body); assert.equal(processed, 1);
+    assert.equal((await app.request(applyPath, 'POST', application, 'reader', 'word-apply')).status, 403);
+    assert.equal((await app.request(`${path}/${proposed.body.proposal.id}`, 'GET', undefined, 'bob')).status, 404);
+    assert.equal((await app.request(path, 'POST', generation, 'alice', 'word-proposal')).status, 200); assert.equal(generated, 1); assert.equal(app.store.detail(id).versions.length, 2);
+  } finally { await app.close(); }
 });
 
 function batchInput(detail: RevisionDetail, epoch: number): DocxReplaceBatchInput {

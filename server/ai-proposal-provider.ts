@@ -1,4 +1,4 @@
-import { AI_PROPOSAL_LIMITS, type AIProposalGenerateInput } from '../shared/ai-proposals.ts';
+import { AI_PROPOSAL_LIMITS, aiProposalSourceVersion, type AIProposalGenerateInput } from '../shared/ai-proposals.ts';
 import type { RevisionKind, RevisionVersion } from '../shared/types.ts';
 import { assertLocalModel, localModelEndpoint } from './ai.ts';
 
@@ -11,7 +11,8 @@ export const AI_PROPOSAL_SCHEMA = { type: 'object', additionalProperties: false,
   summary: { type: 'string' }, limitations: { type: 'string' }, edits: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['filePath', 'start', 'end', 'quote', 'replacement', 'explanation'], properties: { filePath: { type: 'string' }, start: { type: 'integer' }, end: { type: 'integer' }, quote: { type: 'string' }, replacement: { type: 'string' }, explanation: { type: 'string' } } } },
 } };
 export function aiProposalSource(kind: RevisionKind, version: RevisionVersion, input: AIProposalGenerateInput): AIProposalSource {
-  const source: AIProposalSource = { kind, instruction: input.instruction, source: input.expectedHead, scope: input.scope ? 'passage' : 'snapshot', files: input.scope ? [{ path: input.scope.filePath, start: input.scope.start, content: input.scope.quote }] : version.files.map(file => ({ ...file, start: 0 })), omittedBinaryAssets: version.assets?.length ?? 0 };
+  const projected = aiProposalSourceVersion(version);
+  const source: AIProposalSource = { kind, instruction: input.instruction, source: input.expectedHead, scope: input.scope ? 'passage' : 'snapshot', files: input.scope ? [{ path: input.scope.filePath, start: input.scope.start, content: input.scope.quote }] : projected.files.map(file => ({ ...file, start: 0 })), omittedBinaryAssets: version.assets?.length ?? 0 };
   if (Buffer.byteLength(JSON.stringify(source)) > (input.provider === 'ollama' ? AI_PROPOSAL_LIMITS.localSourceBytes : AI_PROPOSAL_LIMITS.sourceBytes)) throw new AIProposalProviderError('failed', 'The selected source exceeds this provider’s payload limit. Select a smaller passage; no source was submitted.');
   return source;
 }

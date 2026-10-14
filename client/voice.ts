@@ -1,6 +1,7 @@
 import type { ProjectSnapshot, RevisionDetail, RevisionKind, ReviewThread } from '../shared/types';
 import { normalizeProjectSlug, projectDisplayName } from '../shared/projects';
 import { orderedDiscussionThreads } from '../shared/discussion-navigation';
+import type { AIProposalVoiceAction } from './ai-proposal-voice';
 import type { TranscriptEditVoiceAction } from './transcript-edit-voice';
 import type { StackVoiceAction } from './revision-stack';
 
@@ -13,8 +14,10 @@ export type WorkspaceView = 'almanac' | 'conpherence' | 'calendar' | 'slowvote' 
 export type FindingVoiceAction = 'findings' | 'currentFinding' | 'nextFinding' | 'previousFinding' | 'findingSource';
 export type ComparisonVoiceAction = 'changes' | 'currentChange' | 'nextChange' | 'previousChange' | 'nextFile' | 'previousFile';
 export type DiscussionVoiceAction = 'nextThread' | 'previousThread' | 'nextThreadIncludingCollapsed' | 'previousThreadIncludingCollapsed' | 'currentThread' | 'collapseThread' | 'expandThread' | 'toggleThread';
-export type VoiceCommand = { type: 'revisionActive'; kind: RevisionKind } | { type: 'revisionView'; view: 'reviews' | 'papers' | 'drafts'; name: string } | { type: 'revisionAuthoredFilter'; view: 'reviews' | 'papers' | 'drafts'; authored: boolean } | { type: 'notificationFilter'; filter: 'all' | 'unread' | 'read' } | { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: FindingVoiceAction } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: TranscriptEditVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
+export type VoiceCommand = { type: 'revisionActive'; kind: RevisionKind } | { type: 'revisionView'; view: 'reviews' | 'papers' | 'drafts'; name: string } | { type: 'revisionAuthoredFilter'; view: 'reviews' | 'papers' | 'drafts'; authored: boolean } | { type: 'notificationFilter'; filter: 'all' | 'unread' | 'read' } | { type: 'revisionProjectFilter'; view: 'reviews' | 'papers' | 'drafts'; project: string | null } | { type: 'revisionFollowingFilter'; view: 'reviews' | 'papers' | 'drafts'; following: boolean } | { type: 'openWorkboard'; project: string } | { type: 'projectFilter'; value: 'joined' | 'watching' | 'active' | 'all' } | { type: 'openProject'; project: string } | { type: 'navigate'; view: WorkspaceView } | { type: 'openObject'; id: string } | { type: 'search'; query: string } | { type: 'task'; title: string } | { type: 'summary' } | { type: FindingVoiceAction } | { type: ComparisonVoiceAction } | { type: DiscussionVoiceAction } | { type: StackVoiceAction } | { type: Exclude<AIProposalVoiceAction, 'dictateAIInstruction'> } | { type: 'dictateAIInstruction'; instruction: string } | { type: TranscriptEditVoiceAction } | { type: 'discussion' } | { type: 'taskProjectFilter'; project: string } | { type: 'taskFilter'; value: 'mine' | 'unassigned' | 'following' } | { type: 'filter'; value: string } | { type: 'unknown'; text: string };
 export function parseCommand(input: string): VoiceCommand {
+  const instruction = /^set ai instruction to ([\s\S]+)$/i.exec(input.trim());
+  if (instruction?.[1]?.trim()) return { type: 'dictateAIInstruction', instruction: instruction[1] };
   const original = input.trim().replace(/[.!?]+$/, '');
   const text = original.toLowerCase();
   const aliases: Record<string, WorkspaceView> = { almanac: 'almanac', conpherence: 'conpherence', conversations: 'conpherence', calendar: 'calendar', events: 'calendar', slowvote: 'slowvote', polls: 'slowvote', phame: 'phame', blogs: 'phame', legalpad: 'legalpad', agreements: 'legalpad', audit: 'audit', audits: 'audit', 'commit review': 'audit', drydock: 'drydock', 'dry dock': 'drydock', blueprints: 'drydock', herald: 'herald', rules: 'herald', harbormaster: 'harbormaster', builds: 'harbormaster', audio: 'audio', 'audio inbox': 'audio', recordings: 'audio', home: 'home', dashboard: 'home', reviews: 'reviews', differential: 'reviews', drafts: 'drafts', documents: 'drafts', papers: 'papers', research: 'papers', tasks: 'tasks', maniphest: 'tasks', projects: 'projects', repositories: 'repositories', diffusion: 'repositories', wiki: 'wiki', phriction: 'wiki', activity: 'activity', outbox: 'outbox', spaces: 'spaces', files: 'files', uploads: 'files', pastes: 'pastes', paste: 'pastes' };
@@ -60,6 +63,12 @@ export function parseCommand(input: string): VoiceCommand {
   if (search) return { type: 'search', query: search[1] };
   const task = original.match(/^(?:create|add|draft) (?:a )?task(?: called| titled)?\s+(.+)$/i);
   if (task) return { type: 'task', title: task[1] };
+  if (/^read (?:the )?(?:current )?ai edit$/.test(text)) return { type: 'currentAIEdit' };
+  if (/^(?:read )?next ai edit$/.test(text)) return { type: 'nextAIEdit' };
+  if (/^(?:read )?(?:previous|prior) ai edit$/.test(text)) return { type: 'previousAIEdit' };
+  if (/^read (?:the )?ai explanation$/.test(text)) return { type: 'readAIExplanation' };
+  const aiApply = /^(prepare|confirm|cancel) ai proposal$/.exec(text);
+  if (aiApply) return { type: `${aiApply[1]}AIApply` as 'prepareAIApply' | 'confirmAIApply' | 'cancelAIApply' };
   const transcriptEdit = text.match(/^(read|preview|confirm|cancel) transcript edit$/);
   if (transcriptEdit) return { type: `${transcriptEdit[1]}TranscriptEdit` as TranscriptEditVoiceAction };
   if (/^(read|read the|read my|give me a|give me the) (summary|overview)$/.test(text)) return { type: 'summary' };

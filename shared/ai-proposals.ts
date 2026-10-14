@@ -1,5 +1,6 @@
 import { createPassageAnchor } from './anchors';
 import { applySuggestedReplacement } from './suggestions';
+import { docxBatchParagraphs, validateDocxBatch, type DocxPassageReplacement } from './docx-batch';
 import type { PassageAnchor, RevisionVersion, SourceFile, SuggestedPassageEdit } from './types';
 
 export const AI_PROPOSAL_LIMITS = { sourceBytes: 200_000, localSourceBytes: 60_000, resultBytes: 1_000_000, responseBytes: 2_000_000, instruction: 10_000, explanation: 20_000, page: 30 } as const;
@@ -26,6 +27,30 @@ function text(v: unknown, max: number, empty = false): string { if (typeof v !==
 export function isAIProposalHead(v: unknown): v is AIProposalHead { return record(v) && keys(v, ['versionId', 'number', 'contentHash']) && isAIProposalId(v.versionId) && natural(v.number) && v.number > 0 && isAIProposalDigest(v.contentHash); }
 export const aiProposalHead = (version: RevisionVersion): AIProposalHead => ({ versionId: version.id, number: version.number, contentHash: version.contentHash });
 export const sameAIProposalHead = (a: AIProposalHead, b: AIProposalHead): boolean => a.versionId === b.versionId && a.number === b.number && a.contentHash === b.contentHash;
+/** Word paragraph paths retain the original block index, never a filtered-list
+ * index. Synthetic text is a projection pinned to the original package hash. */
+export function aiProposalSourceVersion(version: RevisionVersion): RevisionVersion {
+  if (!version.docx) return version;
+  const supported = new Set(docxBatchParagraphs(version.docx.projection).map(block => block.id));
+  const files = version.docx.projection.blocks.flatMap((block, index) => supported.has(block.id) ? [{ path: `docx/paragraph-${index + 1}.txt`, content: block.text }] : []);
+  if (!files.length) throw new RangeError('This Word document has no supported ordinary paragraphs for AI proposals.');
+  const { docx: _docx, assets: _assets, ...source } = version;
+  return { ...source, files };
+}
+/** Validate every complete synthetic anchor before mapping it back to Word.
+ * The isolated package editor additionally checks original XML structure. */
+export function aiProposalWordEdits(version: RevisionVersion, result: AIProposalResult): DocxPassageReplacement[] {
+  if (!version.docx) throw new RangeError('A Word proposal requires its original Word source.');
+  const source = aiProposalSourceVersion(version); applyTextProposal(source, result);
+  const paths = new Set(source.files.map(file => file.path));
+  const replacements = result.edits.map(edit => {
+    const match = /^docx\/paragraph-([1-9]\d*)\.txt$/.exec(edit.anchor.filePath), block = match && version.docx!.projection.blocks[Number(match[1]) - 1];
+    if (!block || !paths.has(edit.anchor.filePath)) throw new RangeError('This proposal refers to an unsupported Word paragraph.');
+    return { blockId: block.id, start: edit.anchor.start, end: edit.anchor.end, quote: edit.anchor.quote, replacement: edit.replacement };
+  });
+  try { validateDocxBatch(version.docx.projection, replacements); } catch (error) { throw new RangeError(error instanceof Error ? error.message : 'The Word edit batch is invalid.'); }
+  return replacements;
+}
 function anchor(v: unknown): PassageAnchor {
   if (!record(v) || !keys(v, ['versionId', 'contentHash', 'filePath', 'start', 'end', 'quote', 'prefix', 'suffix']) || !isAIProposalId(v.versionId) || !isAIProposalDigest(v.contentHash) || !natural(v.start) || !natural(v.end) || v.end <= v.start) throw new RangeError('Choose an exact source passage.');
   const a = { versionId: v.versionId, contentHash: v.contentHash, filePath: text(v.filePath, 240), start: v.start, end: v.end, quote: text(v.quote, 20_000), prefix: text(v.prefix, 80, true), suffix: text(v.suffix, 80, true) };
@@ -43,9 +68,10 @@ export function aiProposalApplyInput(v: unknown): AIProposalApplyInput {
  * edit rejects the entire proposal, with no partial truncation or application. */
 export function aiProposalResult(v: unknown, version: RevisionVersion, scope: PassageAnchor | null): AIProposalResult {
   if (!record(v) || !keys(v, ['summary', 'limitations', 'edits']) || !Array.isArray(v.edits) || new TextEncoder().encode(JSON.stringify(v)).length > AI_PROPOSAL_LIMITS.resultBytes) throw new RangeError('The provider returned an invalid or oversized proposal.');
+  const source = aiProposalSourceVersion(version);
   const result: AIProposalResult = { summary: text(v.summary, 20_000), limitations: text(v.limitations, 20_000), edits: v.edits.map(raw => {
     if (!record(raw) || !keys(raw, ['filePath', 'start', 'end', 'quote', 'replacement', 'explanation']) || !natural(raw.start) || !natural(raw.end)) throw new RangeError('Every edit must contain an exact source passage and an explanation.');
-    const a = createPassageAnchor(version, text(raw.filePath, 240), { start: raw.start, end: raw.end, quote: text(raw.quote, 20_000) });
+    const a = createPassageAnchor(source, text(raw.filePath, 240), { start: raw.start, end: raw.end, quote: text(raw.quote, 20_000) });
     if (scope && (a.filePath !== scope.filePath || a.start < scope.start || a.end > scope.end)) throw new RangeError('A proposed edit falls outside the selected passage.');
     return { anchor: a, replacement: text(raw.replacement, 20_000, true), explanation: text(raw.explanation, AI_PROPOSAL_LIMITS.explanation) };
   }) };
@@ -53,6 +79,10 @@ export function aiProposalResult(v: unknown, version: RevisionVersion, scope: Pa
   return result;
 }
 export function applyAIProposal(version: RevisionVersion, result: AIProposalResult): SourceFile[] {
+  if (version.docx) aiProposalWordEdits(version, result);
+  return applyTextProposal(aiProposalSourceVersion(version), result);
+}
+function applyTextProposal(version: RevisionVersion, result: AIProposalResult): SourceFile[] {
   const first = result.edits[0]; if (!first) throw new RangeError('A no-change proposal has no source edits to apply.');
   return applySuggestedReplacement(version, first.anchor, { replacement: first.replacement, additionalEdits: result.edits.slice(1) }, first.explanation);
 }

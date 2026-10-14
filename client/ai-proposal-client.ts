@@ -1,5 +1,5 @@
 import type { PassageAnchor, RevisionVersion } from '../shared/types';
-import { AI_PROPOSAL_LIMITS, aiProposalGenerateInput, aiProposalApplyInput, applyAIProposal, isAIProposalDetail, type AIProposalDetail, type AIProposalApplyInput, type AIProposalGenerateInput } from '../shared/ai-proposals';
+import { AI_PROPOSAL_LIMITS, aiProposalGenerateInput, aiProposalApplyInput, aiProposalSourceVersion, applyAIProposal, isAIProposalDetail, type AIProposalDetail, type AIProposalApplyInput, type AIProposalGenerateInput } from '../shared/ai-proposals';
 import { createPassageAnchor } from '../shared/anchors';
 
 export interface AIProposalDraft { revisionId: string; principalId: string; versionId: string; contentHash: string; instruction: string; scope: PassageAnchor | null }
@@ -32,9 +32,13 @@ export function aiProposalIntent(value: unknown, revisionId: string, principalId
 }
 /** Exact original authority only; a matching quotation in another version is not enough. */
 export function aiProposalScopeMatches(version: RevisionVersion, scope: PassageAnchor | null): boolean {
-  if (scope === null) return !version.docx;
-  if (version.docx || scope.versionId !== version.id || scope.contentHash !== version.contentHash) return false;
-  try { const exact = createPassageAnchor(version, scope.filePath, scope); return (Object.keys(exact) as (keyof PassageAnchor)[]).every(key => exact[key] === scope[key]); } catch { return false; }
+  try {
+    const source = aiProposalSourceVersion(version);
+    if (scope === null) return source.files.length > 0;
+    if (scope.versionId !== version.id || scope.contentHash !== version.contentHash) return false;
+    const exact = createPassageAnchor(source, scope.filePath, scope);
+    return (Object.keys(exact) as (keyof PassageAnchor)[]).every(key => exact[key] === scope[key]);
+  } catch { return false; }
 }
 export const aiProposalDraftKey = (revisionId: string, versionId: string) => `ai-proposal-draft:${revisionId}:${versionId}`;
 

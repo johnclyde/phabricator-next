@@ -1,3 +1,4 @@
+import { validateDocxResolution } from '../shared/docx-resolution.ts';
 import { validateDocxBatch } from '../shared/docx-batch.ts';
 import { isStoredMentionProof } from './mentions.ts';
 import type { ReviewDraftDiscovery, ReviewDraftInput, ReviewDraftOperationKind, ReviewDraftPreview, ReviewDraftSnapshot } from '../shared/review-drafts.ts';
@@ -38,7 +39,7 @@ import { WORKBOARD_BULK_MOVE_LIMIT } from '../shared/workboards.ts';
 import type { WorkboardBulkMovePreview, WorkboardBulkMoveQuery, WorkboardCardPage, WorkboardCardsQuery, WorkboardColumn, WorkboardDetail, WorkboardHistory, WorkboardImportPreview, WorkboardQuery } from '../shared/workboards.ts';
 import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
-import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseDocxReplaceBatchInput, parseWikiMoveInput, wikiMoveInputHash, parseWikiDraftInput, parseWikiPublishInput, parseWikiDeleteInput, parseWikiEditInput, parseWikiRestoreInput, wikiLifecycleInputHash, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
+import { docxOperationHash, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseDocxReplaceBatchInput, parseDocxResolveInput, parseWikiMoveInput, wikiMoveInputHash, parseWikiDraftInput, parseWikiPublishInput, parseWikiDeleteInput, parseWikiEditInput, parseWikiRestoreInput, wikiLifecycleInputHash, threadPreferenceInput, type MutationResponse, type Store } from './store.ts';
 import { HttpError, integer, object } from './validation.ts';
 import { validatePasteContent, type PasteDetail, type PasteListQuery, type PastePage } from '../shared/pastes.ts';
 import type { FileDetail, FileListQuery, FilePage } from '../shared/files.ts';
@@ -778,6 +779,7 @@ export class AccessLayer {
       // audience is always explicit and requires the File editor's authority.
       if (data.shareSource) this.require(data.sourceFile.fileId, 'edit');
     }
+    if (method === 'POST' && /^\/api\/revisions\/[DPL]\d+\/docx\/resolve$/.test(path)) parseDocxResolveInput(input);
     if (method === 'POST' && /^\/api\/revisions\/[DPL]\d+\/docx\/replace(?:-batch)?$/.test(path)) { if (path.endsWith('/replace-batch')) parseDocxReplaceBatchInput(input); else parseDocxReplaceInput(input); }
     if (method === 'POST' && /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path)) {
       const data = transcriptEditInput(input);
@@ -1188,7 +1190,7 @@ export class AccessLayer {
       // This is a client-reported origin, bound to an authenticated literal edit;
       // it does not assert that the server performed or verified speech recognition.
     }
-    if (method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch)$/.test(path))) {
+    if (method === 'POST' && (path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch|resolve)$/.test(path))) {
       const invalid = (): never => { throw new HttpError(409, 'This saved Word receipt does not match the original operation.', 'DOCX_RECEIPT_MISMATCH'); };
       if (!target || !body || !record(body.revision) || !Array.isArray(body.versions)) return invalid();
       const detail = body as unknown as RevisionDetail;
@@ -1206,15 +1208,16 @@ export class AccessLayer {
           || detail.revision.title !== input.title || detail.revision.summary !== (input.summary ?? '')
           || result.docxOperation?.kind !== 'import' || result.docxOperation.inputSha256 !== docxOperationHash(input)) return invalid();
       } else {
-        const batch = path.endsWith('/replace-batch'), replacing = batch || path.endsWith('/replace');
-        const input = batch ? parseDocxReplaceBatchInput(mutationInput) : replacing ? parseDocxReplaceInput(mutationInput) : parseDocxReimportInput(mutationInput);
+        const resolving = path.endsWith('/resolve'), batch = path.endsWith('/replace-batch'), replacing = batch || path.endsWith('/replace');
+        const input = resolving ? parseDocxResolveInput(mutationInput) : batch ? parseDocxReplaceBatchInput(mutationInput) : replacing ? parseDocxReplaceInput(mutationInput) : parseDocxReimportInput(mutationInput);
         const original = detail.versions.find(item => item.id === input.expectedVersionId);
         if (!original?.docx || original.number !== input.expectedVersion || original.contentHash !== input.expectedContentHash) return invalid();
         const unchanged = replacing && 'quote' in input && input.quote === input.replacement;
         if (result.number !== input.expectedVersion + (unchanged ? 0 : 1)) return invalid();
         if (unchanged ? result.id !== original.id : result.attribution?.principalId !== this.principal || result.message !== input.message) return invalid();
-        if (!unchanged && (result.docxOperation?.kind !== (batch ? 'replace-batch' : replacing ? 'replace' : 'reimport') || result.docxOperation.inputSha256 !== docxOperationHash(input))) return invalid();
+        if (!unchanged && (result.docxOperation?.kind !== (resolving ? 'resolve' : batch ? 'replace-batch' : replacing ? 'replace' : 'reimport') || result.docxOperation.inputSha256 !== docxOperationHash(input))) return invalid();
         if (!isDeepStrictEqual(result.docx.sourceFile, 'sourceFile' in input ? input.sourceFile : original.docx.sourceFile)) return invalid();
+        if ('decisions' in input) { try { validateDocxResolution(original.docx.projection, input.decisions); this.store.docxBytes(target.id, original.id); this.store.docxBytes(target.id, result.id); } catch { return invalid(); } }
         if ('replacements' in input) { try { validateDocxBatch(original.docx.projection, input.replacements); } catch { return invalid(); } }
         if ('rangeId' in input) {
           const range = original.docx.projection.editableRanges.find(item => item.id === input.rangeId);
