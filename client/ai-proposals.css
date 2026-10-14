@@ -1,0 +1,18 @@
+.ai-proposals { min-width: 0; }
+.ai-proposals p, .ai-proposals li, .ai-proposals h4 { overflow-wrap: anywhere; }
+.ai-proposals .card-body { min-width: 0; }
+.ai-proposal-history, .ai-proposal-inspection { display: grid; gap: 14px; min-width: 0; border-top: 1px solid var(--border); padding-top: 16px; }
+.ai-proposal-history > article { border: 1px solid var(--border); border-radius: 5px; padding: 12px; min-width: 0; }
+.ai-proposal-history article > div { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ai-proposal-history p { margin: 8px 0; }
+.ai-proposal-instruction { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-proposal-composer fieldset ul { padding-left: 22px; margin: 0; }
+.ai-proposals .automation-evidence { max-height: none; }
+.ai-proposals .suggestion-original, .ai-proposals .suggestion-replacement { overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 600px) {
+  .ai-proposals .button { min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
+  .ai-proposals .automation-row-heading { align-items: flex-start; flex-wrap: wrap; }
+  .ai-proposals .automation-properties { grid-template-columns: 1fr; gap: 4px; }
+  .ai-proposals .automation-properties dd { margin-bottom: 8px; }
+  .ai-proposal-composer .automation-actions > button { width: 100%; }
+}

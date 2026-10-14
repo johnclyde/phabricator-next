@@ -62,6 +62,52 @@ test('lost transcript receipts require an identical explicit retry and survive o
   expect((await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`)).versions).toHaveLength(2);
 });
 
+test('transcript recovery waits for reconnect authority before accepting an exact historical retry', async ({ page, context, request, baseURL }) => {
+  const before = await source(request, baseURL!, 'document'), id = before.revision.id;
+  const writes: { key: string | undefined; body: unknown }[] = []; let drop = true;
+  await context.route(`**/api/revisions/${id}/transcript-edits`, async route => {
+    writes.push({ key: route.request().headers()['idempotency-key'], body: route.request().postDataJSON() });
+    const response = await route.fetch();
+    if (drop) { drop = false; return route.abort('failed'); }
+    return route.fulfill({ response });
+  });
+  await page.goto(`./#${id}`); await seedTranscript(page, baseURL!); await choosePassage(page); await chooseTranscript(page);
+  await page.getByRole('button', { name: 'Preview transcript edit', exact: true }).click();
+  await page.getByRole('button', { name: 'Save transcript edit', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Unconfirmed transcript edit', exact: true })).toBeVisible();
+  await context.setOffline(true); await page.reload();
+  await page.getByRole('button', { name: 'Inspect Version 1 Transcript Edit', exact: true }).click();
+  const retry = page.getByRole('button', { name: 'Retry exact transcript edit', exact: true });
+  await expect(retry).toBeDisabled();
+  let releaseAuthority!: () => void, observedState!: () => void;
+  const authorityGate = new Promise<void>(resolve => { releaseAuthority = resolve; });
+  const stateStarted = new Promise<void>(resolve => { observedState = resolve; });
+  // Hold every epoch-bearing read so another panel cannot establish authority
+  // ahead of the workspace state response. Session identity can still reconnect.
+  await context.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === 'GET' && !path.endsWith('/api/session')) {
+      if (path.endsWith('/api/state')) observedState();
+      await authorityGate;
+    }
+    return route.fallback();
+  });
+  try {
+    await context.setOffline(false); await stateStarted;
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    expect(await page.evaluate(() => navigator.onLine)).toBe(true);
+    await expect(retry).toBeDisabled(); expect(writes).toHaveLength(1);
+    releaseAuthority();
+    await expect(page.getByLabel('Version to inspect', { exact: true }).locator('option[value="2"]')).toContainText('current');
+    await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1');
+    await expect(retry).toBeEnabled(); expect(writes).toHaveLength(1);
+    await retry.click();
+    await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('2');
+  } finally { releaseAuthority(); }
+  expect(writes).toHaveLength(2); expect(writes[1]).toEqual(writes[0]);
+  expect((await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`)).versions).toHaveLength(2);
+});
+
 test('a late transcript receipt cannot replace a later source selection or erase recovery', async ({ page, context, request, baseURL }) => {
   const before = await source(request, baseURL!), id = before.revision.id;
   let drop = true, release!: () => void, arrived!: () => void;

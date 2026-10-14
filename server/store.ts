@@ -1,3 +1,5 @@
+import { initializeAIProposals } from './ai-proposals.ts';
+import { docxBatchInputCanonical, validateDocxBatch, DOCX_BATCH_LIMITS, type DocxReplaceBatchInput } from '../shared/docx-batch.ts';
 import { initializeRevisionLanding } from './revision-landing.ts';
 import { initializeGitAutomation } from './git-automation.ts';
 import { initializeAudit } from './audit.ts';
@@ -141,10 +143,21 @@ export function parseDocxReplaceInput(input: unknown): DocxReplaceInput {
     || (data.end as number) - (data.start as number) !== quote.length) throw new HttpError(400, 'Choose an exact UTF-16 range and replacement.');
   return { ...docxPins(data), rangeId: string(data.rangeId, 'Range ID', 2000), start: data.start as number, end: data.end as number, quote, replacement, message: string(data.message, 'Message', 10_000) };
 }
+export function parseDocxReplaceBatchInput(input: unknown): DocxReplaceBatchInput {
+  const data = object(input, [...docxPinKeys, 'replacements', 'message']);
+  if (!Array.isArray(data.replacements) || !data.replacements.length || Buffer.byteLength(JSON.stringify(data.replacements)) > DOCX_BATCH_LIMITS.serializedBytes) throw new HttpError(400, 'Choose a complete Word edit batch within 512 KiB.');
+  const replacements = data.replacements.map(raw => {
+    const edit = object(raw, ['blockId', 'start', 'end', 'quote', 'replacement']);
+    const quote = string(edit.quote, 'Exact quote', DOCX_LIMITS.replacementLength, true), replacement = string(edit.replacement, 'Replacement', DOCX_LIMITS.replacementLength, true);
+    if (!Number.isSafeInteger(edit.start) || !Number.isSafeInteger(edit.end) || Number(edit.start) < 0 || Number(edit.end) <= Number(edit.start) || Number(edit.end) - Number(edit.start) !== quote.length || /[\uD800-\uDFFF]/u.test(quote) || /[\uD800-\uDFFF]/u.test(replacement)) throw new HttpError(400, 'Choose exact, complete Word passages.');
+    return { blockId: string(edit.blockId, 'Paragraph ID', 2000), start: Number(edit.start), end: Number(edit.end), quote, replacement };
+  });
+  return { ...docxPins(data), replacements, message: string(data.message, 'Message', 10_000) };
+}
 /** Immutable mutation provenance binds receipts to the complete normalized request. */
-export function docxOperationHash(input: DocxImportInput | DocxReimportInput | DocxReplaceInput): string {
-  const normalized = 'replacement' in input ? parseDocxReplaceInput(input) : 'expectedVersion' in input ? parseDocxReimportInput(input) : parseDocxImportInput(input);
-  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+export function docxOperationHash(input: DocxImportInput | DocxReimportInput | DocxReplaceInput | DocxReplaceBatchInput): string {
+  const normalized = 'replacements' in input ? parseDocxReplaceBatchInput(input) : 'replacement' in input ? parseDocxReplaceInput(input) : 'expectedVersion' in input ? parseDocxReimportInput(input) : parseDocxImportInput(input);
+  return createHash('sha256').update('replacements' in normalized ? docxBatchInputCanonical(normalized) : JSON.stringify(normalized)).digest('hex');
 }
 export function contentHash(sourceFiles: SourceFile[], assets: RevisionAsset[] = [], docx?: DocxSource): string {
   return createHash('sha256').update(sourceSnapshotCanonical(sourceFiles, assets, docx)).digest('hex');
@@ -236,7 +249,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 42) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 43) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -552,6 +565,10 @@ export class Store {
     }
     if (version < 42) {
       try { this.transaction(() => { initializeNotificationSuiteTargets(this.database); initializeSuiteNotifications(this.database); initializeSuiteImport(this.database); initializeMail(this.database); this.database.exec('PRAGMA user_version = 42'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 43) {
+      try { this.transaction(() => { initializeAIProposals(this.database); this.database.exec('PRAGMA user_version = 43'); }); }
       catch (error) { this.database.close(); throw error; }
     }
     this.revisionViews = new RevisionViewStore(this.database);
@@ -1667,6 +1684,23 @@ export class Store {
       revision.currentVersion++; revision.updatedAt = new Date().toISOString();
       this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'replace', inputSha256: docxOperationHash(data) });
       this.event(id, 'version_created', `Edited Word document as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor); this.notifyRevisionSource(id, 'source_updated', actor);
+      return this.detail(id);
+    });
+  }
+  /** Commit one complete package after every original passage has been verified. */
+  replaceDocxBatchVersion(id: string, input: DocxReplaceBatchInput, bytes: Uint8Array, projection: DocxProjection, attribution: ActorAttribution): RevisionDetail {
+    return this.discussionMutation(() => {
+      const data = parseDocxReplaceBatchInput(input), actor = this.docxActor(attribution), current = this.requireDocxVersion(id, data), original = current.docx!;
+      this.docxFile(original.sourceFile, false);
+      try { validateDocxBatch(original.projection, data.replacements); }
+      catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'The Word passages no longer match.', 'DOCX_RANGE_MISMATCH'); }
+      const source = this.docxSource(bytes, projection, original.fileName, original.sourceFile);
+      if (source.sha256 === original.sha256) throw docxMismatch();
+      const revision = this.get<Revision>('revision', id);
+      if (!Number.isSafeInteger(revision.currentVersion + 1)) throw new HttpError(409, 'The supported version limit was reached.');
+      revision.currentVersion++; revision.updatedAt = new Date().toISOString();
+      this.save('revision', revision); this.saveDocxVersion(revision, source, bytes, data.message, actor, { kind: 'replace-batch', inputSha256: docxOperationHash(data) });
+      this.event(id, 'version_created', `Edited ${data.replacements.length} Word passages as version ${revision.currentVersion}. Previous acceptance no longer applies.`, actor); this.notifyRevisionSource(id, 'source_updated', actor);
       return this.detail(id);
     });
   }

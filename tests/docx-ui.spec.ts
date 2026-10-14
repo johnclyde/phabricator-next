@@ -50,13 +50,19 @@ test.describe('Word startup authoring authority', () => {
   test.use({ serviceWorkers: 'block' });
   test('a tracked edit prepared before initial workspace state keeps the authorized document epoch', async ({ page, request, baseURL }) => {
     const created = await create(request, baseURL!), id = created.revision.id;
-    let release = () => {}; const held = new Promise<void>(resolve => { release = resolve; }); const pending: Promise<void>[] = [];
-    await page.route('**/api/state', route => { const operation = (async () => { const response = await route.fetch(); await held; await route.fulfill({ response }); })(); pending.push(operation); return operation; });
+    let release = () => {}, resumed = false; const held = new Promise<void>(resolve => { release = resolve; }); const pending: Promise<void>[] = [];
+    await page.route('**/api/state', route => {
+      if (resumed) return route.continue();
+      // Hold transport itself: fetching/fulfilling every subsequent refresh can
+      // leave late callbacks racing interceptor removal after the initial gate.
+      const operation = (async () => { await held; await route.continue(); })(); pending.push(operation); return operation;
+    });
+    const resume = async () => { resumed = true; release(); await Promise.all(pending); };
     try {
       await page.goto(`./#${id}`); await expect(page.getByLabel('Word document text')).toContainText('The original result is clear.'); await prepareEdit(page, 'A revision before the workspace list arrives.'); await expect(page.getByRole('button', { name: 'Save Tracked Edit', exact: true })).toBeEnabled(); await page.getByRole('button', { name: 'Save Tracked Edit', exact: true }).click();
       const saved = JSON.parse((await bytesDownload(page, 'Export Word Request')).toString()) as { body: { expectedAccessEpoch: number; expectedVersionId: string; expectedContentHash: string } };
-      expect(saved.body.expectedAccessEpoch).toBe(created.accessEpoch); expect(saved.body.expectedAccessEpoch).toBeGreaterThan(0); expect(saved.body.expectedVersionId).toBe(created.versions[0]!.id); expect(saved.body.expectedContentHash).toBe(created.versions[0]!.contentHash);
-      release(); await Promise.all(pending); await page.unrouteAll({ behavior: 'wait' }); await selectedVersion(page, 2); const after = await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`); expect(after.versions).toHaveLength(2); expect(after.versions[0]).toEqual(created.versions[0]);
-    } finally { release(); await Promise.all(pending); await page.unrouteAll({ behavior: 'wait' }); }
+      expect(pending.length).toBeGreaterThan(0); expect(saved.body.expectedAccessEpoch).toBe(created.accessEpoch); expect(saved.body.expectedAccessEpoch).toBeGreaterThan(0); expect(saved.body.expectedVersionId).toBe(created.versions[0]!.id); expect(saved.body.expectedContentHash).toBe(created.versions[0]!.contentHash);
+      await resume(); await selectedVersion(page, 2); const after = await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`); expect(after.versions).toHaveLength(2); expect(after.versions[0]).toEqual(created.versions[0]);
+    } finally { await resume(); await page.unrouteAll({ behavior: 'wait' }); }
   });
 });

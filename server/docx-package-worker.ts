@@ -7,6 +7,7 @@ import { ZipFile } from 'yazl';
 import { SaxesParser, type SaxesTagNS } from 'saxes';
 import { DOCX_LIMITS, type DocxBlock, type DocxProjection, type DocxReplacement, type DocxRun, type DocxTextRange } from '../shared/docx.ts';
 import { DOCX_DISCUSSION_LIMITS, type DocxPackageComment } from '../shared/docx-discussion.ts';
+import { validateDocxBatch, type DocxPassageReplacement } from '../shared/docx-batch.ts';
 
 const WORD = new Set(['http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'http://purl.oclc.org/ooxml/wordprocessingml/main']);
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -269,6 +270,19 @@ function commentId(value: string | undefined): string {
   const negative = normalized.startsWith('-'), magnitude = normalized.replace(/^[+-]/, '').replace(/^0+/, '') || '0';
   return negative && magnitude !== '0' ? `-${magnitude}` : magnitude;
 }
+/** Word IDs share ST_DecimalNumber lexical aliases, including +1 and whitespace. */
+function greatestRevisionId(parsed: Parsed): number {
+  let greatest = 0;
+  for (const part of parsed.parts.values()) for (const node of part.nodes) {
+    const value = attr(node, 'id'); if (value === undefined) continue;
+    let normalized: string; try { normalized = commentId(value); } catch { return fail('DOCX contains an invalid revision or object identifier.'); }
+    if (normalized.startsWith('-')) continue;
+    const numeric = Number(normalized);
+    if (!Number.isSafeInteger(numeric) || numeric > 2_147_483_640) fail('DOCX revision IDs exceed the supported edit range.');
+    greatest = Math.max(greatest, numeric);
+  }
+  return greatest;
+}
 function contentType(parsed: Parsed, name: string): string | undefined {
   const root = parsed.parts.get('[Content_Types].xml')!.root;
   const overrides = root.children.filter(node => node.local === 'Override' && partName(attr(node, 'PartName', false)!.slice(1)) === partName(name));
@@ -431,8 +445,10 @@ async function exportDiscussion(parsed: Parsed, input: DocxPackageComment[]): Pr
   return { bytes: output, projection: checked.projection };
 }
 
-export async function processDocx(bytes: Uint8Array, replacement?: DocxReplacement, attribution?: {author:string;date:string}, comments?: DocxPackageComment[]): Promise<{bytes:Uint8Array;projection:DocxProjection}> {
-  const parsed=build(await readZip(bytes)); if(comments!==undefined){if(replacement)fail('DOCX operations cannot be combined.');return exportDiscussion(parsed,comments);} if(!replacement)return {bytes,projection:parsed.projection};
+export async function processDocx(bytes: Uint8Array, replacement?: DocxReplacement, attribution?: {author:string;date:string}, comments?: DocxPackageComment[], replacements?: DocxPassageReplacement[]): Promise<{bytes:Uint8Array;projection:DocxProjection}> {
+  const parsed=build(await readZip(bytes));
+  if (replacements !== undefined) { if (replacement || comments !== undefined) fail('DOCX operations cannot be combined.'); return replaceBatch(parsed, replacements, attribution); }
+  if(comments!==undefined){if(replacement)fail('DOCX operations cannot be combined.');return exportDiscussion(parsed,comments);} if(!replacement)return {bytes,projection:parsed.projection};
   if(!replacement||typeof replacement.rangeId!=='string'||typeof replacement.quote!=='string'||typeof replacement.replacement!=='string'||!Number.isSafeInteger(replacement.start)||!Number.isSafeInteger(replacement.end))fail('Choose an exact editable DOCX text range.');
   const range=parsed.ranges.get(replacement.rangeId); if(!range)fail('That DOCX text range is unsupported or no longer matches the source.');
   const {part,run,text}=range!; const {start,end,quote}=replacement;
@@ -440,7 +456,7 @@ export async function processDocx(bytes: Uint8Array, replacement?: DocxReplaceme
   if(quote===replacement.replacement)return {bytes,projection:parsed.projection};
   if(parsed.signed)fail('Signed DOCX packages cannot be edited without invalidating their signatures.');
   if(!attribution||typeof attribution.author!=='string'||!attribution.author.trim()||attribution.author.length>255||!validText(attribution.author)||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(attribution.date)||!Number.isFinite(Date.parse(attribution.date)))fail('Tracked replacement requires valid author and UTC date metadata.');
-  let max=0; for(const p of parsed.parts.values())for(const n of p.nodes){const value=attr(n,'id');if(value&&/^\d+$/.test(value)){const numeric=Number(value);if(!Number.isSafeInteger(numeric)||numeric>2_147_483_640)fail('DOCX revision IDs exceed the supported edit range.');max=Math.max(max,numeric);}}
+  const max = greatestRevisionId(parsed);
   let prefix='docxEdit';while(part.text.includes(`${prefix}:`)||part.text.includes(`xmlns:${prefix}`))prefix+='X';
   const rawOpen=part.text.slice(run.start,run.openEnd),rawClose=part.text.slice(run.closeStart,run.end),props=child(run,'rPr');
   const propsRaw=props?part.text.slice(props.start,props.end):'';
@@ -457,4 +473,71 @@ export async function processDocx(bytes: Uint8Array, replacement?: DocxReplaceme
   // The hash comparison deliberately covers all opaque and unsupported parts too.
   const after=new Map(checked.entries.map(e=>[e.name,e.bytes]));for(const entry of parsed.entries)if(entry.name!==part.name&&createHash('sha256').update(entry.bytes).digest('hex')!==createHash('sha256').update(after.get(entry.name)!).digest('hex'))fail('DOCX preservation verification failed.');
   return {bytes:output,projection:checked.projection};
+}
+
+async function replaceBatch(parsed: Parsed, replacements: DocxPassageReplacement[], attribution?: { author: string; date: string }): Promise<{ bytes: Uint8Array; projection: DocxProjection }> {
+  validateDocxBatch(parsed.projection, replacements);
+  if (parsed.signed) fail('Signed DOCX packages cannot be edited without invalidating their signatures.');
+  if (!attribution || typeof attribution.author !== 'string' || !attribution.author.trim() || attribution.author.length > 255 || !validText(attribution.author)
+    || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(attribution.date) || !Number.isFinite(Date.parse(attribution.date))) fail('Tracked replacement requires valid author and UTC date metadata.');
+  const part = parsed.parts.get(parsed.projection.mainPart)!;
+  const nodes = new Map(part.nodes.filter(node => isWord(node, 'p')).map(node => [id('block', part.name, node), node]));
+  const groups = new Map<string, DocxPassageReplacement[]>();
+  for (const edit of replacements) { const group = groups.get(edit.blockId) ?? []; group.push(edit); groups.set(edit.blockId, group); }
+  const paragraphs: { edits: DocxPassageReplacement[]; runs: { run: Node; text: Node; start: number; end: number }[] }[] = [];
+  // Validate every selected paragraph, including the last edit, before preparing XML.
+  for (const [blockId, edits] of groups) {
+    const paragraph = nodes.get(blockId);
+    if (!paragraph || !paragraph.parent || !isWord(paragraph.parent, 'body') || paragraph.text.trim() || unsafeProperties(paragraph)
+      || paragraph.children.some((node, index) => !isWord(node, 'r') && !(index === 0 && isWord(node, 'pPr')))) fail('Batch edits require ordinary main-document paragraphs without fields, notes, revisions, tables or complex markup.');
+    const runs: { run: Node; text: Node; start: number; end: number }[] = []; let offset = 0;
+    for (const run of paragraph.children.filter(node => isWord(node, 'r'))) {
+      const text = child(run, 't');
+      if (!text || !safeRun(part, run, text, paragraph) || !parsed.ranges.has(id('range', part.name, run))) fail('The complete selected paragraph must contain ordinary editable runs.');
+      runs.push({ run, text, start: offset, end: offset + text.text.length }); offset += text.text.length;
+    }
+    paragraphs.push({ edits: [...edits].sort((a, b) => a.start - b.start), runs });
+  }
+  let nextId = greatestRevisionId(parsed);
+  const prefix = freshPrefix([part.text], 'docxBatch');
+  const patches: { start: number; end: number; xml: string }[] = [];
+  for (const paragraph of paragraphs) {
+    let editIndex = 0;
+    for (const { run, text, start, end } of paragraph.runs) {
+      while (paragraph.edits[editIndex] && paragraph.edits[editIndex]!.end <= start) editIndex++;
+      const edits: DocxPassageReplacement[] = [];
+      for (let index = editIndex; index < paragraph.edits.length && paragraph.edits[index]!.start < end; index++) edits.push(paragraph.edits[index]!);
+      if (!edits.length) continue;
+      const props = child(run, 'rPr'), properties = props ? part.text.slice(props.start, props.end) : '';
+      const fragment = (value: string, deleted = false) => {
+        const name = deleted ? text.name.replace(/(?:^|:)t$/, match => match.startsWith(':') ? ':delText' : 'delText') : text.name;
+        let open = part.text.slice(text.start, text.openEnd).replace(/\s+xml:space\s*=\s*(?:"[^"]*"|'[^']*')/g, '').replace(/\s*\/?>$/, ' xml:space="preserve">');
+        if (deleted) open = `<${name}${open.slice(text.name.length + 1)}`;
+        return `${part.text.slice(run.start, run.openEnd)}${properties}${open}${escapeText(value)}</${name}>${part.text.slice(run.closeStart, run.end)}`;
+      };
+      const mark = (kind: 'ins' | 'del', value: string) => {
+        if (++nextId > 2_147_483_647) fail('DOCX revision IDs exceed the supported edit range.');
+        return `<${prefix}:${kind} xmlns:${prefix}="${run.uri}" ${prefix}:id="${nextId}" ${prefix}:author="${escapeAttribute(attribution.author)}" ${prefix}:date="${escapeAttribute(attribution.date)}">${fragment(value, kind === 'del')}</${prefix}:${kind}>`;
+      };
+      let cursor = 0, xml = '';
+      for (const edit of edits) {
+        const from = Math.max(start, edit.start) - start, to = Math.min(end, edit.end) - start;
+        if (from > cursor) xml += fragment(text.text.slice(cursor, from));
+        xml += mark('del', text.text.slice(from, to));
+        if (edit.start >= start && edit.start < end && edit.replacement) xml += mark('ins', edit.replacement);
+        cursor = to;
+      }
+      if (cursor < text.text.length) xml += fragment(text.text.slice(cursor));
+      patches.push({ start: run.start, end: run.end, xml });
+    }
+  }
+  let cursor = 0; const chunks: string[] = [];
+  for (const patch of patches.sort((a, b) => a.start - b.start)) { chunks.push(part.text.slice(cursor, patch.start), patch.xml); cursor = patch.end; }
+  chunks.push(part.text.slice(cursor));
+  const changed = encode(part, chunks.join(''));
+  if (changed.length > DOCX_LIMITS.xmlBytes) fail('Edited DOCX XML exceeds its part limit.');
+  const bytes = await writeZip(parsed.entries, part.name, changed), checked = build(await readZip(bytes));
+  const after = new Map(checked.entries.map(entry => [entry.name, entry.bytes]));
+  for (const entry of parsed.entries) if (entry.name !== part.name && !entry.bytes.equals(after.get(entry.name)!)) fail('DOCX preservation verification failed.');
+  return { bytes, projection: checked.projection };
 }

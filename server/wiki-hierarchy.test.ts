@@ -98,7 +98,7 @@ test('schema20 adds canonical locations only, preserves every prior row/schema, 
     store.database.exec('CREATE VIEW old_document_view AS SELECT id,data FROM entities WHERE kind=\'document\'; ALTER TABLE wiki_versions ADD COLUMN operator_note TEXT;');
     const schemas=store.database.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all() as {name:string;sql:string}[];
     const rows=new Map((store.database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as {name:string}[]).map(({name})=>[name,store.database.prepare(`SELECT rowid,* FROM ${name} ORDER BY rowid`).all()]));
-    store.close();store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,42);
+    store.close();store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,43);
     for(const schema of schemas)assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql,schema.sql,schema.name);
     for(const [name,before] of rows)assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM ${name} ORDER BY rowid`).all(),before,name);
     assert.equal(store.documentAtPath('missing'),null);assert.equal(store.documentAtPath(old.slug)?.id,old.id);assert.deepEqual(store.documentAncestry(old.slug).map(ref=>ref.document?.id??null),['W1',null]);

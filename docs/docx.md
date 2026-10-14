@@ -25,6 +25,45 @@ editor; unchanged text and run formatting are retained. Existing revisions,
 fields, hyperlinks, content controls, and other unsupported structures are not
 flattened to make them editable. Unsupported edits fail before saving.
 
+**Edit Multiple Passages** prepares an edit set across ordinary main-document
+paragraphs. Each passage can span multiple differently formatted runs within
+its paragraph. Select text or use the character controls, write its replacement,
+and choose **Add Passage to Edit Set**. The complete original and replacement
+for every selected passage remains available in the preview, including on
+mobile. **Save All … Tracked Edits** explicitly submits the entire set as one
+new immutable Word version. There is no fixed passage-count limit. The JSON
+selection is limited to 512 KiB, and each quotation and replacement to 20,000
+UTF-16 code units, alongside the package processing bounds below.
+
+Every source quotation is checked against the same original projection and
+package before any output is written. Overlapping selections, unchanged
+replacements, invalid Unicode boundaries and any unsupported final passage
+reject the whole set. A passage cannot cross a paragraph boundary; select
+separate passages in multiple paragraphs instead. Deletions retain the original
+formatting of each removed run. Replacement text inherits the first selected
+run's formatting; the operation does not guess formatting for newly written
+words. Empty replacement text is an explicit tracked deletion.
+
+The batch surface conservatively requires complete ordinary paragraphs directly
+inside the document body. Tables, note bodies/references, fields, bookmarks,
+Word comment anchors, hyperlinks, content controls and existing tracked changes
+in a selected paragraph are refused instead of flattened. Unsupported structure
+may only be visible to the original package validator, which rejects the
+complete request. Unrelated structures elsewhere remain untouched. A paragraph
+with a newly tracked edit consequently cannot take another batch edit until its
+changes are accepted outside this application and the resulting package is
+explicitly reimported. The existing single-run editor and endpoint retain their
+earlier supported scope.
+
+An edit-set draft pins the original version ID, content hash (including its
+projection), package digest and continuing source File identity. Moving to a
+newer head never relocates it. Offline drafts and uncertain requests remain
+available for export; reconnecting does not submit them. Exact retries retain
+the complete ordered selection, original access epoch and idempotency key.
+Recovery verifies the recorded operation digest and historical resulting
+version before clearing the matching request. A newer draft typed while a
+request is unresolved remains separate and is not erased by that receipt.
+
 Download selects one immutable version, verifies its byte length and SHA-256,
 and exports a DOCX. Import Next Version adds a complete replacement package and
 retains the earlier source and discussion. Application discussion is separate
@@ -146,7 +185,7 @@ does not provide DOCX interchange.
 ## Preservation contract
 
 - Import and unchanged download preserve the entire original ZIP byte-for-byte.
-- A supported edit rewrites one lexical XML run. XML outside that replacement
+- A supported edit rewrites only the affected lexical XML runs. XML outside those replacements
   remains byte-for-byte identical, including unfamiliar markup. Every untouched
   package entry's uncompressed bytes remain identical. ZIP compression metadata
   may change after an edit.
@@ -269,6 +308,7 @@ because it does not write workspace state.
 | Create a Word revision | `POST /api/revisions/docx` |
 | Import the next package | `POST /api/revisions/L1/docx/import` |
 | Apply a tracked replacement | `POST /api/revisions/L1/docx/replace` |
+| Apply one complete tracked edit set | `POST /api/revisions/L1/docx/replace-batch` |
 | Download exact version bytes | `GET /api/revisions/L1/docx/VERSION_ID/download` |
 | Create an exact Word passage thread | `POST /api/revisions/L1/comments` with `docxPassage` |
 | Prepare selected threads as Word comments | `POST /api/revisions/L1/docx/export-discussion` |
@@ -278,9 +318,19 @@ with private permissions. They never overwrite an existing file or follow a
 destination symlink. Retain the original request JSON and request ID for an
 uncertain-result retry; the CLI does not silently refresh old pins.
 
+The batch endpoint takes the same `expectedVersion`, `expectedVersionId`,
+`expectedContentHash`, `expectedAccessEpoch` and `message` pins, plus
+`replacements: [{ blockId, start, end, quote, replacement }, ...]`. `blockId`
+comes from the stored projection's main-document blocks. Its offsets refer to
+the complete paragraph text, in UTF-16 code units, rather than one run. Order
+is part of request identity; it is never silently reordered for replay. Batch
+processing and final commit both revalidate the original source and current
+authority. The browser supports this endpoint; `arc edit-docx` remains the
+single-run command.
+
 ## Remaining work
 
-D105 remains partial. General rich editing, cross-run replacements, paragraph or
+D105 remains partial. General rich editing, cross-paragraph replacements, paragraph or
 table restructuring, accepting/rejecting imported changes, editing imported Word
 comments, modern threaded-comment semantics, cross-run/note/field discussion
 anchors, cross-version mapping and complete page layout are not implemented.

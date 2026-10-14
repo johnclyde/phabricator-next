@@ -6,7 +6,8 @@ import type { AddressInfo } from 'node:net';
 import { createApp, type AppOptions } from './app.ts';
 import { createAuth } from './auth.ts';
 import { Store } from './store.ts';
-import { inspectDocx, replaceDocx } from './docx-package.ts';
+import { inspectDocx, replaceDocx, replaceDocxBatch } from './docx-package.ts';
+import { docxBatchParagraphs, docxBatchInputCanonical, type DocxReplaceBatchInput } from '../shared/docx-batch.ts';
 import type { FileRecord } from '../shared/files.ts';
 import type { DocxImportInput, DocxInspection, DocxReplaceInput } from '../shared/docx.ts';
 import type { RevisionDetail } from '../shared/types.ts';
@@ -186,4 +187,42 @@ test('application close awaits disconnected Word processing and its final author
     await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(closed, false, 'shutdown must retain the Store until processing settles');
     release(); await closing; await pending; assert.equal(closed, true);
   } finally { release(); await app.close(); }
+});
+
+function batchInput(detail: RevisionDetail, epoch: number): DocxReplaceBatchInput {
+  const version = head(detail), paragraphs = docxBatchParagraphs(version.docx!.projection).slice(0, 2); assert.equal(paragraphs.length, 2);
+  return { expectedVersion: version.number, expectedVersionId: version.id, expectedContentHash: version.contentHash, expectedAccessEpoch: epoch,
+    replacements: paragraphs.map((block, index) => ({ blockId: block.id, start: 0, end: block.text.length, quote: block.text, replacement: `Reviewed passage ${index + 1}.` })), message: 'Reviewed the complete Word edit set' };
+}
+test('Word batch API validates all original passages and records one exact historical operation receipt', async () => {
+  const app = await start();
+  try {
+    const file = await app.upload(), { detail } = await app.importDocument(file), id = detail.revision.id, original = head(detail), path = `/api/revisions/${id}/docx/replace-batch`, input = batchInput(detail, app.policies.epoch());
+    for (const [suffix, replacements] of [ ['bad-final', [input.replacements[0]!, { ...input.replacements[1]!, quote: 'x'.repeat(input.replacements[1]!.quote.length) }]], ['overlap', [input.replacements[0]!, input.replacements[0]!]], ['noop', [input.replacements[0]!, { ...input.replacements[1]!, replacement: input.replacements[1]!.quote }]] ] as const) {
+      const rejected = await app.request(path, 'POST', { ...input, replacements }, 'alice', suffix); assert.ok(rejected.status >= 400, JSON.stringify(rejected.body)); assert.equal(app.store.detail(id).versions.length, 1); assert.deepEqual(Buffer.from(app.store.docxBytes(id, original.id)), bytes);
+    }
+    const saved = await app.request<RevisionDetail>(path, 'POST', input, 'alice', 'batch-success'); assert.equal(saved.status, 201, JSON.stringify(saved.body)); assert.equal(saved.body.versions.length, 2);
+    const changed = head(saved.body); assert.equal(changed.docxOperation?.kind, 'replace-batch'); assert.equal(changed.docxOperation?.inputSha256, createHash('sha256').update(docxBatchInputCanonical(input)).digest('hex'));
+    assert.equal(changed.docx!.projection.changes.filter(change => change.author === 'Alice Reviewer' && change.kind === 'ins').length, 2);
+    assert.equal((await app.request(path, 'POST', input, 'alice', 'stale-batch')).status, 409);
+    assert.equal((await app.request(path, 'POST', { ...input, replacements: [...input.replacements].reverse() }, 'alice', 'batch-success')).status, 409);
+    const exported = await app.raw(`/api/revisions/${id}/docx/${changed.id}/download`), data = Buffer.from(await exported.arrayBuffer()); assert.equal(digest(data), changed.docx!.sha256);
+    const nextFile = await app.upload(data), next = await app.request<RevisionDetail>(`/api/revisions/${id}/docx/import`, 'POST', { expectedVersion: changed.number, expectedVersionId: changed.id, expectedContentHash: changed.contentHash, expectedAccessEpoch: app.policies.epoch(), sourceFile: { fileId: nextFile.id, sha256: nextFile.sha256, bytes: nextFile.bytes }, shareSource: false, message: 'Later import' }, 'alice', 'later-import'); assert.equal(next.status, 201, JSON.stringify(next.body));
+    const recovered = await app.request<RevisionDetail>(path, 'POST', input, 'aliceOther', 'batch-success'); assert.equal(recovered.status, 201, JSON.stringify(recovered.body)); assert.equal(recovered.body.revision.currentVersion, 2); assert.deepEqual(recovered.body.versions, saved.body.versions); assert.equal(app.store.detail(id).versions.length, 3);
+  } finally { await app.close(); }
+});
+
+test('Word batch API refuses source and version changes after asynchronous package processing', async () => {
+  for (const change of ['source-access', 'head'] as const) {
+    let entered!: () => void, release!: () => void; const starting = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const app = await start({ docxProcessor: { inspect: inspectDocx, replace: replaceDocx, replaceBatch: async (source, edits, actor, signal) => { const result = await replaceDocxBatch(source, edits, actor, signal); entered(); await gate; return result; } } });
+    try {
+      const file = await app.upload(); app.policy(file.id, { view: workspace }); const { detail } = await app.importDocument(file), id = detail.revision.id, input = batchInput(detail, app.policies.epoch()), path = `/api/revisions/${id}/docx/replace-batch`;
+      const pending = app.request(path, 'POST', input, 'bob', `inflight-${change}`); await starting;
+      if (change === 'source-access') app.policy(file.id, { view: members(app.alice.id) });
+      else { const result = await app.request<RevisionDetail>(`/api/revisions/${id}/docx/replace`, 'POST', app.replacement(detail), 'alice', 'concurrent-head'); assert.equal(result.status, 201, JSON.stringify(result.body)); }
+      release(); const response = await pending; assert.equal(response.status, change === 'source-access' ? 404 : 409, JSON.stringify(response.body));
+      assert.equal(app.store.detail(id).versions.length, change === 'source-access' ? 1 : 2); assert.equal(app.store.database.prepare("SELECT COUNT(*) AS n FROM idempotency WHERE key LIKE ?").get(`%:inflight-${change}`)?.n, 0);
+    } finally { release(); await app.close(); }
+  }
 });

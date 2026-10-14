@@ -78,6 +78,9 @@ function TranscriptEditPanel({ detail, version, target, online, canEdit, current
   const active = () => { try { client.assertActive(); return mounted.current && present.current && !client.unavailableObject(revisionId) && (!version.docx || !client.unavailableObject(version.docx.sourceFile.fileId)); } catch { return false; } };
   const authority = () => { const value = currentProps.current; return active() && value.canEdit && value.isSourceCurrent() && !client.draftIsHeld(key) && !client.draftIsHeld(requestKey); };
   const ready = () => { const value = currentProps.current; return authority() && value.current && value.online && value.accessEpoch !== null && value.accessEpoch === client.session?.accessEpoch && draftRef.current?.expectedAccessEpoch === value.accessEpoch; };
+  // Recovery may target an older head or permission epoch, but startup must
+  // establish current authority before capturing the receipt's lifetime.
+  const recoveryReady = () => { const value = currentProps.current; return authority() && value.online && value.accessEpoch !== null && value.accessEpoch >= 0 && value.accessEpoch === client.session?.accessEpoch; };
   const previewCurrent = () => Boolean(previewRef.current && previewSource.current === currentProps.current.sourceContext);
   const retire = () => { sequence.current++; previewRef.current = null; previewSource.current = null; if (mounted.current) setPreview(null); };
   const retainDraft = (value: TranscriptEditDraft, expected: unknown) => {
@@ -122,7 +125,7 @@ function TranscriptEditPanel({ detail, version, target, online, canEdit, current
     finally { busyRef.current = false; if (mounted.current) setBusy(''); }
   };
   const send = async (retry?: TranscriptEditRequest) => {
-    if (!authority() || !currentProps.current.online || busyRef.current) return;
+    if (!authority() || !currentProps.current.online || busyRef.current || (retry && !recoveryReady())) return;
     const input = retry?.body ?? previewRef.current;
     if (!input || (!retry && (!previewCurrent() || !ready() || pendingRaw !== null))) { setError('Prepare the current exact preview before saving.'); return; }
     const base = detail.versions.find(item => item.id === input.expectedVersionId && item.contentHash === input.expectedContentHash && item.number === input.expectedVersion);
@@ -135,7 +138,7 @@ function TranscriptEditPanel({ detail, version, target, online, canEdit, current
       const retained = await retainFileIntent(client, requestKey, intent);
       if (active()) { setPendingRaw(retained.intent); if (!retained.persisted) setPersisted(false); }
       if (!retained.accepted) throw new Error('Another unconfirmed transcript edit is already retained. Export your draft and recover that exact request first.');
-      if (!authority() || !currentProps.current.online || ticket !== sequence.current || (!retry && (!ready() || intent.body.expectedAccessEpoch !== client.session?.accessEpoch))) return;
+      if (!authority() || !currentProps.current.online || ticket !== sequence.current || (retry ? !recoveryReady() : !ready() || intent.body.expectedAccessEpoch !== client.session?.accessEpoch)) return;
       const response = await client.request<RevisionDetail>(`/api/revisions/${revisionId}/transcript-edits`, { method: 'POST', body: intent.body, id: intent.id }, intent.sourceFile ? [intent.sourceFile.fileId] : []);
       const created = await receiptVersion(response, intent, base); client.assertActive();
       const cleanupCurrent = () => authority() && ticket === sequence.current && operationEpoch === client.session?.accessEpoch;
@@ -187,7 +190,7 @@ function TranscriptEditPanel({ detail, version, target, online, canEdit, current
       {accessEpoch !== null && draft.expectedAccessEpoch !== accessEpoch && <div className="banner warning"><p>Editing permissions changed. This draft keeps its original source and replacement; review current permissions before preparing another preview.</p><button className="button" disabled={!authority() || !current || Boolean(busy || pendingRaw)} onClick={() => update({ ...draft, expectedAccessEpoch: accessEpoch })}>Review current edit permissions</button></div>}
       <div className="file-actions"><button className="button" disabled={!authority() || !current || !online || Boolean(busy || pendingRaw)} onClick={() => void prepare()}>Preview transcript edit</button><button className="button primary" disabled={!preview || !previewCurrent() || !ready() || Boolean(busy || pendingRaw)} onClick={() => void send()}>Save transcript edit</button><button className="button" onClick={() => { window.dispatchEvent(new Event('transcript-edit-navigation')); retire(); setNotice('Confirmation canceled. The draft was kept.'); }}>Cancel transcript edit confirmation</button></div><p className="small muted">Voice commands: preview transcript edit · read transcript edit · confirm transcript edit · cancel transcript edit. Only a current prepared preview can be confirmed.</p></>}
     {!current && <p className="banner warning">This draft belongs to a historical source. It cannot be saved onto a newer version; export it or select the current source and prepare another edit.</p>}{!online && <p className="info-strip">The draft is retained offline. Reconnect and preview and save explicitly. This edit never enters the automatic outbox.</p>}{!persisted && <p className="banner warning">This draft or request is only in this tab. Keep it open and export it.</p>}
-    {pendingRaw !== null && <section className="transcript-request" aria-label="Unconfirmed transcript edit"><h3>Unconfirmed transcript edit</h3><p>The server may already have saved this edit. Its request ID, source, replacement and provenance stay fixed. Reconnecting never retries it.</p>{!pending && <p className="banner warning">The retained request is malformed or unsupported. Export it before forgetting it.</p>}<div className="file-actions"><button className="button" disabled={!pending || !authority() || !online || Boolean(busy)} onClick={() => { if (pending) void send(pending); }}>Retry exact transcript edit</button><button className="button" onClick={() => exportValue(pendingRaw, 'request')}>Export transcript edit request</button><button className="button" disabled={Boolean(busy)} onClick={() => void discard(true)}>Forget transcript edit request</button></div></section>}
+    {pendingRaw !== null && <section className="transcript-request" aria-label="Unconfirmed transcript edit"><h3>Unconfirmed transcript edit</h3><p>The server may already have saved this edit. Its request ID, source, replacement and provenance stay fixed. Reconnecting never retries it.</p>{!pending && <p className="banner warning">The retained request is malformed or unsupported. Export it before forgetting it.</p>}<div className="file-actions"><button className="button" disabled={!pending || !recoveryReady() || Boolean(busy)} onClick={() => { if (pending) void send(pending); }}>Retry exact transcript edit</button><button className="button" onClick={() => exportValue(pendingRaw, 'request')}>Export transcript edit request</button><button className="button" disabled={Boolean(busy)} onClick={() => void discard(true)}>Forget transcript edit request</button></div></section>}
   </section>;
 }
 export function TranscriptEditProvenance({ version }: { version: RevisionVersion }) {

@@ -1,3 +1,4 @@
+import type { AIProposalGenerator } from '../server/ai-proposal-provider';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,6 +12,15 @@ import { createBinaryPushFixture } from '../tests/binary-push-fixture';
 import { createAuditFixture } from '../tests/audit-fixture';
 import { texRunnerFromEnvironment } from '../server/tex-runner';
 
+// Explicit synthetic adapter exercises interaction and retries, never model quality.
+const proposalFixture = process.env.E2E_AI_PROPOSALS_FIXTURE === '1';
+let proposalCalls = 0;
+const proposalProvider: AIProposalGenerator = async (input, source) => {
+  proposalCalls++;
+  const edits = input.instruction === 'No changes' ? [] : source.files.flatMap(file => [...file.content.matchAll(/rough/g)].map(match => ({ filePath: file.path, start: file.start + match.index!, end: file.start + match.index! + 5, quote: 'rough', replacement: 'clear', explanation: 'Test-only literal replacement; no model called.' })));
+  return { result: { summary: 'Synthetic proposal fixture.', limitations: 'No model called; this verifies interaction only.', edits }, providerResponseId: `fixture-call-${proposalCalls}`, responseModel: input.model };
+};
+const aiConfig = () => proposalFixture ? { configured: true, model: 'test-only-hosted-model', localConfigured: true, localModel: 'test-only-local-model' } : { configured: false, model: null, localConfigured: false, localModel: null };
 const directory = mkdtempSync(join(tmpdir(), 'phabricator-e2e-'));
 const gitFixture = await createGitFixture();
 const comparisonFixture = await createGitComparisonFixture(gitFixture);
@@ -29,7 +39,7 @@ mkdirSync(resolve('.data'), { recursive: true });
 writeFileSync(fixturePath, JSON.stringify({ audit, binaryPush, landingBranches, barePath: gitFixture.barePath, head: gitFixture.head, base: gitFixture.base, feature: gitFixture.feature, emptyCommit: gitFixture.emptyCommit, importCommit: gitFixture.importCommit, importNextCommit: gitFixture.importNextCommit, importEqualCommit: gitFixture.importEqualCommit, comparisonBase: comparisonFixture.base, comparisonTarget: comparisonFixture.target, blame: blameFixture }));
 const automation = process.env.E2E_AUTOMATION_FIXTURE === '1' ? { gitReceivers: { R1: ['local'] }, drydockBindings: [{ key: 'fixture-copy', worker: 'fixture-copy-worker', repositoryIds: ['R1'] }], drydockWorkers: { 'fixture-copy-worker': ['local'] } } : undefined;
 const landingBindings = process.env.E2E_AUTOMATION_FIXTURE === '1' ? [{ key: 'fixture-land', repositoryId: 'R1', repositoryPath: gitFixture.barePath, branches: landingBranches }] : undefined;
-const app = createApp({ automation, landingBindings, transcriptionModelDirectory, paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+const app = createApp({ automation, landingBindings, transcriptionModelDirectory, paperRunner, databasePath: join(directory, 'workspace.sqlite'), gitRepositories: { R1: gitFixture.barePath }, port: 4311, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: aiConfig, ...(proposalFixture ? { aiProposalProvider: proposalProvider } : {}) });
 if (process.env.E2E_FINDING_FIXTURE === '1') {
   // Stored test evidence verifies presentation only. No adapter or model is run.
   const author = { principalId: `local:${app.auth.workspaceId}`, displayName: 'Test fixture', credentialId: null, requestId: 'finding-provenance-fixture' };
@@ -60,7 +70,7 @@ const passwordStore = createStore({ path: join(directory, 'password-workspace.sq
 const provisioner = createAuth({ database: passwordStore.database, mode: 'local', basePath: process.env.APP_BASE_PATH ?? '/', provisioning: true });
 for (const account of authAccounts) await provisioner.createAccount(account);
 passwordStore.createRepository({ name: 'Fixture repository', description: 'Disposable committed source for browser verification.', remoteUrl: 'https://example.invalid/fixture.git', defaultBranch: 'main' });
-const passwordApp = createApp({ transcriptionModelDirectory, paperRunner, store: passwordStore, gitRepositories: { R1: gitFixture.barePath }, authMode: 'password', seed: false, port: 4312, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: () => ({ configured: false, model: null, localConfigured: false, localModel: null }) });
+const passwordApp = createApp({ transcriptionModelDirectory, paperRunner, store: passwordStore, gitRepositories: { R1: gitFixture.barePath }, authMode: 'password', seed: false, port: 4312, basePath: process.env.APP_BASE_PATH, distPath: process.env.E2E_DIST_PATH, aiConfiguration: aiConfig, ...(proposalFixture ? { aiProposalProvider: proposalProvider } : {}) });
 app.server.listen(4311, '127.0.0.1');
 passwordApp.server.listen(4312, '127.0.0.1');
 let closing = false;

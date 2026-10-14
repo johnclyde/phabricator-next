@@ -1,3 +1,5 @@
+import { AIProposalService } from './ai-proposals.ts';
+import type { AIProposalGenerator } from './ai-proposal-provider.ts';
 import { LandingService } from './landing.ts';
 import { SuiteService } from './suite.ts';
 import { SuiteNotifications } from './suite-notifications.ts';
@@ -24,8 +26,8 @@ import type { AuthContext, AuthMode, AuthScope } from '../shared/auth.ts';
 import type { WorkboardQuery } from '../shared/workboards.ts';
 import { createAuth, type Auth } from './auth.ts';
 import { aiConfiguration, analyzeWithAI } from './ai.ts';
-import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, transcriptEditInput, transcriptDocxReplacement, type MutationResponse, type Store } from './store.ts';
-import { exportDocxDiscussion, inspectDocx, replaceDocx } from './docx-package.ts';
+import { createStore, gitImportInput, gitVersionImportInput, parseDocxImportInput, parseDocxReimportInput, parseDocxReplaceInput, parseDocxReplaceBatchInput, transcriptEditInput, transcriptDocxReplacement, type MutationResponse, type Store } from './store.ts';
+import { exportDocxDiscussion, inspectDocx, replaceDocx, replaceDocxBatch } from './docx-package.ts';
 import { DOCX_LIMITS, type DocxFileIdentity } from '../shared/docx.ts';
 import { docxDiscussionFilename, type DocxDiscussionExport } from '../shared/docx-discussion.ts';
 import type { GitImportSnapshot } from '../shared/repositories.ts';
@@ -79,7 +81,8 @@ export interface AppOptions {
   gitRepositories?: Readonly<Record<string, string>>;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
-  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; exportDiscussion?: typeof exportDocxDiscussion };
+  docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; replaceBatch?: typeof replaceDocxBatch; exportDiscussion?: typeof exportDocxDiscussion };
+  aiProposalProvider?: AIProposalGenerator;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
@@ -222,6 +225,11 @@ export function createApp(options: AppOptions = {}): App {
   const landing = new LandingService(store, auth, policies, automation, options.landingBindings);
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
+  const aiProposals = new AIProposalService(store, { configuration: () => { const config = ai(); return { ...config, localConfigured: config.localConfigured ?? false, localModel: config.localModel ?? null }; }, provider: options.aiProposalProvider, authorize: (actor, id, action) => {
+    auth.revalidate(actor, action === 'read' ? 'read' : 'write');
+    if (action.startsWith('generate:')) auth.revalidate(actor, action === 'generate:openai' ? 'review:hosted' : 'review:local');
+    new AccessLayer(store, auth, policies, actor).require(id, action === 'read' ? 'view' : action === 'apply' ? 'edit' : 'interact');
+  } });
   const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null);
   paperBuilds.start();
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
@@ -347,6 +355,13 @@ export function createApp(options: AppOptions = {}): App {
   }
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
+    const aiProposal = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/ai-proposals(?:\/([^/]+)\/apply)?$/.exec(path) : null;
+    if (aiProposal) {
+      if (closing) throw new HttpError(503, 'The application is shutting down.');
+      const value = aiProposal[2] ? aiProposals.apply(aiProposal[1]!, aiProposal[2], input, rawKey, context)
+        : await trackDocxWork(aiProposals.generate(aiProposal[1]!, input, rawKey, context, signal));
+      return { status: 200, body: value };
+    }
     if (method === 'POST' && path === '/api/mail/preferences') return mail.mutate(input, rawKey, context);
     if (method === 'POST' && path === '/api/suite-import/preview') return { status: 200, body: suiteImports.preview(input, context) };
     if (method === 'POST' && path === '/api/suite-import/apply') return suiteImports.apply(input, rawKey, context);
@@ -549,7 +564,7 @@ export function createApp(options: AppOptions = {}): App {
     const importMatch = method === 'POST' ? /^\/api\/repositories\/(R\d+)\/import-revision$/.exec(path) : null;
     const versionImportMatch = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/import-git$/.exec(path) : null;
     const docxCreate = method === 'POST' && path === '/api/revisions/docx';
-    const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace)$/.exec(path) : null;
+    const docxWrite = method === 'POST' ? /^\/api\/revisions\/([DPL]\d+)\/docx\/(import|replace|replace-batch)$/.exec(path) : null;
     const transcriptEdit = method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/transcript-edits$/.exec(path) : null;
     if ((docxCreate || docxWrite || transcriptEdit) && closing) throw new HttpError(503, 'The application is shutting down.', 'DOCX_UNAVAILABLE');
     if ((docxCreate || docxWrite) && !rawKey) throw new HttpError(400, 'Word document mutations require an Idempotency-Key.');
@@ -623,6 +638,14 @@ export function createApp(options: AppOptions = {}): App {
         const requireEpoch = (epoch: number) => {
           if (epoch !== policies.epoch()) throw new HttpError(409, 'Access changed since this document inspection. Reload before saving.', 'ACCESS_EPOCH_CHANGED');
         };
+        if (docxWrite?.[2] === 'replace-batch') {
+          const id = docxWrite[1]!, data = parseDocxReplaceBatchInput(input);
+          const original = store.read(() => { authorize(); const version = store.requireDocxVersion(id, data); return store.docxBytes(id, version.id); });
+          let edited: Awaited<ReturnType<typeof replaceDocxBatch>>;
+          try { edited = await (options.docxProcessor?.replaceBatch ?? replaceDocxBatch)(original, data.replacements, { author: attribution.displayName, date: new Date().toISOString() }, signal); }
+          catch (error) { store.read(authorize); throw error; }
+          return store.mutate(key, fingerprint, () => ({ status: 201, body: store.replaceDocxBatchVersion(id, data, edited.bytes, edited.projection, attribution) }), authorize, present);
+        }
         if (docxWrite?.[2] === 'replace') {
           const id = docxWrite[1]!; const data = parseDocxReplaceInput(input);
           const original = store.read(() => { authorize(); const version = store.requireDocxVersion(id, data); return store.docxBytes(id, version.id); });
@@ -928,6 +951,12 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, bootstrap.session); return;
       }
       if (req.method === 'GET') {
+        const aiProposal = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/ai-proposals(?:\/([^/]+))?$/.exec(path);
+        if (aiProposal) {
+          if (aiProposal[2] ? !!url.search : [...url.searchParams.keys()].some(key => !['before', 'limit'].includes(key) || url.searchParams.getAll(key).length !== 1)) throw new HttpError(400, 'Invalid private proposal query.');
+          const value = aiProposal[2] ? aiProposals.detail(aiProposal[1]!, aiProposal[2], context) : aiProposals.list(aiProposal[1]!, context, { ...(url.searchParams.has('before') ? { before: url.searchParams.get('before')! } : {}), ...(url.searchParams.has('limit') ? { limit: Number(url.searchParams.get('limit')) } : {}) });
+          send(res, 200, value); return;
+        }
         const revisionLanding = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/landings$/.exec(path);
         if (revisionLanding) {
           store.read(() => { auth.revalidate(context, 'read'); new AccessLayer(store, auth, policies, context).require(revisionLanding[1]!); });
@@ -1419,7 +1448,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive' || path === '/api/suite-import/preview' || path === '/api/suite-import/apply') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
+      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/ai-proposals$/.test(path) || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
