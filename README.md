@@ -7,6 +7,8 @@ A working, local-first foundation for a modern Phabricator. The familiar interfa
 
 This is a new implementation in **strict TypeScript**, with React, a Node.js server, SQLite, and an initial `arc` CLI. It is an early application with local and password-authenticated shared workspaces, **not full Phabricator parity**. The public source is licensed under **Apache 2.0**. The historical Phabricator, Arcanist, and libphutil sources can be downloaded separately for research; they are not runtime dependencies and their PHP is not executed.
 
+Workspace [search and saved queries](docs/search.md), [custom dashboards](docs/dashboards.md), and [configurable Maniphest workflows](docs/tasks.md) provide shared coordination tools. Hosted operators can designate task configuration administrators with `APP_MANIPHEST_ADMIN_PRINCIPAL_IDS`; ordinary workspace access does not grant configuration rights.
+
 ## Run
 
 Requires Node **22.13 or newer** and npm. This milestone uses Node's built-in SQLite module, which is experimental in Node 22 and emits a warning.

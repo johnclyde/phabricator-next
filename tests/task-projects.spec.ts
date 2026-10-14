@@ -179,7 +179,7 @@ test('legacy mixed project field drafts are recovered whole while a title-only d
   await expect(page.getByLabel('Task title', { exact: true })).toHaveValue('Title-only recovery remains editable');
   const saved = page.waitForResponse(response => response.url().endsWith(`/api/tasks/${other.id}`) && response.request().method() === 'PATCH');
   await page.getByRole('button', { name: 'Save Task', exact: true }).click();
-  expect((await saved).request().postDataJSON()).toEqual({ title: 'Title-only recovery remains editable', expectedVersion: 1 });
+  expect((await saved).request().postDataJSON()).toEqual({ title: 'Title-only recovery remains editable', expectedVersion: 1, expectedConfigVersion: (await api<AppState>(page, '/state')).taskConfig!.version });
   expect(new Set((await api<TaskDetail>(page, `/tasks/${other.id}`)).task.projectIds)).toEqual(new Set([a.id, b.id]));
   expect((await api<TaskDetail>(page, `/tasks/${task.id}`)).task.title).toBe(task.title);
 });

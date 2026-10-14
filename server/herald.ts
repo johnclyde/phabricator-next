@@ -5,7 +5,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { HERALD_CONTENT_TYPES, evaluateHeraldRules, parseHeraldRuleInput, type HeraldAction, type HeraldActionResult, type HeraldContentType, type HeraldRule, type HeraldRuleInput, type HeraldRuleState, type HeraldRuleVersion, type HeraldSnapshot, type HeraldTranscript } from '../shared/herald.ts';
 import { HttpError } from './validation.ts';
 
-export interface HeraldAuthority { canManageGlobal: (actorId: string) => boolean; canEditObject: (actorId: string, objectId: string) => boolean; isEnabledPrincipal: (actorId: string) => boolean }
+export interface HeraldAuthority { canManageGlobal: (actorId: string) => boolean; canEditObject: (actorId: string, objectId: string) => boolean; isEnabledPrincipal: (actorId: string) => boolean; validateTaskAction?: (action: HeraldAction) => void }
 export interface HeraldHooks {
   canEvaluate: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean;
   canReadGitReview?: (rule: HeraldRule, snapshot: HeraldSnapshot) => boolean;
@@ -83,6 +83,7 @@ export class HeraldStore {
     const data = parse(input); validatePatterns(data);
     return scope(this.database, () => {
       this.authorize({ ...data, authorId: actorId }, actorId, authority);
+      data.actions.forEach(action => authority.validateTaskAction?.(action));
       const number = (this.database.prepare("UPDATE herald_meta SET value=value+1 WHERE name='rule' RETURNING value").get() as { value: number }).value;
       if (!Number.isSafeInteger(number) || number > 999_999_999_999_999) throw new HttpError(422, 'Herald rule identities are exhausted.');
       const now = new Date().toISOString(), rule: HeraldRule = { ...data, id: `H${number}`, version: 1, authorId: actorId, createdAt: now, updatedAt: now };
@@ -95,6 +96,7 @@ export class HeraldStore {
     const data = parse(input); validatePatterns(data); if (!natural(expectedVersion) || expectedVersion < 1) throw new HttpError(400, 'Choose the exact rule version.');
     return scope(this.database, () => {
       const current = this.get(id); this.authorize(current, actorId, authority);
+      data.actions.forEach(action => authority.validateTaskAction?.(action));
       if (current.version !== expectedVersion) throw new HttpError(409, 'Herald rule changed. Reload before saving.', 'HERALD_CHANGED');
       if (current.contentType !== data.contentType || current.ruleType !== data.ruleType || current.objectId !== data.objectId) throw new HttpError(400, 'Rule content type, type, and scope are immutable. Create another rule.');
       const { id: _id, version: _version, authorId: _author, createdAt: _created, updatedAt: _updated, ...oldInput } = current;

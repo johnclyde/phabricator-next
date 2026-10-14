@@ -126,7 +126,7 @@ test('schema36 adds private views while preserving every schema35 row and prior 
     store.createRevision({ title: 'Original paper', testPlan: 'Preserve it.', kind: 'paper', files: [{ path: 'paper.tex', content: 'Exact historical content.\n' }] });
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('old', 'old-proof', 200, '{"unchanged":true}', '2026-01-01');
     removeViews(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 43);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 44);
     const after = snapshot(store.database);
     for (const entry of before.schema) assert.deepEqual(after.schema.find(row => row.name === entry.name), entry);
     for (const [table, rows] of Object.entries(before.rows)) assert.deepEqual(after.rows[table], rows, table);
@@ -142,7 +142,7 @@ test('schema36 collisions roll back without changing schema35 and future schemas
     const before = snapshot(store.database); store.close();
     assert.throws(() => new Store({ path }), /Unexpected revision_view_operations schema/);
     let db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 35); assert.deepEqual(snapshot(db), before);
-    db.exec('PRAGMA user_version=44'); db.close(); assert.throws(() => new Store({ path }), /newer than/);
-    db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 44); assert.deepEqual(snapshot(db), before); db.close();
+    db.exec('PRAGMA user_version=45'); db.close(); assert.throws(() => new Store({ path }), /newer than/);
+    db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 45); assert.deepEqual(snapshot(db), before); db.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

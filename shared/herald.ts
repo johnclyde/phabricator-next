@@ -141,8 +141,8 @@ export function parseHeraldAction(input: unknown, contentType: HeraldContentType
   exact(input, ['type', 'value']);
   if (type === 'assign') return { type, value: input.value === null ? null : text(input.value, 'Assignee', 200) };
   const value = text(input.value, 'Action value', type === 'comment' || type === 'block-push' ? 10_000 : 200);
-  if (type === 'task-status' && !['open', 'in_progress', 'resolved'].includes(value)) throw new Error('Choose open, in_progress, or resolved; duplicate status requires a merge.');
-  if (type === 'task-priority' && !['low', 'normal', 'high', 'urgent'].includes(value)) throw new Error('Choose a valid task priority.');
+  if (type === 'task-status' && (!/^[a-z][a-z0-9_]*$/.test(value) || value === 'duplicate')) throw new Error('Choose a configured task status; duplicate status requires a merge.');
+  if (type === 'task-priority' && !/^[a-z][a-z0-9_]*$/.test(value)) throw new Error('Choose a valid task priority key.');
   return { type, value } as HeraldAction;
 }
 export function parseHeraldRuleInput(input: unknown): HeraldRuleInput {

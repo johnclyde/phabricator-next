@@ -1,3 +1,4 @@
+import type { ManiphestConfig, TaskCustomValue } from './maniphest';
 import type { MentionProof } from './mentions';
 import type { RevisionActiveSnapshot } from './revision-active';
 import type { TranscriptSourceEdit } from './transcript-edit';
@@ -23,14 +24,15 @@ export type { Project, ProjectKind, ProjectMembershipMode, ProjectMembershipStat
 export type RevisionKind = 'code' | 'paper' | 'document';
 import type { RevisionStatus } from './revision-status';
 export type { RevisionStatus } from './revision-status';
-export type TaskStatus = 'open' | 'in_progress' | 'resolved' | 'duplicate';
+export type TaskStatus = string;
+export type TaskPriority = string;
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 export interface ActorAttribution { principalId: string; displayName: string; credentialId: string | null; requestId: string }
 export interface SourceFile { path: string; content: string }
 export interface Repository { id: string; name: string; remoteUrl: string; description: string; defaultBranch: string }
-export interface Task { id: string; title: string; description: string; status: TaskStatus; priority: Priority; projectIds: string[]; ownerId: string | null; authorId: string | null; version: number; createdAt: string; updatedAt: string }
+export interface Task { id: string; title: string; description: string; status: TaskStatus; statusClosed?: boolean; priority: TaskPriority; points?: number | null; customFields?: Record<string, TaskCustomValue>; projectIds: string[]; ownerId: string | null; authorId: string | null; version: number; createdAt: string; updatedAt: string }
 export type TaskSnapshot = Omit<Task, 'ownerId' | 'authorId' | 'projectIds'> & Partial<Pick<Task, 'ownerId' | 'authorId' | 'projectIds'>> & { projectId?: string | null };
-export type TaskField = 'title' | 'description' | 'status' | 'priority' | 'projectId' | 'ownerId';
+export type TaskField = 'title' | 'description' | 'status' | 'priority' | 'projectId' | 'ownerId' | 'points' | 'customFields';
 export interface TaskFieldChange { field: TaskField; oldValue: string | null; newValue: string | null; oldValueHidden?: boolean; newValueHidden?: boolean }
 export type TaskSubscriptionState = 'subscribed' | 'unsubscribed';
 export interface TaskSubscriptionStatus { taskId: string; principalId: string; state: TaskSubscriptionState | null; version: number; automatic: boolean; subscribed: boolean; updatedAt: string | null; accessEpoch?: number }
@@ -40,7 +42,7 @@ export interface TaskTransaction { mentions?: MentionProof; attribution?: ActorA
 export interface TaskAccessLostAcknowledgement { id: string; saved: true; accessLost: true; accessEpoch: number }
 export type TaskUpdateResult = Task | TaskAccessLostAcknowledgement;
 export interface TaskHistory { transactions: TaskTransaction[]; nextBefore: number | null; firstAvailableSequence: number | null; accessEpoch?: number }
-export type TaskReference = Pick<Task, 'id' | 'title' | 'status' | 'priority' | 'version'>;
+export type TaskReference = Pick<Task, 'id' | 'title' | 'status' | 'statusClosed' | 'priority' | 'version'>;
 export interface TaskDetail { task: Task; history: TaskHistory; dependsOn: TaskReference[]; blocks: TaskReference[]; duplicateOf: TaskReference[]; duplicates: TaskReference[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface WikiDocument { publication?:WikiPublication; location?: WikiLocation; id: string; title: string; slug: string; content: string; version: number; createdAt: string; updatedAt: string }
 export interface WikiVersion { accessEpoch?: number; location?: WikiLocation; move?: WikiMoveProvenance; attribution?: ActorAttribution; id: string; documentId: string; number: number; title: string; slug: string; content: string; author: string | null; createdAt: string; message: string; kind: 'create' | 'edit' | 'restore' | 'legacy' | 'move_to' | 'move_away' | 'draft' | 'delete'; restoredFrom: number | null }
@@ -63,7 +65,7 @@ export interface ReviewAnalysis { summary: string; findings: Finding[]; provider
 export interface ReviewRun extends ReviewAnalysis { attribution?: ActorAttribution; id: string; revisionId: string; versionId: string; contentHash: string; createdAt: string }
 export interface Activity { attribution?: ActorAttribution; id: string; objectId: string; actor: string; action: string; detail: string; createdAt: string }
 export type SpaceSummary = Space & { capabilities: EffectiveAccess };
-export interface AppState { revisionActive?: RevisionActiveSnapshot; followingRevisionIds?: string[]; revisionMetadataConfig?: { requireTestPlan: boolean; configId: string }; pastes?: PasteRecord[]; files?: FileRecord[]; projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
+export interface AppState { taskConfig?: ManiphestConfig; revisionActive?: RevisionActiveSnapshot; followingRevisionIds?: string[]; revisionMetadataConfig?: { requireTestPlan: boolean; configId: string }; pastes?: PasteRecord[]; files?: FileRecord[]; projects: Project[]; repositories: Repository[]; tasks: Task[]; documents: WikiDocument[]; revisions: Revision[]; activity: Activity[]; spaces: SpaceSummary[]; access: Record<string, ObjectAccess>; principals: PublicAccount[]; currentPrincipalId: string; followingTaskIds: string[]; joinedProjectIds: string[]; watchingProjectIds: string[]; accessEpoch: number; canCreate: boolean; ai: { configured: boolean; model: string | null; localConfigured?: boolean; localModel?: string | null }; mode: 'local-single-user' | 'authenticated-workspace' }
 export interface RevisionDetail { revision: Revision; versions: RevisionVersion[]; comments: ReviewComment[]; threads: ReviewThread[]; threadEvents: ReviewThreadEvent[]; suggestionApplications: SuggestionApplication[]; reviews: ReviewRun[]; activity: Activity[]; access?: ObjectAccess; accessEpoch?: number }
 export interface CreateRevisionInput { draft?: boolean; access?: NewObjectAccessInput; title: string; summary?: string; testPlan?: string; kind: RevisionKind; files: SourceFile[]; assets?: RevisionAsset[]; shareAssets?: boolean; expectedAccessEpoch?: number; repositoryId?: string | null; projectId?: string | null; projectIds?: string[] }
 export interface CreateVersionInput { files: SourceFile[]; assets?: RevisionAsset[]; message: string; expectedVersion: number; expectedVersionId?: string; expectedContentHash?: string; shareAssets?: boolean; expectedAccessEpoch?: number }
@@ -72,8 +74,8 @@ export interface CreateCommentInput { body: string; versionId: string; filePath?
 export interface CreateReplyInput { body: string; viewedVersionId: string }
 export interface UpdateThreadInput { status: 'open' | 'resolved'; expectedThreadVersion: number; versionId: string }
 export interface ApplySuggestionInput { expectedVersion: number; expectedVersionId: string; expectedContentHash: string; expectedThreadVersion: number }
-export interface TaskInput { title: string; description?: string; status?: TaskStatus; priority?: Priority; projectIds?: string[]; projectId?: string | null; ownerId?: string | null }
-export type UpdateTaskInput = Partial<Omit<TaskInput, 'projectId' | 'projectIds'>> & { expectedVersion: number };
+export interface TaskInput { title: string; description?: string; status?: TaskStatus; priority?: TaskPriority; points?: number | null; customFields?: Record<string, TaskCustomValue>; formKey?: string; expectedConfigVersion?: number; projectIds?: string[]; projectId?: string | null; ownerId?: string | null }
+export type UpdateTaskInput = Partial<Omit<TaskInput, 'projectId' | 'projectIds' | 'formKey'>> & { expectedVersion: number };
 export interface TaskProjectsInput { action: 'add' | 'remove' | 'set'; projectIds: string[]; expectedVersion: number }
 export interface TaskCommentInput { body: string }
 export interface TaskDependencyInput { taskId: string; action: 'add' | 'remove'; expectedVersion: number }

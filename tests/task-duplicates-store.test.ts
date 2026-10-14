@@ -33,7 +33,7 @@ test('single merge preserves both original tasks and evidence while recording im
     const comment = store.createTaskComment(source.id, { body: 'Original discussion remains here.' }, bob);
     const historical = raw(store, 'task_transactions'); const policies = raw(store, 'object_policies'); const epoch = raw(store, 'policy_meta');
     const result = merge(store, source.id, target.id); const destination = current(store, target.id);
-    assert.equal(result.task.id, source.id); assert.deepEqual(result.task, { ...source, status: 'duplicate', version: 2, updatedAt: result.task.updatedAt });
+    assert.equal(result.task.id, source.id); assert.deepEqual(result.task, { ...source, status: 'duplicate', statusClosed: true, version: 2, updatedAt: result.task.updatedAt });
     assert.deepEqual(destination, { ...target, version: 2, updatedAt: destination.updatedAt });
     assert.deepEqual(result.duplicateOf.map(item => item.id), [target.id]); assert.deepEqual(result.duplicates, []);
     assert.deepEqual(store.taskDetail(target.id).duplicates.map(item => item.id), [source.id]);
@@ -288,7 +288,7 @@ test('schema 9 adds empty duplicate storage while preserving actual schema 8 tas
   const directory = mkdtempSync(join(tmpdir(), 'phab-merge-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaEight(path); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 43);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 44);
     assert.deepEqual([...tables.filter(table => table !== 'task_duplicates'), 'versions'].map(table => raw(store, table)), old.rows);
     const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(current(store, old.task.id), { ...metadata, projectIds: [] }); assert.deepEqual(store.taskDetail(old.task.id).duplicateOf, []); assert.deepEqual(store.taskDetail('T2').duplicates, []);
     assert.deepEqual(raw(store, 'task_duplicates'), []);

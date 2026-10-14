@@ -1,3 +1,4 @@
+import { isTaskClosed } from '../shared/tasks.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { ActorAttribution, Project, Task } from '../shared/types.ts';
@@ -138,16 +139,16 @@ export class WorkboardStore {
     return result;
   }
   private visibleCards(cards: LayoutCard[], filter: WorkboardFilter, visibility: WorkboardVisibility): LayoutCard[] {
-    return cards.filter(({task})=>visibility.canViewTask(task.id) && (filter.status==='all'||task.status==='open'||task.status==='in_progress') && (filter.ownerId===undefined||task.ownerId===filter.ownerId));
+    return cards.filter(({task})=>visibility.canViewTask(task.id) && (filter.status==='all'||!isTaskClosed(task)) && (filter.ownerId===undefined||task.ownerId===filter.ownerId));
   }
   private page(id:string,columnId:string,cards:LayoutCard[],filter:WorkboardFilter,size:number,visibility:WorkboardVisibility,after?:string):WorkboardCardPage {
     let start=0; if(after!==undefined){ const index=cards.findIndex(card=>card.task.id===after); if(index<0)throw new HttpError(409,'The card page changed. Reload the workboard.');start=index+1; }
     const selected=cards.slice(start,start+size);
-    return {projectId:id,columnId,boardVersion:this.board(id).version,filter,cards:selected.map(({task})=>({id:task.id,title:task.title,status:task.status,priority:task.priority,ownerId:task.ownerId,projectIds:task.projectIds.filter(visibility.canViewProject),version:task.version,canMove:visibility.canEditTask(task.id)})),nextAfter:start+size<cards.length?selected.at(-1)!.task.id:null};
+    return {projectId:id,columnId,boardVersion:this.board(id).version,filter,cards:selected.map(({task})=>({id:task.id,title:task.title,status:task.status,statusClosed:isTaskClosed(task),points:task.points??null,priority:task.priority,ownerId:task.ownerId,projectIds:task.projectIds.filter(visibility.canViewProject),version:task.version,canMove:visibility.canEditTask(task.id)})),nextAfter:start+size<cards.length?selected.at(-1)!.task.id:null};
   }
   detail(id:string,query:WorkboardQuery={},visibility:WorkboardVisibility=unrestricted):WorkboardDetail {
     const project=this.options.project(id);const board=this.board(id);const {filter,limit:size}=this.query(query);const layout=board.enabled?this.layout(id):new Map<string,LayoutCard[]>();
-    return {project:reference(project),board,filter,canEdit:visibility.canEditProject(id),subprojects:children(this.database,id,'project').filter(node=>visibility.canViewProject(node.projectId)).map(node=>reference(this.options.project(node.projectId))),columns:board.enabled?this.columns(id).filter(column=>this.allowedColumn(column,visibility,filter.showHidden)).map(column=>{const cards=this.visibleCards(layout.get(column.id)??[],filter,visibility);return {...column,...(column.proxyProjectId?{proxyProject:reference(this.options.project(column.proxyProjectId))}:{}),cards:this.page(id,column.id,cards,filter,size,visibility),visibleCardCount:cards.length,overLimit:column.pointLimit!==null&&cards.length>column.pointLimit};}):[]};
+    return {project:reference(project),board,filter,canEdit:visibility.canEditProject(id),subprojects:children(this.database,id,'project').filter(node=>visibility.canViewProject(node.projectId)).map(node=>reference(this.options.project(node.projectId))),columns:board.enabled?this.columns(id).filter(column=>this.allowedColumn(column,visibility,filter.showHidden)).map(column=>{const cards=this.visibleCards(layout.get(column.id)??[],filter,visibility);return {...column,...(column.proxyProjectId?{proxyProject:reference(this.options.project(column.proxyProjectId))}:{}),cards:this.page(id,column.id,cards,filter,size,visibility),visibleCardCount:cards.length,visiblePointCount:cards.reduce((sum,card)=>sum+(card.task.points??0),0),overLimit:column.pointLimit!==null&&cards.length>column.pointLimit};}):[]};
   }
   cards(id:string,columnId:string,query:WorkboardCardsQuery,visibility:WorkboardVisibility=unrestricted):WorkboardCardPage {
     const column=this.column(id,columnId);const board=this.board(id);const {filter,limit:size}=this.query(query);

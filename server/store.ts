@@ -1,3 +1,6 @@
+import { initializeManiphest, readManiphestConfig, taskFormInput, taskManiphestValues, taskChanges } from './maniphest.ts';
+import { initializeSearch } from './search.ts';
+import { initializeDashboards } from './dashboards.ts';
 import { initializeAIProposals } from './ai-proposals.ts';
 import { docxBatchInputCanonical, validateDocxBatch, DOCX_BATCH_LIMITS, type DocxReplaceBatchInput } from '../shared/docx-batch.ts';
 import { docxResolutionInputCanonical, validateDocxResolution, DOCX_RESOLUTION_LIMITS, type DocxResolveInput } from '../shared/docx-resolution.ts';
@@ -260,7 +263,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 43) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 44) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -582,6 +585,10 @@ export class Store {
       try { this.transaction(() => { initializeAIProposals(this.database); this.database.exec('PRAGMA user_version = 43'); }); }
       catch (error) { this.database.close(); throw error; }
     }
+    if (version < 44) {
+      try { this.transaction(() => { initializeManiphest(this.database); initializeSearch(this.database); initializeDashboards(this.database); this.database.exec('PRAGMA user_version = 44'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
     this.revisionViews = new RevisionViewStore(this.database);
     this.objectSubscriptions = new ObjectSubscriptionStore(this.database);
     this.taskNotifications = new TaskNotificationsStore(this.database);
@@ -785,7 +792,7 @@ export class Store {
     return (rows as JsonRow[]).map(row => JSON.parse(row.data) as Activity).filter(item => !visible || visible(item.objectId)).slice(0, 200);
   }
   state(ai: AppState['ai'], mode: AppState['mode'] = 'local-single-user'): AppState {
-    return { revisionMetadataConfig: { ...this.revisionMetadata.config, configId: this.revisionMetadata.configId }, pastes: this.all('paste'), files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
+    return { taskConfig: readManiphestConfig(this.database), revisionMetadataConfig: { ...this.revisionMetadata.config, configId: this.revisionMetadata.configId }, pastes: this.all('paste'), files: this.all('file'), projects: this.all('project'), repositories: this.all('repository'), revisions: this.all('revision'), tasks: this.all('task'), documents: this.all('document'), activity: this.activities(), spaces: [], access: {}, principals: [], currentPrincipalId: '', followingTaskIds: [], joinedProjectIds: [], watchingProjectIds: [], accessEpoch: 0, canCreate: false, ai, mode };
   }
   createProject(input: unknown, attribution?: ActorAttribution): Project {
     return this.projects.create(input, attribution);
@@ -874,8 +881,9 @@ export class Store {
     });
   }
   private writeTask(input: unknown, current?: Task, attribution?: ActorAttribution): Task {
-    const fields: Exclude<TaskField, 'projectId'>[] = ['title', 'description', 'status', 'priority', 'ownerId'];
-    const data = object(input, current ? [...fields, 'expectedVersion', 'projectIds', 'projectId'] : [...fields, 'projectIds', 'projectId']);
+    const fields: Exclude<TaskField, 'projectId'>[] = ['title', 'description', 'status', 'priority', 'ownerId', 'points', 'customFields'];
+    const raw = object(input, current ? [...fields, 'expectedVersion', 'expectedConfigVersion', 'projectIds', 'projectId'] : [...fields, 'expectedConfigVersion', 'formKey', 'projectIds', 'projectId']);
+    const config = readManiphestConfig(this.database), data = taskFormInput(raw, config, current);
     if (current && ('projectId' in data || 'projectIds' in data)) throw new HttpError(400, 'Change project tags with the separate task projects action.');
     if (current && integer(data.expectedVersion, 'expectedVersion') !== current.version) throw new HttpError(409, 'This task changed. Reload before saving.');
     if (current && !fields.some(field => data[field] !== undefined)) throw new HttpError(400, 'At least one task field is required.');
@@ -883,13 +891,12 @@ export class Store {
     const values = {
       title: data.title === undefined && current ? current.title : string(data.title, 'Title'),
       description: data.description === undefined && current ? current.description : optionalString(data.description, 'Description'),
-      status: data.status === undefined ? current?.status ?? 'open' : data.status === 'duplicate' && current?.status === 'duplicate' ? 'duplicate' as const : choice(data.status, 'status', ['open', 'in_progress', 'resolved']),
-      priority: data.priority === undefined ? current?.priority ?? 'normal' : choice(data.priority, 'priority', ['low', 'normal', 'high', 'urgent']),
+      ...taskManiphestValues(data, current, config),
       ownerId: data.ownerId === undefined && current ? current.ownerId : data.ownerId === undefined || data.ownerId === null ? null : this.taskPrincipal(data.ownerId),
     };
     if (!current && 'projectIds' in data && 'projectId' in data) throw new HttpError(400, 'Use projectIds or the legacy projectId field, not both.');
     const projectIds = current?.projectIds ?? this.normalizeTaskProjectIds(this.taskProjectIds('projectIds' in data ? data.projectIds : data.projectId === undefined || data.projectId === null ? [] : [data.projectId]));
-    const changes: TaskFieldChange[] = current ? fields.filter(field => values[field] !== current[field]).map(field => ({ field, oldValue: current[field], newValue: values[field] })) : [];
+    const changes: TaskFieldChange[] = current ? taskChanges(current, values, fields) : [];
     if (current && changes.length === 0) return current;
     const task: Task = current ? { ...this.advanceTask(current, now), ...values } : { id: this.nextId('task', 'T'), ...values, projectIds, authorId: attribution ? this.taskPrincipal(attribution.principalId) : null, version: 1, createdAt: now, updatedAt: now };
     const parents = current && task.status !== current.status
@@ -1007,7 +1014,7 @@ export class Store {
         duplicates: 'SELECT e.data FROM task_duplicates d JOIN entities e ON e.id = d.source_id WHERE d.target_id = ? ORDER BY d.source_id',
       };
       const rows = this.database.prepare(queries[direction]).all(id);
-      return (rows as JsonRow[]).map(row => { const value = JSON.parse(row.data) as Task; return { id: value.id, title: value.title, status: value.status, priority: value.priority, version: value.version }; });
+      return (rows as JsonRow[]).map(row => { const value = JSON.parse(row.data) as Task; return { id: value.id, title: value.title, status: value.status, statusClosed: value.statusClosed, priority: value.priority, version: value.version }; });
     };
     return { task, history: this.taskHistory(id), dependsOn: references('depends_on'), blocks: references('blocks'), duplicateOf: references('duplicate_of'), duplicates: references('duplicates'), activity: this.activities(id) };
   }
@@ -1059,7 +1066,7 @@ export class Store {
     const target = advance(targetId);
     const parentEffects: { parentId: string; sourceId: string; oldStatus: Task['status'] }[] = [];
     for (const id of ids) {
-      const source = originals.get(id)!; advance(id).status = 'duplicate';
+      const source = originals.get(id)!; advance(id).status = 'duplicate'; advance(id).statusClosed = true;
       if (source.status === 'duplicate') continue;
       for (const parent of this.database.prepare('SELECT task_id FROM task_dependencies WHERE dependency_id = ? ORDER BY task_id').all(id) as { task_id: string }[]) {
         advance(parent.task_id);

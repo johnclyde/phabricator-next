@@ -8,10 +8,10 @@ export interface WorkboardColumn {
   isDefault: boolean; name: string; hidden: boolean; pointLimit: number | null;
 }
 export interface WorkboardColumnSnapshot { id: string; name: string; proxyProjectId: string | null }
-export type WorkboardCard = Pick<Task, 'id' | 'title' | 'status' | 'priority' | 'ownerId' | 'projectIds' | 'version'> & { canMove: boolean };
+export type WorkboardCard = Pick<Task, 'id' | 'title' | 'status' | 'priority' | 'ownerId' | 'projectIds' | 'version' | 'points' | 'statusClosed'> & { canMove: boolean };
 export interface WorkboardCardPage { projectId: string; columnId: string; boardVersion: number; filter: WorkboardFilter; cards: WorkboardCard[]; nextAfter: string | null; accessEpoch?: number }
 export interface WorkboardColumnView extends WorkboardColumn {
-  proxyProject?: ProjectReference; cards: WorkboardCardPage; visibleCardCount: number; overLimit: boolean;
+  proxyProject?: ProjectReference; cards: WorkboardCardPage; visibleCardCount: number; visiblePointCount?: number; overLimit: boolean;
 }
 export interface WorkboardFilter { status: 'open' | 'all'; ownerId?: string | null; showHidden: boolean }
 export interface WorkboardQuery extends Partial<WorkboardFilter> { limit?: number }

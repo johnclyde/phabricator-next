@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { taskPriorityRank } from '../shared/maniphest';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -425,12 +426,11 @@ async function main() {
     const ownerId = visibleOwnerId(owner, state);
     const projectIds = (values.project || []).map(value => visibleProjectId(value, state));
     const projectScopes = projectIds.map(id => new Set(visibleProjectScope(id, state.projects)));
-    const ranks = { urgent: 4, high: 3, normal: 2, low: 1 };
-    const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task.status) : !isTaskClosed(task.status)))
+    const tasks = state.tasks.filter(task => status === 'all' || (status === 'closed' ? isTaskClosed(task) : !isTaskClosed(task)))
       .filter(task => owner === 'all' || task.ownerId === ownerId)
       .filter(task => !values.subscribed || state.followingTaskIds.includes(task.id))
       .filter(task => projectScopes.every(scope => task.projectIds.some(id => scope.has(id))))
-      .sort((left, right) => (order === 'priority' ? ranks[right.priority] - ranks[left.priority] : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))
+      .sort((left, right) => (order === 'priority' ? taskPriorityRank(right.priority, state.taskConfig) - taskPriorityRank(left.priority, state.taskConfig) : (order === 'created' ? right.createdAt.localeCompare(left.createdAt) : right.updatedAt.localeCompare(left.updatedAt))) || left.id.localeCompare(right.id, 'en', { numeric: true }))
       .slice(0, limit);
     if (values.json) console.log(JSON.stringify(tasks, null, 2));
     else for (const task of tasks) console.log(`${task.id}\tv${task.version}\t${task.status}\t${task.priority}\t${task.title}`);

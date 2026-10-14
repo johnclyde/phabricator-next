@@ -74,8 +74,8 @@ test('dependency deltas update inverse references and both histories, while stat
   try {
     const parent = create(store, 'Submit the manuscript'); const other = create(store, 'Publish the data'); const child = create(store, 'Validate the figures');
     const added = depend(store, parent.id, child.id);
-    assert.equal(added.task.version, 2); assert.deepEqual(added.dependsOn, [{ id: child.id, title: child.title, status: 'open', priority: 'normal', version: 2 }]);
-    assert.deepEqual(store.taskDetail(child.id).blocks, [{ id: parent.id, title: parent.title, status: 'open', priority: 'normal', version: 2 }]);
+    assert.equal(added.task.version, 2); assert.deepEqual(added.dependsOn, [{ id: child.id, title: child.title, status: 'open', statusClosed: false, priority: 'normal', version: 2 }]);
+    assert.deepEqual(store.taskDetail(child.id).blocks, [{ id: parent.id, title: parent.title, status: 'open', statusClosed: false, priority: 'normal', version: 2 }]);
     assert.deepEqual(added.history.transactions[0]!.dependency, { taskId: child.id, action: 'added', direction: 'depends_on' });
     assert.deepEqual(store.taskHistory(child.id).transactions[0]!.dependency, { taskId: parent.id, action: 'added', direction: 'blocks' });
     depend(store, other.id, child.id);
@@ -303,7 +303,7 @@ test('schema 6 migration adds an honest unknown-author baseline at migration tim
   const directory = mkdtempSync(join(tmpdir(), 'phab-task-migration-')); const path = join(directory, 'workspace.sqlite');
   const old = schemaSix(path); const started = Date.now(); let store = new Store({ path });
   try {
-    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 43);
+    assert.equal((store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 44);
     assert.equal(store.fresh, false);
     const detail = store.taskDetail(old.task.id); const { projectId: _legacyProject, ...metadata } = old.task; assert.deepEqual(detail.task, { ...metadata, projectIds: [], ownerId: null, authorId: null, version: 1 });
     assert.deepEqual(detail.dependsOn, []); assert.deepEqual(detail.blocks, []);

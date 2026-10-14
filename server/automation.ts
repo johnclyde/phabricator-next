@@ -1,3 +1,4 @@
+import { readManiphestConfig } from './maniphest.ts';
 import { resolveRevisionPatch, revisionPatchIdentity } from './revision-patch.ts';
 import type { RevisionPatchPayload } from '../shared/revision-patch.ts';
 import { DrydockStore } from './drydock.ts';
@@ -54,6 +55,12 @@ export class Automation {
   private stopping = false;
   constructor(private readonly store: Store, private readonly auth: Auth, private readonly policies: PolicyStore, private readonly config: AutomationConfiguration = {}) {
     this.authority = { canManageGlobal: id => this.manager(id), canEditObject: (id, target) => this.enabled(id) && this.policies.access(target, id).edit, isEnabledPrincipal: id => this.enabled(id) };
+    this.authority.validateTaskAction = action => {
+      if (action.type !== 'task-status' && action.type !== 'task-priority') return;
+      const config = readManiphestConfig(store.database);
+      const choices = action.type === 'task-status' ? config.statuses : config.priorities;
+      if (!choices.some(item => item.key === action.value && !item.disabled)) throw new HttpError(400, 'Choose an enabled task status or priority from the task configuration.');
+    };
     this.herald = new HeraldStore(store.database);
     this.git = new GitAutomationStore(store.database, this.herald);
     this.audit = new AuditStore(store.database, {

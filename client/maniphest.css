@@ -1,0 +1,21 @@
+.maniphest { min-width: 0; }
+.maniphest-tabs,.maniphest-actions { display:flex; flex-wrap:wrap; gap:.55rem; align-items:center; }
+.maniphest-tabs { padding:.75rem 1rem; border-bottom:1px solid var(--border,#ddd); }
+.maniphest-tabs button { display:flex; align-items:center; gap:.4rem; padding:.5rem .65rem; border:1px solid #cad3dc; background:#f6f8fa; border-radius:3px; color:#345; }
+.maniphest-tabs button[aria-selected=true] { color:white; background:#326b93; border-color:#326b93; }
+.maniphest-selection { max-height:24rem; overflow:auto; border:1px solid #dce1e6; margin:1rem 0; padding:.5rem; }
+.maniphest-selection .checkbox { padding:.5rem; border-bottom:1px solid #e6e9ec; align-items:start; }
+.maniphest-selection small { display:block; color:#68747f; }
+.maniphest-table { overflow:auto; margin:1rem 0; }
+.maniphest-table table { width:100%; border-collapse:collapse; font-size:.9rem; }
+.maniphest-table th,.maniphest-table td { border-bottom:1px solid #dce1e6; text-align:left; padding:.7rem; vertical-align:top; overflow-wrap:anywhere; }
+.maniphest-table th { color:#465361; background:#f4f6f8; }
+.maniphest-preview { margin:1.2rem 0; padding:1rem; border:1px solid #a7c7d9; background:#f5fafc; }
+.maniphest-report-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:.8rem; }
+.maniphest-config-row { display:flex; flex-wrap:wrap; align-items:center; gap:.8rem; margin:.8rem 0; padding:.65rem; background:#f5f7f8; border:1px solid #dfe4e8; }
+.maniphest-config-row .field { flex:1 1 140px; min-width:0; margin:0; }
+.maniphest-config-row .checkbox { flex:0 0 auto; }
+.maniphest-config h3 { margin:1.75rem 0 .5rem; }
+.maniphest-field-definition { padding:.8rem; border:1px solid #dce1e6; margin:1rem 0; }
+.maniphest-form-fields { display:flex; flex-wrap:wrap; gap:.6rem 1.2rem; margin:1rem 0; }
+@media(max-width:600px) { .maniphest-tabs { gap:.4rem; padding:.6rem; } .maniphest-tabs button { flex:1 1 auto; justify-content:center; min-height:42px; } .maniphest-config-row { display:grid; grid-template-columns:1fr 1fr; } .maniphest-config-row .field { grid-column:1/-1; } .maniphest-preview { padding:.6rem; } .maniphest-table th,.maniphest-table td { padding:.5rem; } }

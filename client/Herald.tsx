@@ -1,3 +1,4 @@
+import { DEFAULT_MANIPHEST_CONFIG } from '../shared/maniphest';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Plus } from 'lucide-react';
 import type { AppState } from '../shared/types';
@@ -110,7 +111,7 @@ function ActionEditor({ index, action, input, state, plans, change, remove }: { 
     {action.type === 'require-build-plans' && <p className="small muted">Each selected plan must be enabled and pass for this exact source and current plan version. Missing, pending, stale or failed builds block the push.</p>}
     {action.type === 'block-push' && <label className="field"><span>Action {index + 1} rejection message</span><textarea aria-label={`Action ${index + 1} rejection message`} rows={3} value={action.value} onChange={event => change({ ...action, value: event.target.value })}/><small>This message is returned to the person pushing when the rule blocks a receive.</small></label>}
     {action.type === 'comment' && <label className="field"><span>Action {index + 1} comment</span><textarea rows={3} value={action.value} onChange={event => change({ ...action, value: event.target.value })}/></label>}
-    {(action.type === 'task-status' || action.type === 'task-priority') && <label className="field"><span>Action {index + 1} value</span><select aria-label={`Action ${index + 1} value`} value={action.value} onChange={event => change({ ...action, value: event.target.value })}>{(action.type === 'task-status' ? ['open', 'in_progress', 'resolved'] : ['low', 'normal', 'high', 'urgent']).map(value => <option key={value} value={value}>{value.replaceAll('_', ' ')}</option>)}</select></label>}
+    {(action.type === 'task-status' || action.type === 'task-priority') && <label className="field"><span>Action {index + 1} value</span><select aria-label={`Action ${index + 1} value`} value={action.value} onChange={event => change({ ...action, value: event.target.value })}>{(action.type === 'task-status' ? (state.taskConfig ?? DEFAULT_MANIPHEST_CONFIG).statuses : (state.taskConfig ?? DEFAULT_MANIPHEST_CONFIG).priorities).filter(item => item.key !== 'duplicate' && (!item.disabled || item.key === action.value)).map(item => <option key={item.key} value={item.key} disabled={item.disabled}>{item.name}</option>)}</select></label>}
     {action.type === 'assign' && <label className="field"><span>Action {index + 1} assignee</span><select aria-label={`Action ${index + 1} assignee`} value={action.value || ''} onChange={event => change({ ...action, value: event.target.value || null })}><option value="">Unassigned</option>{people.map(person => <option key={person.id} value={person.id}>{person.label}</option>)}</select></label>}
   </div>;
 }
