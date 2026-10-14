@@ -94,11 +94,11 @@ old preference over a newer choice. The server checks operation owner and object
 before loading evidence. Disabled historical followers remain removable.
 
 ```sh
-npm run arc -- object-subscriptions W1
-npm run arc -- object-subscription-status PA1 --principal PERSON_ID
-npm run arc -- object-subscription-history W1 --subscription-version 3
-npm run arc -- object-mute-history PA1 --mute-version 1
-npm run arc -- edit-object-subscriptions W1 --intent following.json --request-id follow-1
+arc object-subscriptions W1
+arc object-subscription-status PA1 --principal PERSON_ID
+arc object-subscription-history W1 --subscription-version 3
+arc object-mute-history PA1 --mute-version 1
+arc edit-object-subscriptions W1 --intent following.json --request-id follow-1
 ```
 
 Inspect the exact person's preference before constructing an intent; absence from

@@ -46,14 +46,14 @@ Collective blocking revision reviews, generated-file attributes, custom package 
 
 ## Command line
 
-The same authenticated API is available through arc:
+The same authenticated API is available through `arc`:
 
-- npm run arc -- owners lists packages; add an OWN package ID for its definition.
-- npm run arc -- owners-history OWN-ID reads visible immutable snapshots.
-- npm run arc -- resolve-owners R1 /src/file.ts /tests/file.ts resolves literal paths.
-- npm run arc -- owners-routing D1 reads a revision's routing history. A GC commit identifier reads inspected-commit routing. The command accepts --before and --limit.
-- npm run arc -- create-owners --intent REQUEST.json --request-id KEY creates a package.
-- npm run arc -- edit-owners OWN-ID --intent REQUEST.json --request-id KEY updates or archives a package.
+- `arc owners` lists packages; add an OWN package ID for its definition.
+- `arc owners-history OWN-ID` reads visible immutable snapshots.
+- `arc resolve-owners R1 /src/file.ts /tests/file.ts` resolves literal paths.
+- `arc owners-routing D1` reads a revision's routing history. A GC commit identifier reads inspected-commit routing. The command accepts `--before` and `--limit`.
+- `arc create-owners --intent REQUEST.json --request-id KEY` creates a package.
+- `arc edit-owners OWN-ID --intent REQUEST.json --request-id KEY` updates or archives a package.
 
 Mutation files contain the complete definition and observed access epoch, plus the package version for edits. The CLI validates the response against those pins. It prints the request ID and an input digest before submission, omits package text from recovery diagnostics, and never silently refreshes versions. Retain the file and request ID for an uncertain-result retry. Read and write commands honor the configured server subpath.
 

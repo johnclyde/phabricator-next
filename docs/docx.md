@@ -288,13 +288,13 @@ caches, and retires pending reads and retained intents as appropriate.
 First upload with `arc upload-file`, then inspect the exact File:
 
 ```sh
-npm run arc -- inspect-docx F1
-npm run arc -- import-docx import-request.json --request-id original-import
-npm run arc -- edit-docx L1 --intent edit-request.json --request-id original-edit
-npm run arc -- reimport-docx L1 --intent reimport-request.json --request-id original-reimport
-npm run arc -- download-docx L1 --version 2 --version-id VERSION_ID --content-hash SHA256 --output new-document.docx
-npm run arc -- comment-docx L1 --intent comment-request.json --request-id original-comment
-npm run arc -- export-docx-discussion L1 --intent discussion-export.json --output reviewed-document.docx
+arc inspect-docx F1
+arc import-docx import-request.json --request-id original-import
+arc edit-docx L1 --intent edit-request.json --request-id original-edit
+arc reimport-docx L1 --intent reimport-request.json --request-id original-reimport
+arc download-docx L1 --version 2 --version-id VERSION_ID --content-hash SHA256 --output new-document.docx
+arc comment-docx L1 --intent comment-request.json --request-id original-comment
+arc export-docx-discussion L1 --intent discussion-export.json --output reviewed-document.docx
 ```
 
 An import request contains:

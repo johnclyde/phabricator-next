@@ -93,52 +93,61 @@ AI output is review evidence, not an authority. Structured output cannot establi
 
 ## CLI
 
+Install the `arc` command once from this checkout after `npm ci` (Node **22.13 or newer**):
+
+```sh
+npm link
+arc --help
+```
+
+This links `arc` into npm's global executable directory, which must be on your `PATH`. Keep the checkout in place. Run `arc` from your own project directory; file paths are relative to that directory.
+
 ```sh
 # No server or internet needed. Pass every referenced source/bibliography file.
-npm run arc -- check --kind paper paper/main.tex paper/references.bib
-npm run arc -- check --kind document drafts/motion.md
+arc check --kind paper paper/main.tex paper/references.bib
+arc check --kind document drafts/motion.md
 
 # Send explicit files as the entire source snapshot. Omitted files are removed.
-npm run arc -- diff --kind paper --title "A clearer argument" --test-plan "Read the argument and checked its references." paper/main.tex
-npm run arc -- diff --revision P2 --message "Clarify assumptions" paper/main.tex
-npm run arc -- review P2 --provider local
-npm run arc -- list
-npm run arc -- show P2
-npm run arc -- export P2 --version 1
+arc diff --kind paper --title "A clearer argument" --test-plan "Read the argument and checked its references." paper/main.tex
+arc diff --revision P2 --message "Clarify assumptions" paper/main.tex
+arc review P2 --provider local
+arc list
+arc show P2
+arc export P2 --version 1
 
 # Stage private discussion entries, inspect the full saved review, then publish.
-npm run arc -- review-drafts
-npm run arc -- review-drafts P2
-npm run arc -- save-review-draft P2 DRAFT_UUID --intent entry.json --request-id save-1
-npm run --silent arc -- preview-review-drafts P2 > review-preview.json
-npm run arc -- publish-review-drafts P2 --intent review-preview.json --request-id publish-1
+arc review-drafts
+arc review-drafts P2
+arc save-review-draft P2 DRAFT_UUID --intent entry.json --request-id save-1
+arc preview-review-drafts P2 > review-preview.json
+arc publish-review-drafts P2 --intent review-preview.json --request-id publish-1
 
 # Compile an exact saved paper version using the configured isolated worker.
-npm run arc -- builds P2 --json
-npm run arc -- compile P2 --version-id VERSION_ID --content-hash CONTENT_HASH \
+arc builds P2 --json
+arc compile P2 --version-id VERSION_ID --content-hash CONTENT_HASH \
   --entrypoint paper/main.tex --toolchain-id TOOLCHAIN_ID --request-id REQUEST_ID
-npm run arc -- build P2 BUILD_ID
-npm run arc -- download-build P2 BUILD_ID --artifact pdf --output paper.pdf
+arc build P2 BUILD_ID
+arc download-build P2 BUILD_ID --artifact pdf --output paper.pdf
 
 # Read a project's independent columns and card order.
-npm run arc -- board PROJ1 --status all
+arc board PROJ1 --status all
 
 # Observe configured Git references, then select one complete commit ID.
-npm run arc -- repositories
-npm run arc -- refs R1
-npm run arc -- browse R1 --commit FULL_COMMIT_ID
-npm run arc -- browse R1 --commit FULL_COMMIT_ID --path README.md --file
-npm run arc -- history R1 --commit FULL_COMMIT_ID --limit 25
+arc repositories
+arc refs R1
+arc browse R1 --commit FULL_COMMIT_ID
+arc browse R1 --commit FULL_COMMIT_ID --path README.md --file
+arc history R1 --commit FULL_COMMIT_ID --limit 25
 
 # Create a review from the entire committed text tree, with source access retained.
-npm run arc -- import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper" --test-plan "Inspect the committed source and references."
+arc import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper" --test-plan "Inspect the committed source and references."
 
 # Import another complete tree into an existing review using its current version pins.
-npm run arc -- import-git-version P2 --commit FULL_COMMIT_ID --version 1 \
+arc import-git-version P2 --commit FULL_COMMIT_ID --version 1 \
   --version-id VERSION_ID --content-hash CONTENT_HASH --message "Revise the argument"
 ```
 
-Use actual object IDs from your workspace. `--server` or `PHABRICATOR_URL` selects the API, including a mount such as `http://127.0.0.1:4310/workspace/`. `check` exits nonzero on error findings. For machine-readable export use `npm run --silent arc -- export P2 > snapshot.json`. `arc` includes the documented Phriction create/edit compatibility commands; Arcanist Git ranges, patch/land, lint engines and broader Conduit compatibility remain gaps.
+Use actual object IDs from your workspace. `--server` or `PHABRICATOR_URL` selects the API, including a mount such as `http://127.0.0.1:4310/workspace/`. `check` exits nonzero on error findings. For machine-readable export use `arc export P2 > snapshot.json`. `arc` includes the documented Phriction create/edit compatibility commands; Arcanist Git ranges, patch/land, lint engines and broader Conduit compatibility remain gaps.
 
 ## Verify and continue
 

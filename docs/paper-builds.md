@@ -46,21 +46,21 @@ Use actual IDs and hashes from your workspace. The commands honor `PHABRICATOR_U
 
 ```sh
 # Inspect source pins and the operator's current toolchain ID.
-npm run arc -- export P2 --version 1
-npm run arc -- builds P2 --json
+arc export P2 --version 1
+arc builds P2 --json
 
 # Submit the exact inspected source; the request ID is printed before submission.
-npm run arc -- compile P2 --version-id VERSION_ID --content-hash SOURCE_SHA256 \
+arc compile P2 --version-id VERSION_ID --content-hash SOURCE_SHA256 \
   --entrypoint paper/main.tex --toolchain-id TOOLCHAIN_SHA256 --request-id REQUEST_ID
 
 # Read durable progress, cancel, or explicitly retry a finished build.
-npm run arc -- build P2 BUILD_ID
-npm run arc -- cancel-build P2 BUILD_ID --request-id CANCEL_REQUEST_ID
-npm run arc -- retry-build P2 BUILD_ID --request-id RETRY_REQUEST_ID
+arc build P2 BUILD_ID
+arc cancel-build P2 BUILD_ID --request-id CANCEL_REQUEST_ID
+arc retry-build P2 BUILD_ID --request-id RETRY_REQUEST_ID
 
 # Download an artifact to a new file after checking its recorded size and hash.
-npm run arc -- download-build P2 BUILD_ID --artifact pdf --output paper.pdf
-npm run arc -- download-build P2 BUILD_ID --artifact manifest --output manifest.json
+arc download-build P2 BUILD_ID --artifact pdf --output paper.pdf
+arc download-build P2 BUILD_ID --artifact manifest --output manifest.json
 ```
 
 The CLI never chooses the latest source version for compilation. Artifact downloads refuse existing files and symbolic links at the output filename, and server-provided artifact names never choose local paths. Text summaries escape terminal control characters; JSON preserves source strings as JSON data.

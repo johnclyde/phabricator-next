@@ -47,11 +47,11 @@ Every mutation requires an `Idempotency-Key`. Exact retries recheck current auth
 The portable types are in `shared/citation-evidence.ts`. Schema 17 adds the immutable evidence and retraction tables without rewriting existing records, row IDs, indexes or triggers.
 
 ```sh
-npm run arc -- citations P2 --version 1 --json
-npm run arc -- citation-evidence P2 --version-id VERSION_ID
-npm run arc -- citation-record P2 RECORD_ID
-npm run arc -- record-citation P2 --evidence inspection.json --attest-inspected --request-id REQUEST_ID
-npm run arc -- retract-citation P2 RECORD_ID --version 1 --reason-file reason.txt --request-id REQUEST_ID
+arc citations P2 --version 1 --json
+arc citation-evidence P2 --version-id VERSION_ID
+arc citation-record P2 RECORD_ID
+arc record-citation P2 --evidence inspection.json --attest-inspected --request-id REQUEST_ID
+arc retract-citation P2 RECORD_ID --version 1 --reason-file reason.txt --request-id REQUEST_ID
 ```
 
 `inspection.json` contains the exact `CitationEvidenceInput`; obtain target/version identities from the inventory and source identities from Files. Inputs are bounded regular UTF-8 files; symlinks and unsupported fields are rejected. The CLI prints a source-free request ID and input digest before sending a mutation. Keep the input file and retry it unchanged with that request ID if the outcome is uncertain. Use `arc check --kind paper` with explicit local source files for offline checks.

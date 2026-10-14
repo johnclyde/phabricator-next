@@ -91,9 +91,9 @@ reviewer support retain their original input without the two newer pins; new
 mutations cannot omit them.
 
 ```sh
-npm run arc -- revision-author P1
-npm run arc -- revision-author-history P1 --limit 50 --author-version 2
-npm run arc -- edit-revision-author P1 --intent handoff.json --request-id retained-request-id
+arc revision-author P1
+arc revision-author-history P1 --limit 50 --author-version 2
+arc edit-revision-author P1 --intent handoff.json --request-id retained-request-id
 ```
 
 The CLI reads a bounded regular UTF-8 JSON intent file, preserves its exact

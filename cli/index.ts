@@ -42,122 +42,122 @@ import { ownersCommand } from './owners';
 
 const help = `Phabricator Next — arc (initial CLI)
 
-  npm run arc -- check [--kind paper|document|code] FILE... [--json]
-  npm run arc -- diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] [--project ID|NAME ...] FILE...
-  npm run arc -- diff --revision P2 --message "Changes" FILE...
-  npm run arc -- list
-  npm run arc -- active-revisions --kind code|paper|document [--query TEXT]
-  npm run arc -- revision-views [RV1]
-  npm run arc -- open-revision-view RV1
-  npm run arc -- create-revision-view --intent REQUEST.json [--request-id KEY]
-  npm run arc -- edit-revision-view RV1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- delete-revision-view RV1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- notifications [--filter all|unread|read] [--before CURSOR] [--limit N]
-  npm run arc -- notification-count
-  npm run arc -- mark-notifications --intent REQUEST.json [--request-id KEY]
-  npm run arc -- object-subscriptions W1|PA1 [--after PERSON] [--limit N] [--subscription-version N]
-  npm run arc -- object-subscription-status W1|PA1 --principal PERSON
-  npm run arc -- object-subscription-history W1|PA1 [--before N] [--limit N] [--subscription-version N]
-  npm run arc -- object-mute-history W1|PA1 [--before N] [--limit N] [--mute-version N]
-  npm run arc -- edit-object-subscriptions W1|PA1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- task-mute T1
-  npm run arc -- task-mute-history T1 [--before N] [--limit N] [--expected-mute-version N]
-  npm run arc -- set-task-mute T1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
-  npm run arc -- projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
-  npm run arc -- board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
-  npm run arc -- owners [OWN-UUID]
-  npm run arc -- owners-history OWN-UUID
-  npm run arc -- resolve-owners R1 PATH...
-  npm run arc -- owners-routing D1|GC-COMMIT_ID [--before N] [--limit N]
-  npm run arc -- create-owners --intent REQUEST.json [--request-id KEY]
-  npm run arc -- edit-owners OWN-UUID --intent REQUEST.json [--request-id KEY]
-  npm run arc -- repositories [--limit N] [--json]
-  npm run arc -- refs R1 [--json]
-  npm run arc -- browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
-  npm run arc -- history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
-  npm run arc -- blame R1 --commit FULL_ID --path PATH [--json]
-  npm run arc -- compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
-  npm run arc -- download-patch R1 --base FULL_ID|empty --commit FULL_ID --output NEW_FILE [--json]
-  npm run arc -- import-git R1 --commit FULL_ID --title "Title" --test-plan "Verification plan" [--kind code|paper|document] [--draft] [--project ID|NAME ...] [--request-id KEY] [--json]
-  npm run arc -- import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
-  npm run arc -- show P2|T1|PROJ1|R1
-  npm run arc -- review P2 [--provider local|openai|ollama]
-  npm run arc -- export P2 [--version 1]
-  npm run arc -- revision-dependencies P2 --direction parents|children [--after ID] [--limit N] [--relationship-version N]
-  npm run arc -- revision-dependency-history P2 [--before N] [--limit N] [--relationship-version N]
-  npm run arc -- revision-stack P2 [--snapshot SHA256]
-  npm run arc -- edit-revision-dependencies P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- revision-lifecycle P2
-  npm run arc -- revision-lifecycle-history P2 [--before N] [--limit N] [--lifecycle-version N]
-  npm run arc -- edit-revision-lifecycle P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- revision-reviewers P2
-  npm run arc -- revision-reviewer-history P2 [--before N] [--limit N] [--reviewer-version N]
-  npm run arc -- edit-revision-reviewers P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- revision-subscriptions P2 [--after ID] [--limit N] [--subscription-version N] [--author-version N] [--reviewer-version N]
-  npm run arc -- revision-subscription-status P2 --principal ID
-  npm run arc -- revision-subscription-history P2 [--before N] [--limit N] [--subscription-version N]
-  npm run arc -- revision-mute-history P2 [--before N] [--limit N] [--mute-version N]
-  npm run arc -- edit-revision-subscriptions P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- revision-projects P2
-  npm run arc -- revision-project-history P2 [--before N] [--limit N] [--project-version N]
-  npm run arc -- edit-revision-projects P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- revision-metadata P2
-  npm run arc -- revision-metadata-history P2 [--before N] [--limit N] [--metadata-version N]
-  npm run arc -- edit-revision-metadata P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- review-drafts [--after P1] [--limit N]
-  npm run arc -- review-drafts P2
-  npm run arc -- preview-review-drafts P2
-  npm run arc -- save-review-draft P2 DRAFT_UUID --intent REQUEST.json|- [--request-id KEY]
-  npm run arc -- discard-review-draft P2 DRAFT_UUID --intent REQUEST.json|- [--request-id KEY]
-  npm run arc -- publish-review-drafts P2 --intent PREVIEW.json|- [--request-id KEY]
-  npm run arc -- revision-author P2
-  npm run arc -- revision-author-history P2 [--before N] [--limit N] [--author-version N]
-  npm run arc -- edit-revision-author P2 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- builds P2 [--before N] [--limit N] [--json]
-  npm run arc -- compile P2 --version-id ID --content-hash SHA256 --entrypoint main.tex --toolchain-id SHA256 [--request-id KEY] [--json]
-  npm run arc -- build P2 BUILD_ID [--json]
-  npm run arc -- cancel-build P2 BUILD_ID [--request-id KEY] [--json]
-  npm run arc -- retry-build P2 BUILD_ID [--request-id KEY] [--json]
-  npm run arc -- download-build P2 BUILD_ID --artifact pdf|log|manifest|synctex|mapping --output NEW_FILE [--json]
-  npm run arc -- files [--name TEXT] [--author ID] [--status active|archived|all] [--before N] [--limit N] [--json]
-  npm run arc -- file F1 [--json]
-  npm run arc -- file-history F1 [--before N] [--limit N]
-  npm run arc -- upload-file PATH [--name NAME] [--alt-text TEXT] [--request-id KEY] [--json]
-  npm run arc -- upload-receipt REQUEST_ID [--json]
-  npm run arc -- edit-file F1 --version N [--name NAME] [--alt-text TEXT] [--status active|archived] [--request-id KEY]
-  npm run arc -- attach-file F1 --object P2 --mode attach|reference|detach --version N [--access-epoch N] [--request-id KEY]
-  npm run arc -- download-file F1 --output NEW_FILE
-  npm run arc -- set-figures P2 --assets-manifest FILE.json --version N --version-id ID --content-hash SHA256 --access-epoch N --message TEXT [--share-assets] [--request-id KEY]
-  npm run arc -- inspect-docx F1
-  npm run arc -- import-docx REQUEST.json [--test-plan "Verification plan"] [--request-id KEY]
-  npm run arc -- reimport-docx L1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- edit-docx L1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- download-docx L1 --version N --version-id ID --content-hash SHA256 --output NEW_FILE
-  npm run arc -- comment-docx L1 --intent REQUEST.json [--request-id KEY]
-  npm run arc -- export-docx-discussion L1 --intent REQUEST.json --output NEW_FILE
-  npm run arc -- citations P2 --version N [--json]
-  npm run arc -- citation-evidence P2 --version-id ID [--target-id ID] [--before N] [--limit N]
-  npm run arc -- citation-record P2 RECORD_ID
-  npm run arc -- record-citation P2 --evidence FILE.json --attest-inspected [--request-id KEY]
-  npm run arc -- retract-citation P2 RECORD_ID --version N --reason-file FILE.txt [--request-id KEY]
-  npm run arc -- pastes [--query TEXT] [--author ID] [--language LANGUAGE] [--status active|archived|all] [--created-after ISO] [--created-before ISO] [--before N] [--limit N] [--json]
-  npm run arc -- paste PA1
-  npm run arc -- create-paste FILE --title "Title" [--language LANGUAGE] [--space S1] [--request-id KEY]
-  npm run arc -- edit-paste PA1 --version N [--content-file FILE] [--title TEXT] [--language LANGUAGE] [--status active|archived] [--request-id KEY]
-  npm run arc -- paste-version PA1 --version N
-  npm run arc -- paste-versions PA1 [--before N] [--limit N]
-  npm run arc -- paste-history PA1 [--before N] [--limit N]
-  npm run arc -- comment-paste PA1 --version N --comment-file FILE [--request-id KEY]
-  npm run arc -- archive-paste PA1 --version N [--status active] [--request-id KEY]
-  npm run arc -- download-paste PA1 --version N --output NEW_FILE
-  npm run arc -- wiki [--query TEXT] [--status active|all|deleted|moved|stub] [--path PATH] [--parent-path PATH] [--ancestor-path PATH] [--order newest|oldest] [--after CURSOR|--before CURSOR] [--limit N] [--json]
-  npm run arc -- wiki-document W1
-  npm run arc -- wiki-version W1 --version N
-  npm run arc -- wiki-history W1 [--before N] [--limit N]
-  npm run arc -- wiki-transactions W1 [--before N] [--limit N]
-  npm run arc -- create-wiki REQUEST.json [--request-id KEY] [--json]
-  npm run arc -- edit-wiki REQUEST.json [--request-id KEY] [--json]
+  arc check [--kind paper|document|code] FILE... [--json]
+  arc diff --title "Title" --test-plan "How this will be verified" --kind paper [--draft] [--project ID|NAME ...] FILE...
+  arc diff --revision P2 --message "Changes" FILE...
+  arc list
+  arc active-revisions --kind code|paper|document [--query TEXT]
+  arc revision-views [RV1]
+  arc open-revision-view RV1
+  arc create-revision-view --intent REQUEST.json [--request-id KEY]
+  arc edit-revision-view RV1 --intent REQUEST.json [--request-id KEY]
+  arc delete-revision-view RV1 --intent REQUEST.json [--request-id KEY]
+  arc notifications [--filter all|unread|read] [--before CURSOR] [--limit N]
+  arc notification-count
+  arc mark-notifications --intent REQUEST.json [--request-id KEY]
+  arc object-subscriptions W1|PA1 [--after PERSON] [--limit N] [--subscription-version N]
+  arc object-subscription-status W1|PA1 --principal PERSON
+  arc object-subscription-history W1|PA1 [--before N] [--limit N] [--subscription-version N]
+  arc object-mute-history W1|PA1 [--before N] [--limit N] [--mute-version N]
+  arc edit-object-subscriptions W1|PA1 --intent REQUEST.json [--request-id KEY]
+  arc task-mute T1
+  arc task-mute-history T1 [--before N] [--limit N] [--expected-mute-version N]
+  arc set-task-mute T1 --intent REQUEST.json [--request-id KEY]
+  arc tasks [--owner me|all|unassigned|USERNAME] [--subscribed] [--project ID|NAME] [--status open|closed|all] [--order priority|created|modified] [--limit N] [--json]
+  arc projects [--status active|archived|all] [--joined] [--watching] [--limit N] [--json]
+  arc board PROJECT [--status open|all] [--owner me|all|unassigned|USERNAME] [--show-hidden] [--limit N] [--json]
+  arc owners [OWN-UUID]
+  arc owners-history OWN-UUID
+  arc resolve-owners R1 PATH...
+  arc owners-routing D1|GC-COMMIT_ID [--before N] [--limit N]
+  arc create-owners --intent REQUEST.json [--request-id KEY]
+  arc edit-owners OWN-UUID --intent REQUEST.json [--request-id KEY]
+  arc repositories [--limit N] [--json]
+  arc refs R1 [--json]
+  arc browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
+  arc history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
+  arc blame R1 --commit FULL_ID --path PATH [--json]
+  arc compare-commits R1 --base FULL_ID|empty --commit FULL_ID [--before-path PATH] [--after-path PATH] [--json]
+  arc download-patch R1 --base FULL_ID|empty --commit FULL_ID --output NEW_FILE [--json]
+  arc import-git R1 --commit FULL_ID --title "Title" --test-plan "Verification plan" [--kind code|paper|document] [--draft] [--project ID|NAME ...] [--request-id KEY] [--json]
+  arc import-git-version D1 --commit FULL_ID --version N --version-id ID --content-hash SHA256 --message "Changes" [--request-id KEY] [--json]
+  arc show P2|T1|PROJ1|R1
+  arc review P2 [--provider local|openai|ollama]
+  arc export P2 [--version 1]
+  arc revision-dependencies P2 --direction parents|children [--after ID] [--limit N] [--relationship-version N]
+  arc revision-dependency-history P2 [--before N] [--limit N] [--relationship-version N]
+  arc revision-stack P2 [--snapshot SHA256]
+  arc edit-revision-dependencies P2 --intent REQUEST.json [--request-id KEY]
+  arc revision-lifecycle P2
+  arc revision-lifecycle-history P2 [--before N] [--limit N] [--lifecycle-version N]
+  arc edit-revision-lifecycle P2 --intent REQUEST.json [--request-id KEY]
+  arc revision-reviewers P2
+  arc revision-reviewer-history P2 [--before N] [--limit N] [--reviewer-version N]
+  arc edit-revision-reviewers P2 --intent REQUEST.json [--request-id KEY]
+  arc revision-subscriptions P2 [--after ID] [--limit N] [--subscription-version N] [--author-version N] [--reviewer-version N]
+  arc revision-subscription-status P2 --principal ID
+  arc revision-subscription-history P2 [--before N] [--limit N] [--subscription-version N]
+  arc revision-mute-history P2 [--before N] [--limit N] [--mute-version N]
+  arc edit-revision-subscriptions P2 --intent REQUEST.json [--request-id KEY]
+  arc revision-projects P2
+  arc revision-project-history P2 [--before N] [--limit N] [--project-version N]
+  arc edit-revision-projects P2 --intent REQUEST.json [--request-id KEY]
+  arc revision-metadata P2
+  arc revision-metadata-history P2 [--before N] [--limit N] [--metadata-version N]
+  arc edit-revision-metadata P2 --intent REQUEST.json [--request-id KEY]
+  arc review-drafts [--after P1] [--limit N]
+  arc review-drafts P2
+  arc preview-review-drafts P2
+  arc save-review-draft P2 DRAFT_UUID --intent REQUEST.json|- [--request-id KEY]
+  arc discard-review-draft P2 DRAFT_UUID --intent REQUEST.json|- [--request-id KEY]
+  arc publish-review-drafts P2 --intent PREVIEW.json|- [--request-id KEY]
+  arc revision-author P2
+  arc revision-author-history P2 [--before N] [--limit N] [--author-version N]
+  arc edit-revision-author P2 --intent REQUEST.json [--request-id KEY]
+  arc builds P2 [--before N] [--limit N] [--json]
+  arc compile P2 --version-id ID --content-hash SHA256 --entrypoint main.tex --toolchain-id SHA256 [--request-id KEY] [--json]
+  arc build P2 BUILD_ID [--json]
+  arc cancel-build P2 BUILD_ID [--request-id KEY] [--json]
+  arc retry-build P2 BUILD_ID [--request-id KEY] [--json]
+  arc download-build P2 BUILD_ID --artifact pdf|log|manifest|synctex|mapping --output NEW_FILE [--json]
+  arc files [--name TEXT] [--author ID] [--status active|archived|all] [--before N] [--limit N] [--json]
+  arc file F1 [--json]
+  arc file-history F1 [--before N] [--limit N]
+  arc upload-file PATH [--name NAME] [--alt-text TEXT] [--request-id KEY] [--json]
+  arc upload-receipt REQUEST_ID [--json]
+  arc edit-file F1 --version N [--name NAME] [--alt-text TEXT] [--status active|archived] [--request-id KEY]
+  arc attach-file F1 --object P2 --mode attach|reference|detach --version N [--access-epoch N] [--request-id KEY]
+  arc download-file F1 --output NEW_FILE
+  arc set-figures P2 --assets-manifest FILE.json --version N --version-id ID --content-hash SHA256 --access-epoch N --message TEXT [--share-assets] [--request-id KEY]
+  arc inspect-docx F1
+  arc import-docx REQUEST.json [--test-plan "Verification plan"] [--request-id KEY]
+  arc reimport-docx L1 --intent REQUEST.json [--request-id KEY]
+  arc edit-docx L1 --intent REQUEST.json [--request-id KEY]
+  arc download-docx L1 --version N --version-id ID --content-hash SHA256 --output NEW_FILE
+  arc comment-docx L1 --intent REQUEST.json [--request-id KEY]
+  arc export-docx-discussion L1 --intent REQUEST.json --output NEW_FILE
+  arc citations P2 --version N [--json]
+  arc citation-evidence P2 --version-id ID [--target-id ID] [--before N] [--limit N]
+  arc citation-record P2 RECORD_ID
+  arc record-citation P2 --evidence FILE.json --attest-inspected [--request-id KEY]
+  arc retract-citation P2 RECORD_ID --version N --reason-file FILE.txt [--request-id KEY]
+  arc pastes [--query TEXT] [--author ID] [--language LANGUAGE] [--status active|archived|all] [--created-after ISO] [--created-before ISO] [--before N] [--limit N] [--json]
+  arc paste PA1
+  arc create-paste FILE --title "Title" [--language LANGUAGE] [--space S1] [--request-id KEY]
+  arc edit-paste PA1 --version N [--content-file FILE] [--title TEXT] [--language LANGUAGE] [--status active|archived] [--request-id KEY]
+  arc paste-version PA1 --version N
+  arc paste-versions PA1 [--before N] [--limit N]
+  arc paste-history PA1 [--before N] [--limit N]
+  arc comment-paste PA1 --version N --comment-file FILE [--request-id KEY]
+  arc archive-paste PA1 --version N [--status active] [--request-id KEY]
+  arc download-paste PA1 --version N --output NEW_FILE
+  arc wiki [--query TEXT] [--status active|all|deleted|moved|stub] [--path PATH] [--parent-path PATH] [--ancestor-path PATH] [--order newest|oldest] [--after CURSOR|--before CURSOR] [--limit N] [--json]
+  arc wiki-document W1
+  arc wiki-version W1 --version N
+  arc wiki-history W1 [--before N] [--limit N]
+  arc wiki-transactions W1 [--before N] [--limit N]
+  arc create-wiki REQUEST.json [--request-id KEY] [--json]
+  arc edit-wiki REQUEST.json [--request-id KEY] [--json]
 
 check is fully offline and never executes source. diff uploads an explicit list
 of text files as a complete snapshot; omitted files are removed in that version.
@@ -645,7 +645,7 @@ async function main() {
     if (!Number.isSafeInteger(number) || number < 1) throw new Error('--version must be a positive integer.');
     return console.log(JSON.stringify(await request(`/api/revisions/${detail.revision.id}/export?version=${number}`), null, 2));
   }
-  throw new Error(`Unknown command: ${command}. Run npm run arc -- --help.`);
+  throw new Error(`Unknown command: ${command}. Run arc --help.`);
 }
 
 async function readSources(paths: string[]): Promise<SourceFile[]> {

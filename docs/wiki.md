@@ -201,12 +201,12 @@ retirement invalidate pending requests so late responses cannot replace a
 newer query. Loading more is explicit. The CLI has the same bounded behavior:
 
 ```sh
-npm run arc -- wiki --query manuscript --status all --limit 25
-npm run arc -- wiki --parent-path research/ --ancestor-path guides/ --json
-npm run arc -- wiki-document W1
-npm run arc -- wiki-version W1 --version 2
-npm run arc -- wiki-history W1 --limit 20
-npm run arc -- wiki-transactions W1 --limit 20
+arc wiki --query manuscript --status all --limit 25
+arc wiki --parent-path research/ --ancestor-path guides/ --json
+arc wiki-document W1
+arc wiki-version W1 --version 2
+arc wiki-history W1 --limit 20
+arc wiki-transactions W1 --limit 20
 ```
 
 Repeat `--parent-path` and `--ancestor-path` for multiple constraints. CLI

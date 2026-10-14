@@ -7,7 +7,7 @@ The product goal is a familiar Phabricator workspace for documents, code and age
 | ID | Scope | State / boundary |
 | --- | --- | --- |
 | F001 | Download historical sources and inventory all applications | Done; exact commits and reproduction script recorded |
-| F002 | Strict TypeScript browser/API/CLI foundation | Implemented; one process plus browser |
+| F002 | Strict TypeScript browser/API/CLI foundation | Implemented; one process plus browser and an installable `arc` executable. Commands run from the caller's project directory; `arc diff` uploads an explicit complete file snapshot. Git working-copy ranges and full Arcanist compatibility remain open. |
 | F003 | SQLite transactions, version snapshots, comments and evidence | Implemented; local mode and attributed authenticated writes |
 | F004 | Tasks, projects, wiki, repository registry, activity | Partial legacy parity; object policies implemented, no hosted repositories |
 | F005 | Paper and prose drafts with source/word comparisons | Source iteration implemented; bounded PDF compilation is in D103. D105 adds package-preserving Word import, bounded tracked edits and export; broader interchange remains open. |

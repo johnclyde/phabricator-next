@@ -21,7 +21,6 @@
     "start": "node --env-file-if-exists=.env --import tsx server/index.ts",
     "test": "node --import tsx --test --test-concurrency=2 tests/*.test.ts server/*.test.ts",
     "check": "tsc --noEmit",
-    "arc": "tsx cli/index.ts",
     "accounts": "node --env-file-if-exists=.env --import tsx scripts/accounts.ts",
     "test:e2e": "node --import tsx scripts/test-e2e.ts",
     "transcription:model": "node --import tsx scripts/prepare-transcription-model.ts",
@@ -58,5 +57,25 @@
     "@firebase/app": "0.16.2",
     "@firebase/app-compat": "0.5.18",
     "@grpc/grpc-js": "1.14.6"
-  }
+  },
+  "bin": {
+    "arc": "bin/arc.mjs"
+  },
+  "files": [
+    "bin/",
+    "cli/",
+    "shared/",
+    "server/",
+    "scripts/",
+    "client/",
+    "dist/",
+    "docs/",
+    "tsconfig.json",
+    "vite.config.ts",
+    "LICENSE",
+    "NOTICE",
+    "!**/.data/**",
+    "!**/.env*",
+    "!**/*.test.ts"
+  ]
 }

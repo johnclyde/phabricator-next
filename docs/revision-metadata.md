@@ -75,10 +75,10 @@ Routes respect the configured application mount. Generic revision PATCH remains
 closed; this dedicated operation cannot change status, ownership or permissions.
 
 ```sh
-npm run arc -- revision-metadata P2
-npm run arc -- revision-metadata-history P2 --metadata-version 3 --limit 25
-npm run arc -- edit-revision-metadata P2 --intent metadata.json --request-id edit-1
-npm run arc -- diff --kind paper --title 'A clearer argument' \
+arc revision-metadata P2
+arc revision-metadata-history P2 --metadata-version 3 --limit 25
+arc edit-revision-metadata P2 --intent metadata.json --request-id edit-1
+arc diff --kind paper --title 'A clearer argument' \
   --test-plan 'Read the changed argument and checked its references.' main.tex
 ```
 

@@ -79,9 +79,9 @@ at most 100 current tags and 100 distinct selected IDs in a single action. This
 native bound is a documented difference from the upstream edge store.
 
 ```sh
-npm run arc -- revision-projects P2
-npm run arc -- revision-project-history P2 --project-version 3
-npm run arc -- edit-revision-projects P2 --intent tags.json --request-id tags-1
+arc revision-projects P2
+arc revision-project-history P2 --project-version 3
+arc edit-revision-projects P2 --intent tags.json --request-id tags-1
 ```
 
 New text and Git revisions accept repeated `--project` options. An existing

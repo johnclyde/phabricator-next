@@ -107,9 +107,9 @@ reviewer and lifecycle state. Proven older saved receipts remain recoverable;
 their historical input is not rewritten to add new fields.
 
 ```sh
-npm run arc -- revision-reviewers P1
-npm run arc -- revision-reviewer-history P1 --limit 50 --reviewer-version 2
-npm run arc -- edit-revision-reviewers P1 --intent review.json --request-id retained-request-id
+arc revision-reviewers P1
+arc revision-reviewer-history P1 --limit 50 --reviewer-version 2
+arc edit-revision-reviewers P1 --intent review.json --request-id retained-request-id
 ```
 
 The CLI reads a bounded regular UTF-8 intent file, prints its request identity

@@ -52,12 +52,12 @@ Mutations require `Idempotency-Key`. The server returns not-found for another ow
 Use a current read's access version and, for replacement or deletion, the selected view's version in the request file. Keep that file and its request ID unchanged for uncertain-result recovery.
 
 ```sh
-npm run arc -- revision-views
-npm run arc -- revision-views RV1
-npm run arc -- open-revision-view RV1
-npm run arc -- create-revision-view --intent create-view.json --request-id create-reading-list
-npm run arc -- edit-revision-view RV1 --intent edit-view.json --request-id update-reading-list
-npm run arc -- delete-revision-view RV1 --intent delete-view.json --request-id delete-reading-list
+arc revision-views
+arc revision-views RV1
+arc open-revision-view RV1
+arc create-revision-view --intent create-view.json --request-id create-reading-list
+arc edit-revision-view RV1 --intent edit-view.json --request-id update-reading-list
+arc delete-revision-view RV1 --intent delete-view.json --request-id delete-reading-list
 ```
 
 `open-revision-view` applies the same portable filter evaluator to a fresh authorized workspace snapshot. It returns the observed view and matching revision summaries; if authority changes between the two reads it requires another explicit opening. CLI mutations validate bounded regular JSON files, print recovery identifiers before sending, and validate that the receipt matches the requested operation. They never refresh versions and retry a changed intent automatically.

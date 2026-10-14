@@ -171,9 +171,9 @@ from the authenticated request, never a caller-selected account.
 The CLI preserves exact intents without fetching replacement concurrency pins:
 
 ```sh
-npm run arc -- notifications --filter unread --limit 25
-npm run arc -- notification-count
-npm run arc -- mark-notifications --intent read.json --request-id read-1
+arc notifications --filter unread --limit 25
+arc notification-count
+arc mark-notifications --intent read.json --request-id read-1
 ```
 
 There is no invented `notification.*` Conduit method: the archived `feed.query`

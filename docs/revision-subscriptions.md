@@ -73,11 +73,11 @@ Public history uses an exclusive `before` subscription sequence and optional
 and `expectedMuteVersion`. Both histories use the same page limits.
 
 ```sh
-npm run arc -- revision-subscriptions P2
-npm run arc -- revision-subscription-status P2 --principal PERSON_ID
-npm run arc -- revision-subscription-history P2 --subscription-version 3
-npm run arc -- revision-mute-history P2 --mute-version 1
-npm run arc -- edit-revision-subscriptions P2 --intent following.json --request-id follow-1
+arc revision-subscriptions P2
+arc revision-subscription-status P2 --principal PERSON_ID
+arc revision-subscription-history P2 --subscription-version 3
+arc revision-mute-history P2 --mute-version 1
+arc edit-revision-subscriptions P2 --intent following.json --request-id follow-1
 ```
 
 Inspect the relevant person's status before creating an intent. A person absent

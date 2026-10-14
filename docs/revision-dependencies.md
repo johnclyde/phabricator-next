@@ -139,11 +139,11 @@ Graph traversal is bounded to 10,000 visited revisions and 50,000 visited edges;
 an unsupported larger traversal fails explicitly.
 
 ```sh
-npm run arc -- revision-dependencies P1 --direction parents --limit 50
-npm run arc -- revision-dependency-history P1 --limit 50
-npm run arc -- revision-stack P1
-npm run arc -- revision-stack P1 --snapshot EXACT_SHA256
-npm run arc -- edit-revision-dependencies P1 --intent change.json --request-id retained-request-id
+arc revision-dependencies P1 --direction parents --limit 50
+arc revision-dependency-history P1 --limit 50
+arc revision-stack P1
+arc revision-stack P1 --snapshot EXACT_SHA256
+arc edit-revision-dependencies P1 --intent change.json --request-id retained-request-id
 ```
 
 The CLI reads a bounded regular UTF-8 JSON intent file without following a final

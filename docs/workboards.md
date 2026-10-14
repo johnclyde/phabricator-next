@@ -103,7 +103,7 @@ Shared contracts live in `shared/workboards.ts`. All routes below begin with `/a
 
 Read queries use `status=open|all`, `showHidden=true|false`, `ownerId` and `limit`. Omit `ownerId` for all owners; use the literal `null` for unassigned tasks or a principal ID for a particular owner. Duplicate and unknown query parameters are rejected. Relative positions contain exactly one before/after reference or `edge: "start"|"end"`.
 
-`npm run arc -- board PROJ1` reads the real board in column order. A visible exact name or alias may replace the ID. `--status open|all`, `--owner me|all|unassigned|USERNAME`, `--unassigned`, `--show-hidden`, `--limit N` and `--json` are supported. Without a limit it follows all column pages; a limit caps cards per column and leaves continuation cursors in JSON. If the board or access changes between pages, it fails before printing a mixed result. The command honors application path prefixes and read-only account tokens.
+`arc board PROJ1` reads the real board in column order. A visible exact name or alias may replace the ID. `--status open|all`, `--owner me|all|unassigned|USERNAME`, `--unassigned`, `--show-hidden`, `--limit N` and `--json` are supported. Without a limit it follows all column pages; a limit caps cards per column and leaves continuation cursors in JSON. If the board or access changes between pages, it fails before printing a mixed result. The command honors application path prefixes and read-only account tokens.
 
 ## Upstream evidence and remaining work
 

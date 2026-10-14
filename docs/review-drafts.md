@@ -92,21 +92,21 @@ the presenter verifies durable evidence before returning a receipt.
 ## CLI
 
 ```sh
-npm run arc -- review-drafts --limit 25
-npm run arc -- review-drafts P2
-npm run arc -- save-review-draft P2 DRAFT_UUID \
+arc review-drafts --limit 25
+arc review-drafts P2
+arc save-review-draft P2 DRAFT_UUID \
   --intent entry.json --request-id save-entry-1
 
 # Inspect the complete file before explicitly publishing it.
-npm run --silent arc -- preview-review-drafts P2 > review-preview.json
-npm run arc -- publish-review-drafts P2 \
+arc preview-review-drafts P2 > review-preview.json
+arc publish-review-drafts P2 \
   --intent review-preview.json --request-id publish-review-1
 
-npm run arc -- discard-review-draft P2 DRAFT_UUID \
+arc discard-review-draft P2 DRAFT_UUID \
   --intent discard.json --request-id discard-entry-1
 
 # Retain an identical copy of piped JSON for retry recovery.
-cat entry.json | npm run --silent arc -- save-review-draft P2 DRAFT_UUID \
+cat entry.json | arc save-review-draft P2 DRAFT_UUID \
   --intent - --request-id save-entry-1
 ```
 

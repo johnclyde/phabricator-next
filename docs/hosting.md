@@ -40,7 +40,7 @@ npm test
 npm run build
 ```
 
-A release needs `dist/`, `server/`, `shared/`, `scripts/`, `cli/`, package manifests,
+A release needs `dist/`, `server/`, `shared/`, `scripts/`, `cli/`, `bin/`, package manifests,
 `LICENSE`, `NOTICE` and production dependencies. `tsx` is a runtime dependency: both the server entrypoint
 and disposable DOCX workers load TypeScript. A production install may use
 `npm ci --omit=dev`; it does not need Vite, TypeScript or Playwright at runtime.

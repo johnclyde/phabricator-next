@@ -98,9 +98,9 @@ Paths are relative to the configured application mount:
 The CLI retains submitted pins and request identity:
 
 ```sh
-npm run arc -- task-mute T123
-npm run arc -- task-mute-history T123 --limit 25
-npm run arc -- set-task-mute T123 --intent mute.json --request-id mute-1
+arc task-mute T123
+arc task-mute-history T123 --limit 25
+arc set-task-mute T123 --intent mute.json --request-id mute-1
 ```
 
 This slice allows 10,000 distinct candidate recipients, scans at most 20,000

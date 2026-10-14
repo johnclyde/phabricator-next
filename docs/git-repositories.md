@@ -25,12 +25,12 @@ Local mode retains at most 16 repository response entries and 2 MB per repositor
 The CLI uses the same authenticated APIs and mount path:
 
 ```sh
-npm run arc -- repositories --json
-npm run arc -- show R1
-npm run arc -- refs R1 --json
-npm run arc -- browse R1 --commit FULL_COMMIT_ID
-npm run arc -- browse R1 --commit FULL_COMMIT_ID --path docs/paper.tex --file --json
-npm run arc -- history R1 --commit FULL_COMMIT_ID --path docs/paper.tex --limit 25 --json
+arc repositories --json
+arc show R1
+arc refs R1 --json
+arc browse R1 --commit FULL_COMMIT_ID
+arc browse R1 --commit FULL_COMMIT_ID --path docs/paper.tex --file --json
+arc history R1 --commit FULL_COMMIT_ID --path docs/paper.tex --limit 25 --json
 ```
 
 Replace `FULL_COMMIT_ID` with a `commitId` from the reference response. History returns one page and an optional `nextAfter`; pass that value as `--after` with the same commit and path. `--json` preserves the returned source string. Human-readable terminal output escapes control characters, preserving text line breaks and tabs in file contents. A token with only `read` scope can perform these commands. They do not import files into a review or operate on a working copy.
@@ -128,10 +128,10 @@ removes visible and cached comparison source through the repository boundary.
 The CLI exposes the same explicit read:
 
 ```sh
-npm run arc -- compare-commits R1 --base BASE_ID --commit TARGET_ID
-npm run arc -- compare-commits R1 --base BASE_ID --commit TARGET_ID \
+arc compare-commits R1 --base BASE_ID --commit TARGET_ID
+arc compare-commits R1 --base BASE_ID --commit TARGET_ID \
   --before-path old/paper.tex --after-path paper.tex
-npm run arc -- compare-commits R1 --base empty --commit TARGET_ID --json
+arc compare-commits R1 --base empty --commit TARGET_ID --json
 ```
 
 Omit both path options to list changes. Use the listed path tuple for a selected
@@ -161,8 +161,8 @@ Git's reverse application of a copy-containing patch can fail even when its
 forward application is valid; each export guarantees its selected direction.
 
 ```sh
-npm run arc -- download-patch R1 --base FULL_BASE_ID --commit FULL_TARGET_ID --output change.patch
-npm run arc -- download-patch R1 --base empty --commit FULL_TARGET_ID --output initial.patch --json
+arc download-patch R1 --base FULL_BASE_ID --commit FULL_TARGET_ID --output change.patch
+arc download-patch R1 --base empty --commit FULL_TARGET_ID --output initial.patch --json
 ```
 
 The CLI verifies the entire response before writing. It stages a private file
@@ -231,8 +231,8 @@ Differential revision links, age coloring and the full upstream skip-past
 workflow remain separate work.
 
 ```sh
-npm run arc -- blame R1 --commit FULL_ID --path paper.tex
-npm run arc -- blame R1 --commit FULL_ID --path paper.tex --json
+arc blame R1 --commit FULL_ID --path paper.tex
+arc blame R1 --commit FULL_ID --path paper.tex --json
 ```
 
 The CLI makes one exact read and works with a read-only token at root or a
@@ -294,7 +294,7 @@ source after access loss, session retirement or cache invalidation.
 From a pinned repository snapshot, explicitly import the entire commit as a new code, paper or document review. The browser asks for the kind and title; the CLI equivalent is:
 
 ```sh
-npm run arc -- import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper" --test-plan "Inspect the committed source and references."
+arc import-git R1 --commit FULL_COMMIT_ID --kind paper --title "Review the paper" --test-plan "Inspect the committed source and references."
 ```
 
 The server verifies the exact commit, every directory and every file before creating anything. It imports every supported tracked file; it does not apply ignore rules, select only the visible directory or silently omit unsupported entries. Both ordinary and executable text files are supported. It never checks out or executes source, runs TeX, follows links, fetches submodules or starts AI review.
@@ -322,8 +322,8 @@ The review must already have a source repository. Import always uses that reposi
 The CLI makes these pins explicit. Read them from the current revision before starting a new import:
 
 ```sh
-npm run arc -- show D1 --json
-npm run arc -- import-git-version D1 --commit FULL_COMMIT_ID \
+arc show D1 --json
+arc import-git-version D1 --commit FULL_COMMIT_ID \
   --version 1 --version-id VERSION_ID --content-hash CONTENT_HASH \
   --message "Import the revised argument" --request-id MY_UNIQUE_REQUEST_ID
 ```

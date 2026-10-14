@@ -28,8 +28,8 @@ Local workspaces can reopen a previously loaded Active queue offline. Password-p
 `GET /api/state` includes `revisionActive`, a viewer-bound `revision-active.v1` projection built in the same read transaction after View filtering. Each authorized revision appears once with its immutable head, author/lifecycle/reviewer versions, status, whether the viewer is its author, the viewer's reviewer status and whether their decision is current. It contains no other reviewer identities, private review drafts or source bodies. It does not confer permission to read hidden revisions.
 
 ```sh
-npm run arc -- active-revisions --kind paper
-npm run arc -- active-revisions --kind document --query "Exact phrase"
+arc active-revisions --kind paper
+arc active-revisions --kind document --query "Exact phrase"
 ```
 
 The command uses a read-only token and one authorized state read. It emits all eight groups, including empty groups, and rejects missing or mismatched projections before printing revision content. It shares the browser's portable grouping rules. This is evaluation of the available workspace snapshot, without server pagination.
