@@ -2,10 +2,13 @@ import { initializeRevisionLanding } from './revision-landing.ts';
 import { initializeGitAutomation } from './git-automation.ts';
 import { initializeAudit } from './audit.ts';
 import { initializeSuite } from './suite.ts';
+import { initializeSuiteImport } from './suite-import.ts';
+import { initializeSuiteNotifications } from './suite-notifications.ts';
+import { initializeMail } from './mail.ts';
 import { initializeDrydock } from './drydock.ts';
 import { initializeHerald } from './herald.ts';
 import { initializeHarbormaster } from './harbormaster.ts';
-import { initializeNotifications, initializeNotificationTargets, NotificationStore } from './notifications.ts';
+import { initializeNotifications, initializeNotificationTargets, initializeNotificationSuiteTargets, NotificationStore } from './notifications.ts';
 import { initializeTaskNotifications, TaskNotificationsStore } from './task-notifications.ts';
 import { initializeObjectSubscriptions, ObjectSubscriptionStore } from './object-subscriptions.ts';
 import { NOTIFICATION_LIMITS, type NotificationContext, type NotificationKind } from '../shared/notifications.ts';
@@ -233,7 +236,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 41) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 42) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -545,6 +548,10 @@ export class Store {
     }
     if (version < 41) {
       try { this.transaction(() => { initializeSuite(this.database); this.database.exec('PRAGMA user_version = 41'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 42) {
+      try { this.transaction(() => { initializeNotificationSuiteTargets(this.database); initializeSuiteNotifications(this.database); initializeSuiteImport(this.database); initializeMail(this.database); this.database.exec('PRAGMA user_version = 42'); }); }
       catch (error) { this.database.close(); throw error; }
     }
     this.revisionViews = new RevisionViewStore(this.database);

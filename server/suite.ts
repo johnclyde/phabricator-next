@@ -40,7 +40,40 @@ const unavailable = () => new HttpError(404, 'Object was not found.');
 const permissionFailure = (error: unknown) => error instanceof HttpError && [403, 404].includes(error.status);
 export class SuiteService {
   private readonly modules: Map<SuiteApp, SuiteModule>;
+  private notify?: (record: SuiteRecord, before: SuiteRecord | null, action: string, actor: AuthContext, sequence: number) => void;
   constructor(private readonly store: Store, private readonly auth: Auth, private readonly policies: PolicyStore, modules: SuiteModule[] = [almanacModule, conpherenceModule, calendarModule, slowvoteModule, phameModule, legalpadModule], private readonly clock = Date.now) { this.modules = new Map(modules.map(module => [module.app, module])); }
+  connectNotifications(notify: NonNullable<SuiteService['notify']>): void { if (this.notify) throw new Error('Suite notifications are already configured.'); this.notify = notify; }
+  rawRecord(id: string): SuiteRecord { return this.raw(id); }
+  projectForPrincipal(id: string, principalId: string): SuiteDetail {
+    const local = this.auth.mode === 'local' && principalId === `local:${this.auth.workspaceId}`;
+    const account = this.store.database.prepare('SELECT display_name FROM auth_accounts WHERE id=? AND disabled=0').get(principalId) as { display_name: string } | undefined;
+    if (!local && !account) throw unavailable();
+    const actor: AuthContext = { workspaceId: this.auth.workspaceId, principalId, displayName: account?.display_name ?? 'You', kind: local ? 'local' : 'session', credentialId: null, sessionContext: null, scopes: ['read', 'write'] };
+    if (local) this.auth.revalidate(actor, 'read');
+    return this.detail(id, actor);
+  }
+  canView(id: string, principalId: string): boolean { try { this.projectForPrincipal(id, principalId); return true; } catch (error) { if (permissionFailure(error) || error instanceof HttpError && error.status === 401) return false; throw error; } }
+  validateImportAccess(input: unknown, actor: AuthContext): SuiteAccess { return this.access(input, actor); }
+  validateImportPerson(id: string, spaceId: string, actor: AuthContext): void { this.context(actor, spaceId).requirePerson(id); }
+  importDetail(id: string, actor: AuthContext): SuiteDetail { return this.detail(id, actor); }
+  /** Import adapters own the writer transaction and revalidation. Historical
+   * assertions never become live notification causes or direct raw records. */
+  importCreate(app: SuiteApp, input: Record<string, unknown>, actor: AuthContext): SuiteRecord { return this.createRecord(app, input, actor, false); }
+  importCommand(id: string, action: string, input: Record<string, unknown>, actor: AuthContext): SuiteRecord {
+    const current = this.context(actor).get(id), context = this.context(actor, current.access.spaceId);
+    const changed = this.module(current.app).command(structuredClone(current), action, input, context);
+    const record = { ...current, title: changed.title === undefined ? current.title : string(changed.title, 'Title', 255), data: changed.data, access: this.access(changed.access, actor, current.access), version: current.version + 1, updatedAt: context.now };
+    this.save(record, actor, action, changed.summary, false, false); return record;
+  }
+  private createRecord(app: SuiteApp, input: Record<string, unknown>, actor: AuthContext, publish = true): SuiteRecord {
+    const module = this.module(app), { access: supplied, ...fields } = input;
+    const parent = module.creationAccessSource?.(fields, this.context(actor));
+    const selected = this.access(parent ? this.context(actor).get(parent).access : supplied, actor), context = this.context(actor, selected.spaceId);
+    context.creationAccess = selected;
+    const created = module.create(fields, context);
+    const record: SuiteRecord = { id: `${module.prefix}-${randomUUID()}`, app, kind: string(created.kind, 'Object kind', 100), title: string(created.title, 'Title', 255), ownerId: actor.principalId, version: 1, createdAt: context.now, updatedAt: context.now, access: this.access({ ...selected, ...created.access }, actor), data: created.data };
+    this.save(record, actor, 'create', created.summary ?? `Created ${record.kind}.`, true, publish); return record;
+  }
   private module(app: SuiteApp): SuiteModule { const result = this.modules.get(app); if (!result) throw unavailable(); return result; }
   private raw(id: string): SuiteRecord {
     if (!/^[A-Z][A-Z0-9]*-[a-f0-9-]{36}$/.test(id)) throw unavailable();
@@ -152,15 +185,17 @@ export class SuiteService {
     }
     return { records, nextBefore: more ? cursor : null, accessEpoch: this.policies.epoch() };
   }
-  private save(record: SuiteRecord, actor: AuthContext, action: string, summary: string, create: boolean): void {
+  private save(record: SuiteRecord, actor: AuthContext, action: string, summary: string, create: boolean, publish = true): void {
     const data = JSON.stringify(record);
     if (Buffer.byteLength(data) > 2_000_000) throw new HttpError(409, 'This object exceeds the current 2 MB storage limit. Export or split its content before adding more.');
+    const before = create ? null : this.raw(record.id);
     if (create) this.store.database.prepare('INSERT INTO suite_records(id,app,kind,data) VALUES(?,?,?,?)').run(record.id, record.app, record.kind, data);
     else this.store.database.prepare('UPDATE suite_records SET data=? WHERE id=?').run(data, record.id);
     const event = { recordId: record.id, version: record.version, actorId: actor.principalId, actorName: actor.displayName, action, summary: string(summary, 'History summary', 2000, true), createdAt: record.updatedAt };
-    this.store.database.prepare('INSERT INTO suite_history(record_id,version,event,snapshot) VALUES(?,?,?,?)').run(record.id, record.version, JSON.stringify(event), data);
+    const saved = this.store.database.prepare('INSERT INTO suite_history(record_id,version,event,snapshot) VALUES(?,?,?,?)').run(record.id, record.version, JSON.stringify(event), data);
     // Membership and inherited permissions may change through application commands.
     this.store.database.prepare("UPDATE policy_meta SET value=value+1 WHERE name='epoch'").run();
+    if (publish) this.notify?.(record, before, action, actor, Number(saved.lastInsertRowid));
   }
   mutate(method: string, path: string, input: unknown, key: string | undefined, actor: AuthContext): MutationResponse {
     if (method !== 'POST') throw new HttpError(405, 'Use POST for application changes.');
@@ -170,13 +205,7 @@ export class SuiteService {
     return this.store.mutate(`suite:${actor.workspaceId}:${actor.principalId}:${key}`, fingerprint, () => {
       let record: SuiteRecord;
       if (!route.id) {
-        const { access: supplied, ...fields } = input as Record<string, unknown>;
-        const parent = module.creationAccessSource?.(fields, this.context(actor));
-        const selected = this.access(parent ? this.context(actor).get(parent).access : supplied, actor), context = this.context(actor, selected.spaceId);
-        context.creationAccess = selected;
-        const created = module.create(fields, context);
-        record = { id: `${module.prefix}-${randomUUID()}`, app: route.app, kind: string(created.kind, 'Object kind', 100), title: string(created.title, 'Title', 255), ownerId: actor.principalId, version: 1, createdAt: context.now, updatedAt: context.now, access: this.access({ ...selected, ...created.access }, actor), data: created.data };
-        this.save(record, actor, 'create', created.summary ?? `Created ${record.kind}.`, true);
+        record = this.createRecord(route.app, input as Record<string, unknown>, actor);
       } else {
         if (!route.action) throw unavailable();
         const raw = this.raw(route.id), context = this.context(actor, raw.access.spaceId), current = context.get(route.id);

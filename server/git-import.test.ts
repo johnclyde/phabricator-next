@@ -70,7 +70,7 @@ test('Git imports atomically retain exact files, modes, attribution, source rule
     assert.deepEqual(version.files, source); assert.equal(version.contentHash, contentHash(source)); assert.deepEqual(version.gitSource, snapshot().provenance);
     assert.equal(version.attribution?.principalId, app.alice.id); assert.equal(detail.activity[0]?.attribution?.principalId, app.alice.id);
     assert.deepEqual(detail.access!.policy.rules, policy.rules); assert.equal(detail.access!.policy.spaceId, space.id); assert.match(detail.access!.viewLabel, /linked repository view/);
-    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 41);
+    assert.equal((app.store.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 42);
     const raw = app.store.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id);
     await app.close(); const reopened = createStore({ path });
     try { assert.deepEqual(reopened.detail(detail.revision.id).versions[0], version); assert.deepEqual(reopened.database.prepare('SELECT data FROM versions WHERE id = ?').get(version.id), raw); } finally { reopened.close(); }

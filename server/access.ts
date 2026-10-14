@@ -138,10 +138,10 @@ export class AccessLayer {
     return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   private requireNotificationObject(id: string): void {
-    if (!this.canView(id)) throw new HttpError(404, 'Notification is unavailable.', 'NOTIFICATION_UNAVAILABLE');
+    this.store.notifications.requireVisibleObject(this.principal, id);
   }
   requireNotificationAction(input: NotificationReadInput): void {
-    if (input.action === 'read' || input.action === 'unread') this.requireNotificationObject(this.store.notifications.notificationObjectId(this.principal, input.notificationId));
+    if (input.action === 'read' || input.action === 'unread') this.store.notifications.requireVisibleDelivery(this.principal, input.notificationId);
     else if (input.action === 'read_object') this.requireNotificationObject(notificationReadObjectId(input));
   }
   presentNotificationRead(input: NotificationReadInput, response: MutationResponse, retryKeySha256: string): MutationResponse {
@@ -157,6 +157,7 @@ export class AccessLayer {
     if (operation.principalId !== this.principal || operation.attribution.principalId !== this.principal || operation.retryKeySha256 !== retryKeySha256
       || operation.inputSha256 !== createHash('sha256').update(JSON.stringify(input)).digest('hex') || !isDeepStrictEqual(operation.input, input) || !isDeepStrictEqual(body, operation.receipt)) return invalid();
     for (const id of operation.affectedObjectIds) this.requireNotificationObject(id);
+    for (const effect of operation.affected) this.store.notifications.requireVisibleDelivery(this.principal, effect.id);
     return { status: 200, body: { ...operation.receipt, accessEpoch: this.policies.epoch() } };
   }
   revisionProjects(id: string): RevisionProjectSnapshot {

@@ -24,7 +24,7 @@ The `#almanac` interface provides forms, named relationship suggestions with dir
 
 The behavioral reference is the Almanac application at pinned upstream `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`. The 2021 reference and latest changes were inspected read-only, especially interface/binding policy relationships, uniqueness, custom service types and property editing. No PHP runtime or bundled dependencies are reused.
 
-Remaining original capabilities include namespace reservations and namespace-aware naming, SSH device enrollment and trusted keys, cluster database/repository service types, Drydock pool service discovery, specialized service-property schemas/defaults, full saved queries/Conduit interchange, automatic subscription/mail delivery and upstream import. There is no claim of full Almanac parity.
+Remaining original capabilities include namespace reservations and namespace-aware naming, SSH device enrollment and trusted keys, cluster database/repository service types, Drydock pool service discovery, specialized service-property schemas/defaults, full saved queries/Conduit interchange, full native historical reconstruction and ongoing upstream synchronization. Current-policy [following and notifications](notifications.md), explicit opt-in [email delivery](notification-email.md), and previewed [upstream XML imports](suite-import.md) are implemented. There is no claim of full Almanac parity.
 
 ## Verification
 

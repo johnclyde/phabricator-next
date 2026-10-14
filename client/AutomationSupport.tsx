@@ -32,11 +32,21 @@ export function useAutomationRead<T extends { accessEpoch: number }>(path: strin
     } catch (failure) { if (mounted.current && current() && ticket === generation.current && client.isActive()) { setData(null); setError(isNetworkError(failure) ? 'Reconnect and refresh to load automation.' : automationError(failure)); } }
     finally { if (mounted.current && current() && ticket === generation.current) setLoading(false); }
   }, [client, path, online]);
+  const latestLoad = useRef(load); latestLoad.current = load;
   useEffect(() => {
     mounted.current = true;
+    let refreshQueued = false;
     const clear = () => { generation.current++; setData(null); setLoading(false); };
-    const access = client.onAccessChange(clear), locked = onSessionLocked(clear);
-    return () => { mounted.current = false; generation.current++; access(); locked(); };
+    const retire = () => {
+      clear();
+      if (refreshQueued) return;
+      refreshQueued = true;
+      // Epoch invalidation happens inside request(), before its promise returns.
+      // Reject that in-flight generation, then read again at current authority.
+      queueMicrotask(() => { refreshQueued = false; if (mounted.current && requestRef.current.client === client) void latestLoad.current(); });
+    };
+    const access = client.onAccessChange(retire), snapshots = client.onTaskSnapshotChange(retire), locked = onSessionLocked(clear);
+    return () => { mounted.current = false; generation.current++; access(); snapshots(); locked(); };
   }, [client]);
   useEffect(() => { setData(null); setLoading(false); setError(''); void load(); return () => { generation.current++; }; }, [load]);
   return { data, error, loading, reload: load, setData };
@@ -46,11 +56,11 @@ export interface AutomationIntent { id: string; path: string; method: MutationMe
 function readIntent(value: unknown): AutomationIntent | null {
   if (!value || typeof value !== 'object') return null;
   const input = value as Record<string, unknown>;
-  return typeof input.id === 'string' && typeof input.path === 'string' && (/^(?:\/api\/(?:suite|audit|herald|harbormaster|drydock|landings)\/|\/api\/revisions\/[DPL][1-9]\d*\/landings$)/.test(input.path)) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
+  return typeof input.id === 'string' && typeof input.path === 'string' && (/^(?:\/api\/(?:suite|audit|herald|harbormaster|drydock|landings)\/|\/api\/revisions\/[DPL][1-9]\d*\/landings$|\/api\/mail\/preferences$)/.test(input.path)) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
 }
 
 /** Retain one immutable request before sending it; recovery is always explicit. */
-export function useAutomationMutation(scope: 'audit' | 'herald' | 'harbormaster' | 'drydock' | `suite:${string}` | `revision-builds:${string}` | `landing:${string}`, online: boolean) {
+export function useAutomationMutation(scope: 'mail' | 'audit' | 'herald' | 'harbormaster' | 'drydock' | `suite:${string}` | `revision-builds:${string}` | `landing:${string}`, online: boolean) {
   const client = useWorkspace(), key = `draft:automation:${scope}:request`;
   const [pending, setPending] = useState(() => readIntent(client.readStored(key, null))), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const mounted = useRef(true), sending = useRef(false);

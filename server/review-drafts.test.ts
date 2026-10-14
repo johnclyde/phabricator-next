@@ -183,7 +183,7 @@ test('schema35 adds private storage without changing historical rows and refuses
     // triggers) to construct the prior schema, not merely relabel a new schema.
     s.database.exec("DROP TABLE review_draft_operations; DROP TABLE review_draft_entries; DROP TABLE review_draft_sets; CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Preserve'); PRAGMA user_version=34");
     const before = snapshot(s.database); s.close(); s = new Store({ path });
-    assert.equal(s.database.prepare('PRAGMA user_version').get()!.user_version, 41);
+    assert.equal(s.database.prepare('PRAGMA user_version').get()!.user_version, 42);
     const after = snapshot(s.database); for (const row of before.schema) assert.deepEqual(after.schema.find(next => next.name === row.name), row); for (const [table, rows] of Object.entries(before.rows)) assert.deepEqual(after.rows[table], rows);
     assert.deepEqual(s.reviewDrafts.snapshot(f.id, alice.principalId).entries, []); assert.deepEqual(s.database.prepare('PRAGMA foreign_key_check').all(), []);
     s.database.exec("DROP TABLE review_draft_operations; DROP TABLE review_draft_entries; DROP TABLE review_draft_sets; CREATE TABLE review_draft_sets(operator_note TEXT); INSERT INTO review_draft_sets VALUES('Do not overwrite'); PRAGMA user_version=34");

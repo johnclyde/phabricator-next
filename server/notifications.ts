@@ -6,8 +6,8 @@ import type { RevisionAuthorHead } from '../shared/revision-authorship.ts';
 import { isRevisionAuthorId } from '../shared/revision-authorship.ts';
 import { isRevisionId } from '../shared/revision-dependencies.ts';
 import { isRevisionMetadataAttribution } from '../shared/revision-metadata.ts';
-import { NOTIFICATION_LIMITS, isNotificationEvent, isNotificationItem, isNotificationObjectId, notificationEvent, notificationInput, notificationQuery, notificationReadObjectId, validNotificationResult } from '../shared/notifications.ts';
-import type { NotificationContext, NotificationEvent, NotificationInbox, NotificationInput, NotificationItem, NotificationKind, NotificationQuery, NotificationReceipt, NotificationSummary } from '../shared/notifications.ts';
+import { NOTIFICATION_LIMITS, isNotificationEvent, isNotificationItem, isNotificationObjectId, notificationEvent, notificationInput, notificationQuery, notificationReadObjectId, suiteNotificationApp, validNotificationResult } from '../shared/notifications.ts';
+import type { NotificationContext, NotificationEvent, NotificationInbox, NotificationInput, NotificationItem, NotificationKind, NotificationQuery, NotificationReceipt, NotificationSummary, SuiteNotificationContext } from '../shared/notifications.ts';
 import { HttpError } from './validation.ts';
 
 interface CauseFields { requireActorView?: boolean; kind: NotificationKind; cause: { type: string; id: string }; attribution?: ActorAttribution; createdAt?: string }
@@ -15,6 +15,7 @@ export type NotificationCause = CauseFields & ({ revisionId: string; head?: Revi
 interface CapturedCause extends CauseFields { objectId: string; context: NotificationContext }
 export type NotificationPublisher = (cause: NotificationCause) => void;
 export interface NotificationEligibility { eligible: (principalId: string) => boolean; canView: (objectId: string, principalId: string) => boolean }
+export interface SuiteNotificationAdapter { target(id: string): { title: string; context: SuiteNotificationContext }; recipients(id: string): { recipients: string[]; muted: string[] }; canViewEvent(event: NotificationEvent, principalId: string): boolean }
 interface Options { revision: (id: string) => { title: string; kind: 'code' | 'paper' | 'document'; head: RevisionAuthorHead; broadcast: boolean }; task?: (id: string) => { title: string; version: number }; wiki?: (id: string) => { title: string; context: Extract<NotificationContext, {kind:'wiki'}> }; paste?: (id: string) => { title: string; context: Extract<NotificationContext, {kind:'paste'}> }; recipients: (id: string) => { recipients: string[]; muted: string[] } }
 interface Delivery { id: string; sequence: number; event_id: string; principal_id: string; revision_id: string; read: number; version: number }
 interface ReadState { read: boolean; version: number }
@@ -35,25 +36,25 @@ function parse(value: unknown): NotificationInput { try { return notificationInp
 export function notificationInputHash(input: NotificationInput): string { return createHash('sha256').update(JSON.stringify(parse(input))).digest('hex'); }
 let serial = 0;
 function scope<T>(db: DatabaseSync, work: () => T, write = false): T { const name = `notifications_${++serial}`; db.exec(`SAVEPOINT ${name}`); try { if (write) db.exec('UPDATE notification_read_state SET version=version WHERE 0'); const result = work(); db.exec(`RELEASE ${name}`); return result; } catch (error) { db.exec(`ROLLBACK TO ${name}; RELEASE ${name}`); throw error; } }
-export function initializeNotifications(db: DatabaseSync): void { initializeNotificationSchema(db, true); }
+export function initializeNotifications(db: DatabaseSync): void { initializeNotificationSchema(db, true, !!db.prepare("SELECT 1 FROM sqlite_schema WHERE name='notification_target_exists'").get()); }
 /** Binary fences permit new target types without rewriting existing event or
- * operation bytes. The historical column name and entity FK remain unchanged. */
+ * operation bytes. Schema 42 separately expands target existence to suite records. */
 export function initializeNotificationTargets(db: DatabaseSync): void { initializeNotifications(db); }
-function initializeNotificationSchema(db: DatabaseSync, verifyExisting: boolean): void {
+function initializeNotificationSchema(db: DatabaseSync, verifyExisting: boolean, suiteTargets = false): void {
   scope(db, () => {
     if (verifyExisting) {
       const existing = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name GLOB 'notification_*' ORDER BY type,name").all();
       if (existing.length) {
         const canonical = new DatabaseSync(':memory:');
         try {
-          initializeNotificationSchema(canonical, false);
+          initializeNotificationSchema(canonical, false, suiteTargets);
           const expected = canonical.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name GLOB 'notification_*' ORDER BY type,name").all() as { name: string }[];
           for (const value of existing as { name: string }[]) if (!isDeepStrictEqual(value, expected.find(row => row.name === value.name))) throw new Error(`Unexpected ${value.name} schema; notification migration was not applied.`);
         } finally { canonical.close(); }
       }
     }
     db.exec(`
-      CREATE TABLE IF NOT EXISTS notification_events(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL REFERENCES entities(id),cause_type TEXT NOT NULL,cause_id TEXT NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),UNIQUE(revision_id,cause_type,cause_id));
+      CREATE TABLE IF NOT EXISTS notification_events(id TEXT PRIMARY KEY,revision_id TEXT NOT NULL${suiteTargets ? '' : ' REFERENCES entities(id)'},cause_type TEXT NOT NULL,cause_id TEXT NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),UNIQUE(revision_id,cause_type,cause_id));
       CREATE TABLE IF NOT EXISTS notification_deliveries(sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,event_id TEXT NOT NULL REFERENCES notification_events(id),principal_id TEXT NOT NULL,read INTEGER NOT NULL CHECK(read IN(0,1)),version INTEGER NOT NULL CHECK(version>=0),UNIQUE(event_id,principal_id));
       CREATE INDEX IF NOT EXISTS notification_deliveries_person ON notification_deliveries(principal_id,sequence);
       CREATE INDEX IF NOT EXISTS notification_deliveries_unread ON notification_deliveries(principal_id,read,sequence);
@@ -65,15 +66,51 @@ function initializeNotificationSchema(db: DatabaseSync, verifyExisting: boolean)
       CREATE TRIGGER IF NOT EXISTS notification_delivery_identity BEFORE UPDATE OF sequence,id,event_id,principal_id ON notification_deliveries BEGIN SELECT RAISE(ABORT,'Notification identities are immutable'); END;
       CREATE TRIGGER IF NOT EXISTS notification_delivery_no_delete BEFORE DELETE ON notification_deliveries BEGIN SELECT RAISE(ABORT,'Notification deliveries are durable'); END;
     `);
+    if (suiteTargets) db.exec("CREATE TRIGGER IF NOT EXISTS notification_target_exists BEFORE INSERT ON notification_events WHEN NOT EXISTS(SELECT 1 FROM entities WHERE id=NEW.revision_id) AND NOT EXISTS(SELECT 1 FROM suite_records WHERE id=NEW.revision_id) BEGIN SELECT RAISE(ABORT,'Notification target does not exist'); END;");
     for (const table of ['notification_events', 'notification_operations', 'notification_read_changes', 'notification_cursor_secret']) db.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_no_update BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(ABORT,'Notification evidence is immutable'); END; CREATE TRIGGER IF NOT EXISTS ${table}_no_delete BEFORE DELETE ON ${table} BEGIN SELECT RAISE(ABORT,'Notification evidence is immutable'); END;`);
     for (const [table, columns] of Object.entries({ notification_events: ['id', 'revision_id', 'cause_type', 'cause_id', 'data'], notification_deliveries: ['sequence', 'id', 'event_id', 'principal_id', 'read', 'version'], notification_read_state: ['principal_id', 'version'], notification_operations: ['id', 'principal_id', 'input_sha256', 'before_version', 'after_version', 'data'], notification_read_changes: ['notification_id', 'version', 'operation_id', 'before_read', 'after_read'], notification_cursor_secret: ['id', 'secret'] })) if (!isDeepStrictEqual((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name), columns)) throw new Error(`Unexpected ${table} schema; notification migration was not applied.`);
     db.prepare('INSERT OR IGNORE INTO notification_cursor_secret(id,secret) VALUES(1,?)').run(randomBytes(32));
   });
 }
 
+/** Upgrade the sole target FK without rewriting immutable event or read evidence.
+ * Child tables are copied before rebuilding so foreign_keys may remain enabled,
+ * including when the caller already holds the schema migration transaction. */
+export function initializeNotificationSuiteTargets(db: DatabaseSync): void {
+  scope(db, () => {
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name='notification_target_exists'").get()) { initializeNotificationSchema(db, true, true); return; }
+    initializeNotificationSchema(db, true, false);
+    const sequence = db.prepare("SELECT rowid,seq FROM sqlite_sequence WHERE name='notification_deliveries'").get() as { rowid: number; seq: number } | undefined;
+    const tables = ['notification_events', 'notification_deliveries', 'notification_read_changes'];
+    // Unrecognized dependents must be migrated explicitly, never silently lost.
+    for (const table of tables) if (db.prepare("SELECT 1 FROM sqlite_schema WHERE tbl_name=? AND sql IS NOT NULL AND name NOT GLOB 'notification_*'").get(table)) throw new Error('Unexpected notification schema dependency.');
+    for (const row of db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) {
+      const name = String(row.name);
+      if (tables.includes(name)) continue;
+      for (const fk of db.prepare(`PRAGMA foreign_key_list("${name.replaceAll('"', '""')}")`).all()) if (tables.includes(String(fk.table))) throw new Error('Unexpected notification schema dependency.');
+    }
+    for (const table of tables) db.exec(`CREATE TEMP TABLE suite_backup_${table} AS SELECT rowid AS backup_rowid,* FROM ${table}`);
+    for (const table of [...tables].reverse()) db.exec(`DROP TABLE ${table}`);
+    initializeNotificationSchema(db, true, true);
+    for (const table of tables) {
+      const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name).join(',');
+      db.exec(`INSERT INTO ${table}(rowid,${columns}) SELECT backup_rowid,${columns} FROM suite_backup_${table} ORDER BY backup_rowid`);
+      const original = db.prepare(`SELECT * FROM suite_backup_${table} ORDER BY backup_rowid`).all();
+      const copied = db.prepare(`SELECT rowid AS backup_rowid,* FROM ${table} ORDER BY rowid`).all();
+      if (!isDeepStrictEqual(original, copied)) throw new Error('Notification evidence changed during migration.');
+      db.exec(`DROP TABLE suite_backup_${table}`);
+    }
+    if (sequence) db.prepare("UPDATE sqlite_sequence SET rowid=?,seq=? WHERE name='notification_deliveries'").run(sequence.rowid, sequence.seq);
+    else db.prepare("DELETE FROM sqlite_sequence WHERE name='notification_deliveries'").run();
+    if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('Notification migration left invalid references.');
+  });
+}
+
 /** Logical causes are queued only within a synchronous writer scope. The outer
  * Store scope flushes after final creation policy configuration, before commit. */
 export class NotificationStore {
+  private suite: SuiteNotificationAdapter | null = null;
+  connectSuite(adapter: SuiteNotificationAdapter): void { if (this.suite) throw new Error('Suite notifications are already connected.'); this.suite = adapter; }
   private eligibility: NotificationEligibility | null = null;
   private queues: CapturedCause[][] = [];
   constructor(private readonly database: DatabaseSync, private readonly options: Options) {}
@@ -81,6 +118,7 @@ export class NotificationStore {
   batch<T>(work: () => T): T { const queue: CapturedCause[] = []; this.queues.push(queue); try { const result = work(); this.queues.pop(); const parent = this.queues.at(-1); if (parent) parent.push(...queue); else for (const cause of queue) this.publish(cause); return result; } catch (error) { if (this.queues.at(-1) === queue) this.queues.pop(); throw error; } }
   flush(): void { const queue = this.queues.at(-1); if (queue) for (const cause of queue.splice(0)) this.publish(cause); }
   private target(id: string): { object: NotificationItem['object']; context: NotificationContext; broadcast: boolean } {
+    if (suiteNotificationApp(id) && this.suite) { const target = this.suite.target(id); return { object: { id, title: target.title, kind: target.context.app }, context: target.context, broadcast: true }; }
     if (isRevisionId(id)) { const revision = this.options.revision(id); return { object: { id, title: revision.title, kind: revision.kind }, context: { kind: 'revision', head: revision.head }, broadcast: revision.broadcast }; }
     if (/^W[1-9]\d{0,14}$/.test(id) && this.options.wiki) { const wiki = this.options.wiki(id); return { object: { id, title: wiki.title, kind: 'wiki' }, context: wiki.context, broadcast: true }; }
     if (/^PA[1-9]\d{0,14}$/.test(id) && this.options.paste) { const paste = this.options.paste(id); return { object: { id, title: paste.title, kind: 'paste' }, context: paste.context, broadcast: true }; }
@@ -101,13 +139,18 @@ export class NotificationStore {
   private epoch(): number { const epoch = (this.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get() as { value: number }).value; if (!natural(epoch)) throw invalid(); return epoch; }
   private person(id: string): void { if (!isRevisionAuthorId(id) || !this.eligibility?.eligible(id)) throw unavailable(); }
   private visible(id: string, principalId: string): boolean { return !!this.eligibility?.eligible(principalId) && this.eligibility.canView(id, principalId); }
+  private eventVisible(event: NotificationEvent, principalId: string): boolean { return event.context.kind !== 'suite' || !!this.suite?.canViewEvent(event, principalId); }
+  requireVisibleObject(principalId: string, id: string): void { this.person(principalId); if (!this.visible(id, principalId)) throw unavailable(); }
+  requireVisibleDelivery(principalId: string, id: string): void { this.deliveryItem(principalId, id); }
+  /** Current projection only. Mail must reauthorize immediately before sending. */
+  deliveryItem(principalId: string, id: string): NotificationItem { this.person(principalId); const row = this.delivery(id, principalId); this.requireVisibleObject(principalId, row.revision_id); const item = this.item(row); if (!this.eventVisible(item.event, principalId)) throw unavailable(); return item; }
   private publish(cause: CapturedCause): void {
     if (!this.eligibility || !this.target(cause.objectId).broadcast || cause.requireActorView && (!cause.attribution || !this.visible(cause.objectId, cause.attribution.principalId))) return;
     if (this.database.prepare('SELECT 1 FROM notification_events WHERE revision_id=? AND cause_type=? AND cause_id=?').get(cause.objectId, cause.cause.type, cause.cause.id)) return;
     const event: NotificationEvent = { format: 'phabricator.notification-event.v2', id: randomUUID(), objectId: cause.objectId, kind: cause.kind, cause: { ...cause.cause }, actor: cause.attribution ? { principalId: cause.attribution.principalId, displayName: cause.attribution.displayName } : null, createdAt: cause.createdAt ?? new Date().toISOString(), context: cause.context };
     if (!isNotificationEvent(event)) throw invalid();
-    const preferences = this.options.recipients(cause.objectId), muted = new Set(preferences.muted), candidates = [...new Set(preferences.recipients)]; if (candidates.length > NOTIFICATION_LIMITS.recipients) throw limited();
-    const recipients = candidates.filter(id => id !== event.actor?.principalId && !muted.has(id) && this.visible(cause.objectId, id));
+    const preferences = suiteNotificationApp(cause.objectId) && this.suite ? this.suite.recipients(cause.objectId) : this.options.recipients(cause.objectId), muted = new Set(preferences.muted), candidates = [...new Set(preferences.recipients)]; if (candidates.length > NOTIFICATION_LIMITS.recipients) throw limited();
+    const recipients = candidates.filter(id => id !== event.actor?.principalId && !muted.has(id) && this.visible(cause.objectId, id) && this.eventVisible(event, id));
     this.database.prepare('INSERT INTO notification_events(id,revision_id,cause_type,cause_id,data) VALUES(?,?,?,?,?)').run(event.id, event.objectId, event.cause.type, event.cause.id, JSON.stringify(event));
     for (const principalId of recipients) this.database.prepare('INSERT INTO notification_deliveries(id,event_id,principal_id,read,version) VALUES(?,?,?,0,0)').run(randomUUID(), event.id, principalId);
   }
@@ -121,7 +164,17 @@ export class NotificationStore {
   private unread(principalId: string, view: Map<string, boolean>): number {
     const rows = this.database.prepare('SELECT e.revision_id,count(*) AS count FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.read=0 GROUP BY e.revision_id LIMIT ?').all(principalId, NOTIFICATION_LIMITS.unreadObjects + 1) as { revision_id: string; count: number }[];
     if (rows.length > NOTIFICATION_LIMITS.unreadObjects) throw limited(); let count = 0;
-    for (const row of rows) { if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id)) count += row.count; }
+    for (const row of rows) {
+      if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId));
+      if (!view.get(row.revision_id)) continue;
+      if (!suiteNotificationApp(row.revision_id)) { count += row.count; continue; }
+      let after = 0;
+      for (;;) {
+        const deliveries = this.database.prepare('SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.read=0 AND e.revision_id=? AND d.sequence>? ORDER BY d.sequence LIMIT 100').all(principalId, row.revision_id, after) as unknown as Delivery[];
+        for (const delivery of deliveries) { after = delivery.sequence; if (this.eventVisible(this.item(delivery).event, principalId)) count++; }
+        if (deliveries.length < 100) break;
+      }
+    }
     if (!natural(count)) throw limited(); return count;
   }
   summary(principalId: string, accessEpoch: number): NotificationSummary { return scope(this.database, () => { this.person(principalId); if (accessEpoch !== this.epoch()) throw changed(); return { principalId, horizon: this.seal({ kind: 'horizon', principalId, epoch: accessEpoch, high: this.high(principalId) }), unreadCount: this.unread(principalId, new Map()), readVersion: this.generation(principalId), accessEpoch }; }); }
@@ -148,7 +201,7 @@ export class NotificationStore {
       while (scanned < NOTIFICATION_LIMITS.scan && items.length < query.limit) {
         const rows = this.database.prepare(`SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.sequence<=? AND d.sequence<?${condition} ORDER BY d.sequence DESC LIMIT ?`).all(principalId, high, before, Math.min(100, NOTIFICATION_LIMITS.scan - scanned)) as unknown as Delivery[];
         if (!rows.length) break;
-        for (const row of rows) { scanned++; before = row.sequence; if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id)) items.push(this.item(row)); if (items.length === query.limit) break; }
+        for (const row of rows) { scanned++; before = row.sequence; if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id)) { const item = this.item(row); if (this.eventVisible(item.event, principalId)) items.push(item); } if (items.length === query.limit) break; }
         if (rows.length < 100 && items.length < query.limit) break;
       }
       more = !!this.database.prepare(`SELECT 1 FROM notification_deliveries d WHERE d.principal_id=? AND d.sequence<=? AND d.sequence<?${condition} LIMIT 1`).get(principalId, high, before);
@@ -159,13 +212,13 @@ export class NotificationStore {
     const request = parse(input); if (!isRevisionMetadataAttribution(actor) || actor.principalId !== principalId || retryKeySha256 !== null && !digest(retryKeySha256)) throw new HttpError(400, 'Authenticated notification attribution is required.');
     return scope(this.database, () => {
       this.person(principalId); const epoch = this.epoch(); if (request.expectedAccessEpoch !== epoch) throw changed(); const rows: Delivery[] = [], view = new Map<string, boolean>();
-      if (request.action === 'read' || request.action === 'unread') { const row = this.delivery(request.notificationId, principalId); if (!this.visible(row.revision_id, principalId)) throw unavailable(); if (this.readCurrent(row).version !== request.expectedVersion) throw changed(); rows.push(row); }
+      if (request.action === 'read' || request.action === 'unread') { const row = this.delivery(request.notificationId, principalId); if (!this.visible(row.revision_id, principalId) || !this.eventVisible(this.item(row).event, principalId)) throw unavailable(); if (this.readCurrent(row).version !== request.expectedVersion) throw changed(); rows.push(row); }
       else {
         if (request.action === 'read_object' && !this.visible(notificationReadObjectId(request), principalId)) throw unavailable();
         const boundary = this.unseal(('horizon' in request ? request.horizon : ''), 'horizon', principalId, epoch);
         const candidates = this.database.prepare(`SELECT d.*,e.revision_id FROM notification_deliveries d JOIN notification_events e ON e.id=d.event_id WHERE d.principal_id=? AND d.sequence<=? AND d.read=0${request.action === 'read_object' ? ' AND e.revision_id=?' : ''} ORDER BY d.sequence LIMIT ?`).all(principalId, boundary.high, ...(request.action === 'read_object' ? [notificationReadObjectId(request)] : []), NOTIFICATION_LIMITS.readRows + 1) as unknown as Delivery[];
         if (candidates.length > NOTIFICATION_LIMITS.readRows) throw limited();
-        for (const row of candidates) { if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id)) rows.push(row); }
+        for (const row of candidates) { if (!view.has(row.revision_id)) view.set(row.revision_id, this.visible(row.revision_id, principalId)); if (view.get(row.revision_id) && this.eventVisible(this.item(row).event, principalId)) rows.push(row); }
       }
       const affected = rows.map(row => { const before = this.readCurrent(row), desired = request.action !== 'unread'; return { id: row.id, objectId: row.revision_id, before, after: { read: desired, version: before.version + Number(before.read !== desired) } }; });
       const changedValue = affected.some(row => row.before.read !== row.after.read), beforeReadVersion = this.generation(principalId), afterReadVersion = beforeReadVersion + Number(changedValue); if (!natural(afterReadVersion) || affected.some(row => !natural(row.after.version))) throw limited();

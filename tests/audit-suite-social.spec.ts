@@ -5,6 +5,7 @@ import { authAccounts } from './auth-fixture';
 import type { SuiteDetail } from '../shared/suite';
 import type { ConpherenceData } from '../shared/conpherence';
 import type { CalendarData } from '../shared/calendar';
+import type { Space } from '../shared/policy';
 
 const base = normalizeBasePath(process.env.APP_BASE_PATH), authenticatedBase = `http://127.0.0.1:4312${base}`;
 test.use({ baseURL: authenticatedBase });
@@ -36,6 +37,88 @@ async function screenshot(page: Page, name: string) {
   await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' })); await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0); await mkdir('.data/suite-social-visual', { recursive: true });
   await page.screenshot({ path: `.data/suite-social-visual/${name}.png`, fullPage: true });
 }
+
+async function signedMutation<T>(page: Page, path: string, body: unknown, method = 'POST'): Promise<T> {
+  const result = await page.evaluate(async ({ base, path, body, method }) => {
+    const session = await (await fetch(`${base}api/session`)).json();
+    const response = await fetch(`${base}api/${path}`, { method, headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID(), 'X-Session-Context': session.sessionContext, 'X-CSRF-Token': session.csrfToken }, body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  }, { base, path, body, method });
+  expect(result.status, JSON.stringify(result.body)).toBeGreaterThanOrEqual(200); expect(result.status).toBeLessThan(300); return result.body as T;
+}
+
+test('Conpherence live messages preserve pinned offline drafts and retire removed participants', async ({ page, browser }, info) => {
+  await signIn(page, 0); await page.goto(`${authenticatedBase}#conpherence`);
+  await action(page, 'Conpherence', 'Create Conversation', async form => {
+    await form.getByLabel('Conversation title', { exact: true }).fill(`Live discussion ${info.project.name} ${Date.now()}`);
+    await form.getByRole('group', { name: 'Participants', exact: true }).getByRole('checkbox', { name: 'Bob Editor', exact: true }).check();
+    await form.getByLabel('First message', { exact: true }).fill('Saved opening argument.');
+  });
+  const id = new URL(page.url()).hash.split('/')[1]!, messages = page.getByRole('region', { name: 'Conversation messages', exact: true });
+  await expect(page.getByLabel('Conversation connection', { exact: true })).toHaveText('Live updates connected.');
+  const second = await browser.newContext({ baseURL: authenticatedBase, viewport: page.viewportSize(), isMobile: info.project.use.isMobile, hasTouch: info.project.use.hasTouch, deviceScaleFactor: info.project.use.deviceScaleFactor });
+  try {
+    const bob = await second.newPage(); await signIn(bob, 1); await bob.goto(`${authenticatedBase}#conpherence/${id}`);
+    await expect(bob.getByRole('region', { name: 'Conversation messages', exact: true })).toContainText('Saved opening argument.');
+    await page.getByRole('button', { name: 'Send Message', exact: true }).click();
+    const draft = page.getByRole('form', { name: 'Conpherence editor', exact: true }), unsent = 'My carefully retained, unsent argument.';
+    await draft.getByLabel('Message', { exact: true }).fill(unsent);
+    const pinned = await draft.locator('.small.muted').first().textContent();
+    await action(bob, 'Conpherence', 'Send Message', async form => { await form.getByLabel('Message', { exact: true }).fill('**The bound holds.**\n\n<script>unsafe()</script> @alice'); });
+    await expect(messages.locator('strong').filter({ hasText: 'The bound holds.' })).toBeVisible();
+    await expect(messages).toContainText('<script>unsafe()</script> @alice');
+    expect(await messages.locator('script').count()).toBe(0);
+    await expect(draft.getByLabel('Message', { exact: true })).toHaveValue(unsent);
+    await expect(draft.locator('.small.muted').first()).toHaveText(pinned!);
+    await expect(draft.getByRole('button', { name: 'Use Current Version', exact: true })).toBeVisible();
+    await expect(draft.getByRole('button', { name: 'Send Message', exact: true })).toBeDisabled();
+    await page.context().setOffline(true);
+    await expect(page.getByLabel('Conversation connection', { exact: true })).toContainText('offline');
+    await action(bob, 'Conpherence', 'Send Message', async form => { await form.getByLabel('Message', { exact: true }).fill('New evidence while the other client is offline.'); });
+    await expect(draft.getByLabel('Message', { exact: true })).toHaveValue(unsent);
+    await page.context().setOffline(false);
+    await expect(messages).toContainText('New evidence while the other client is offline.');
+    await expect(draft.locator('.small.muted').first()).toHaveText(pinned!);
+    const saved = (await read(bob, `conpherence/${id}`)).body.record.data as ConpherenceData;
+    expect(saved.messages).toHaveLength(3); expect(saved.messages.some(message => message.body === unsent)).toBe(false);
+    await action(bob, 'Conpherence', 'Edit Participants', async form => { await form.getByRole('checkbox', { name: 'Alice Researcher', exact: true }).uncheck(); });
+    await expect(messages).toHaveCount(0);
+    await expect(draft.getByLabel('Message', { exact: true })).toHaveValue(unsent);
+    await expect(draft.getByRole('button', { name: 'Send Message', exact: true })).toBeDisabled();
+    await expect(draft.getByRole('button', { name: 'Export Draft', exact: true })).toBeEnabled();
+    expect((await read(page, `conpherence/${id}`)).status).toBe(404);
+  } finally { await page.context().setOffline(false); await second.close(); }
+});
+
+test('Conpherence live transport retires Space-revoked content and an expired server session', async ({ page, browser }, info) => {
+  await signIn(page, 0);
+  const space = await signedMutation<Space>(page, 'spaces', { name: `Live room Space ${info.project.name} ${Date.now()}`, view: { kind: 'workspace' } });
+  await page.reload();
+  await page.goto(`${authenticatedBase}#conpherence`);
+  await action(page, 'Conpherence', 'Create Conversation', async form => {
+    await form.getByLabel('Conversation title', { exact: true }).fill(`Space-bound live room ${info.project.name} ${Date.now()}`);
+    await form.getByRole('group', { name: 'Participants', exact: true }).getByRole('checkbox', { name: 'Bob Editor', exact: true }).check();
+    await form.getByLabel('First message', { exact: true }).fill('Visible only with both room and Space access.');
+    await form.getByLabel('Space', { exact: true }).selectOption(space.id);
+  });
+  const id = new URL(page.url()).hash.split('/')[1]!;
+  const second = await browser.newContext({ baseURL: authenticatedBase, viewport: page.viewportSize(), isMobile: info.project.use.isMobile, hasTouch: info.project.use.hasTouch, deviceScaleFactor: info.project.use.deviceScaleFactor });
+  try {
+    const bob = await second.newPage(); await signIn(bob, 1); await bob.goto(`${authenticatedBase}#conpherence/${id}`);
+    const messages = bob.getByRole('region', { name: 'Conversation messages', exact: true });
+    await expect(messages).toContainText('Visible only with both room and Space access.');
+    await bob.getByRole('button', { name: 'Send Message', exact: true }).click();
+    const draft = bob.getByRole('form', { name: 'Conpherence editor', exact: true }); await draft.getByLabel('Message', { exact: true }).fill('Private unsent work stays exportable.');
+    const owner = (await read(page, `conpherence/${id}`)).body.record.ownerId;
+    await signedMutation(page, `spaces/${space.id}`, { expectedVersion: space.version, view: { kind: 'principals', principalIds: [owner] } }, 'PATCH');
+    await expect(messages).toHaveCount(0);
+    await expect(draft.getByLabel('Message', { exact: true })).toHaveValue('Private unsent work stays exportable.');
+    await expect(draft.getByRole('button', { name: 'Send Message', exact: true })).toBeDisabled();
+    await signedMutation(bob, 'logout', {});
+    await expect(bob.getByRole('heading', { name: 'Sign in to your workspace', exact: true })).toBeVisible();
+    await expect(draft).toHaveCount(0);
+  } finally { await second.close(); }
+});
 
 test('Conpherence persists private conversation messages, read state, membership and personal archives', async ({ page, browser }, info) => {
   await signIn(page, 0);

@@ -32,7 +32,7 @@ All mutations require a write credential, an idempotency key and the current rec
 
 The behavioral reference is Legalpad at pinned upstream `5720a38cfe95b00ca4be5016dd0d2f3195f4fa04`, compared with the original 2021 reference. Document bodies, signing forms, exemptions and signature policy were inspected without running PHP. Native agreement identifiers use `LP-…` because the existing document-review application already uses `L…`.
 
-Missing original integrations include signature-required login gates, Legalpad signature policy rules and Herald edges, enforced high-security/MFA signing sessions, external/anonymous signing, email verification and delivery, corporate exemptions, subscriber/mail replies, complete Remarkup, saved-query and upstream migration/interchange compatibility. Agreement-level signer requests are not substitutes for these gates. No full Legalpad parity is claimed.
+Missing original integrations include signature-required login gates, Legalpad signature policy rules and Herald edges, enforced high-security/MFA signing sessions, external/anonymous signing, email verification, corporate exemptions, inbound mail replies, complete Remarkup, saved-query and full upstream interchange compatibility. Current-policy following and confidential inbox notifications, explicit opt-in [email delivery](notification-email.md), and [upstream XML imports](suite-import.md) are implemented. Imported signatures remain unverified evidence and never satisfy current signing requirements. Agreement-level signer requests are not substitutes for these gates. No full Legalpad parity is claimed.
 
 ## Verification
 

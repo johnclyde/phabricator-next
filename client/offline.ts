@@ -5,6 +5,7 @@ import { subscriptionAuthority as objectSubscriptionAuthority, subscriptionReadi
 import { taskMuteReading } from './task-notifications';
 import { projectTagReading } from './revision-projects';
 import { notificationCache, notificationIntent, notificationIntentObjectId } from './notification-client';
+import { isNotificationInbox, suiteNotificationApp } from '../shared/notifications';
 import { subscriptionAuthority, subscriptionReading } from './revision-subscriptions';
 import { metadataReading } from './revision-metadata';
 import { reviewerAuthority, reviewerReading } from './revision-reviewers';
@@ -31,7 +32,7 @@ interface RevisionStackLifetime {
   metadata: Map<string, string> | null;
 }
 const revisionStackLifetimes = new WeakMap<WorkspaceSession, RevisionStackLifetime>();
-interface NotificationLifetime { generation: number; listeners: Set<() => void>; controllers: Set<AbortController> }
+interface NotificationLifetime { generation: number; listeners: Set<() => void>; controllers: Set<AbortController>; suiteSources: Map<string, number> }
 const notificationLifetimes = new WeakMap<WorkspaceSession, NotificationLifetime>();
 // Informational responses can advance the observed epoch without supplying the
 // workspace's visibility and capability snapshot needed by a subsequent write.
@@ -48,9 +49,9 @@ function notificationLifetime(session: WorkspaceSession | null): NotificationLif
   if (!session) return null;
   let lifetime = notificationLifetimes.get(session);
   if (!lifetime) {
-    lifetime = { generation: 0, listeners: new Set(), controllers: new Set() }; notificationLifetimes.set(session, lifetime);
+    lifetime = { generation: 0, listeners: new Set(), controllers: new Set(), suiteSources: new Map() }; notificationLifetimes.set(session, lifetime);
     const retained = lifetime;
-    session.cleanupCallbacks.add(() => { retained.generation++; for (const controller of retained.controllers) controller.abort(); retained.controllers.clear(); retained.listeners.clear(); notificationLifetimes.delete(session); });
+    session.cleanupCallbacks.add(() => { retained.generation++; for (const controller of retained.controllers) controller.abort(); retained.controllers.clear(); retained.listeners.clear(); retained.suiteSources.clear(); notificationLifetimes.delete(session); });
   }
   return lifetime;
 }
@@ -150,6 +151,9 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     } catch { prefix = `workspace:${encodeURIComponent(session.state.workspaceId)}:`; }
   }
   const contentKey = (key: string) => storageKey(prefix + key);
+  // Suite objects are not enumerated by /api/state. Only a validated inbox read
+  // in this session can authorize their notification cache and read controls.
+  const notificationObjectVisible = (id: string): boolean => sessionIsActive(session) && !session.unavailableObjects.has(id) && (suiteNotificationApp(id) ? notifications?.suiteSources.get(id) === session.accessEpoch : session.visibleObjects === null || session.visibleObjects.has(id));
   const blockedDraft = (key: string, value?: unknown): boolean => {
     if (/^review-draft-(?:edit|summary|request):/.test(key)) {
       const target = objectFromKey(key), capabilities = target ? session?.objectCapabilities.get(target) : undefined;
@@ -158,7 +162,10 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       return draftObjects(key, input).some(id => session?.unavailableObjects.has(id) || session?.visibleObjects != null && !session.visibleObjects.has(id)) || Boolean(capabilities && !discard && !capabilities.interact);
     }
     if (/^draft:(?:landing|automation:(?:landing|revision-builds)):/.test(key)) { const ids = draftObjects(key, value), landing = /^draft:(?:landing|automation:landing):/.test(key); return ids.some(id => session?.unavailableObjects.has(id) || session?.visibleObjects != null && !session.visibleObjects.has(id) || (id === objectFromKey(key) || landing && /^R[1-9]\d*$/.test(id)) && session?.objectCapabilities.get(id)?.edit === false); }
-    if (key.startsWith('notification-request:') || /^task-mute-(?:draft|request):/.test(key)) return draftObjects(key, value).some(id => session?.unavailableObjects.has(id) || session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id));
+    // Keep exact, source-free retry bytes across an epoch refresh. A prior proof
+    // permits retention only; sending still requires a fresh inbox proof below.
+    if (key.startsWith('notification-request:')) return draftObjects(key, value).some(id => session?.unavailableObjects.has(id) || (suiteNotificationApp(id) ? !notifications?.suiteSources.has(id) : session?.visibleObjects != null && !session.visibleObjects.has(id)));
+    if (/^task-mute-(?:draft|request):/.test(key)) return draftObjects(key, value).some(id => session?.unavailableObjects.has(id) || session?.visibleObjects !== null && session?.visibleObjects !== undefined && !session.visibleObjects.has(id));
     if (key.startsWith('draft:document:new')) { let authority: WikiAuthority | undefined; try { authority = ((value ?? JSON.parse(rawRead(key) || 'null')) as { wikiAuthority?: WikiAuthority } | null)?.wikiAuthority; } catch { /* Preserve unreadable drafts. */ } return draftObjects(key, value).some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects && !session.visibleObjects.has(id))) || Boolean(authority?.parentId && session?.objectCapabilities.get(authority.parentId)?.edit === false); }
     if (/^wiki-(?:move|request|edit|action|action-request):/.test(key)) { const ids = draftObjects(key, value), target = objectFromKey(key); let edits: string[] = []; try { edits = ((value ?? JSON.parse(rawRead(key) || 'null')) as { editIds?: string[] } | null)?.editIds || []; } catch { /* Keep unreadable recovery. */ } return ids.some(id => session?.unavailableObjects.has(id) || (session?.visibleObjects && !session.visibleObjects.has(id))) || [target, ...edits].some(id => id && session?.objectCapabilities.get(id)?.edit === false); }
     if (/^object-subscription-(?:draft|request):/.test(key)) {
@@ -450,7 +457,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (key === 'outbox' || key.startsWith('task-draft:') || (key.startsWith('project-draft:') || key.startsWith('project-child:'))) holdLegacyTaskUpdates();
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id)) || blockedDraft(key) || hasDraftHold(key)) return fallback;
-    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (key.startsWith('review-drafts:') && (!isReviewDraftSnapshot(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`) || parsed.accessEpoch < session.accessEpoch)) return fallback; if (key.startsWith('object-subscriptions:')) { const reading = objectSubscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('task-mute:')) { const reading = taskMuteReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('notifications:')) { const reading = notificationCache(parsed, session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.summary.accessEpoch < session.accessEpoch || reading.pages.some(page => page.items.some(item => session.unavailableObjects.has(item.event.objectId) || session.visibleObjects !== null && !session.visibleObjects.has(item.event.objectId)))) return fallback; } if ((key.startsWith('revision-stack:') && (!isRevisionStack(parsed, objectFromKey(key) || '') || parsed.nodes.some(node => session.unavailableObjects.has(node.id) || (session.visibleObjects !== null && !session.visibleObjects.has(node.id))))) || (key.startsWith('revision-projects:') && (!projectTagReading(parsed, objectFromKey(key) || '') || projectTagReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-subscriptions:') && (!subscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`) || subscriptionReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-metadata:') && (!metadataReading(parsed, objectFromKey(key) || '') || metadataReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-reviewers:') && (!reviewerReading(parsed, objectFromKey(key) || '') || reviewerReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-lifecycle:') && (!lifecycleReading(parsed, objectFromKey(key) || '') || lifecycleReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-authorship:') && (!authorReading(parsed, objectFromKey(key) || '') || authorReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-dependencies:') && !dependencySnapshot(parsed, objectFromKey(key) || '')) || !currentProjectCache(key, parsed) || !currentWikiSearchCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('review-drafts:') || key.startsWith('revision-stack:') || key.startsWith('revision-projects:') || key.startsWith('object-subscriptions:') || key.startsWith('revision-subscriptions:') || key.startsWith('revision-metadata:') || key.startsWith('revision-reviewers:') || key.startsWith('revision-lifecycle:') || key.startsWith('revision-authorship:') || key.startsWith('revision-dependencies:') || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('wiki-search:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task-mute:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !heldFamily(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
+    try { const value = rawRead(key); const parsed: unknown = value ? JSON.parse(value) : fallback; if (key.startsWith('review-drafts:') && (!isReviewDraftSnapshot(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`) || parsed.accessEpoch < session.accessEpoch)) return fallback; if (key.startsWith('object-subscriptions:')) { const reading = objectSubscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('task-mute:')) { const reading = taskMuteReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < session.accessEpoch) return fallback; } if (key.startsWith('notifications:')) { const reading = notificationCache(parsed, session.state.account?.id || `local:${session.state.workspaceId}`); if (!reading || reading.summary.accessEpoch < session.accessEpoch || reading.pages.some(page => page.items.some(item => !notificationObjectVisible(item.event.objectId)))) return fallback; } if ((key.startsWith('revision-stack:') && (!isRevisionStack(parsed, objectFromKey(key) || '') || parsed.nodes.some(node => session.unavailableObjects.has(node.id) || (session.visibleObjects !== null && !session.visibleObjects.has(node.id))))) || (key.startsWith('revision-projects:') && (!projectTagReading(parsed, objectFromKey(key) || '') || projectTagReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-subscriptions:') && (!subscriptionReading(parsed, objectFromKey(key) || '', session.state.account?.id || `local:${session.state.workspaceId}`) || subscriptionReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-metadata:') && (!metadataReading(parsed, objectFromKey(key) || '') || metadataReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-reviewers:') && (!reviewerReading(parsed, objectFromKey(key) || '') || reviewerReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-lifecycle:') && (!lifecycleReading(parsed, objectFromKey(key) || '') || lifecycleReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-authorship:') && (!authorReading(parsed, objectFromKey(key) || '') || authorReading(parsed, objectFromKey(key) || '')!.snapshot.accessEpoch < session.accessEpoch)) || (key.startsWith('revision-dependencies:') && !dependencySnapshot(parsed, objectFromKey(key) || '')) || !currentProjectCache(key, parsed) || !currentWikiSearchCache(key, parsed)) return fallback; if ((docxSnapshot(key, parsed) || key.startsWith('review-drafts:') || key.startsWith('revision-stack:') || key.startsWith('revision-projects:') || key.startsWith('object-subscriptions:') || key.startsWith('revision-subscriptions:') || key.startsWith('revision-metadata:') || key.startsWith('revision-reviewers:') || key.startsWith('revision-lifecycle:') || key.startsWith('revision-authorship:') || key.startsWith('revision-dependencies:') || key.startsWith('wiki:') || key.startsWith('wiki-path:') || key.startsWith('wiki-search:') || key.startsWith('paste:') || key.startsWith('paste-version:') || key.startsWith('paste-history:') || key.startsWith('paste-list:') || key.startsWith('task-mute:') || key.startsWith('task:') || key.startsWith('project:') || key.startsWith('workboard:') || key.startsWith('discussion-preferences:') || /^repository:R\d+:cache$/.test(key)) && parsed && typeof parsed === 'object' && 'accessEpoch' in parsed && typeof parsed.accessEpoch === 'number' && parsed.accessEpoch < session.accessEpoch) return fallback; return (key === 'outbox' && Array.isArray(parsed) ? (parsed as PendingMutation[]).filter(item => !heldFamily(`outbox:${item.id}`)) : parsed) as T; } catch { return fallback; }
   };
   const validPrivateReviewStorage = (key: string, value: unknown): boolean => {
     const base = key.replace(/:unsaved-memory$/, ''), id = objectFromKey(base) || '', principal = session?.state.account?.id || `local:${session?.state.workspaceId}`;
@@ -464,7 +471,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     syncDurableQuarantine();
     if (key.startsWith('object-subscriptions:')) { const reading = objectSubscriptionReading(value, objectFromKey(key) || '', session?.state.account?.id || `local:${session?.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < (session?.accessEpoch ?? -1)) return false; }
     if (key.startsWith('task-mute:')) { const reading = taskMuteReading(value, objectFromKey(key) || '', session?.state.account?.id || `local:${session?.state.workspaceId}`); if (!reading || reading.snapshot.accessEpoch < (session?.accessEpoch ?? -1)) return false; }
-    if (key.startsWith('notifications:')) { const reading = notificationCache(value, session?.state.account?.id || `local:${session?.state.workspaceId}`); if (!reading || reading.summary.accessEpoch < (session?.accessEpoch ?? -1) || reading.pages.some(page => page.items.some(item => session?.unavailableObjects.has(item.event.objectId) || session?.visibleObjects != null && !session.visibleObjects.has(item.event.objectId)))) return false; }
+    if (key.startsWith('notifications:')) { const reading = notificationCache(value, session?.state.account?.id || `local:${session?.state.workspaceId}`); if (!reading || reading.summary.accessEpoch < (session?.accessEpoch ?? -1) || reading.pages.some(page => page.items.some(item => !notificationObjectVisible(item.event.objectId)))) return false; }
     if ((key.startsWith('revision-stack:') && (!isRevisionStack(value, objectFromKey(key) || '') || value.nodes.some(node => session?.unavailableObjects.has(node.id) || (session?.visibleObjects != null && !session.visibleObjects.has(node.id))))) || (key.startsWith('revision-projects:') && (!projectTagReading(value, objectFromKey(key) || '') || projectTagReading(value, objectFromKey(key) || '')!.snapshot.accessEpoch < (session?.accessEpoch ?? -1))) || (key.startsWith('revision-subscriptions:') && (!subscriptionReading(value, objectFromKey(key) || '', session?.state.account?.id || `local:${session?.state.workspaceId}`) || subscriptionReading(value, objectFromKey(key) || '')!.snapshot.accessEpoch < (session?.accessEpoch ?? -1))) || (key.startsWith('revision-metadata:') && (!metadataReading(value, objectFromKey(key) || '') || metadataReading(value, objectFromKey(key) || '')!.snapshot.accessEpoch < (session?.accessEpoch ?? -1))) || (key.startsWith('revision-reviewers:') && (!reviewerReading(value, objectFromKey(key) || '') || reviewerReading(value, objectFromKey(key) || '')!.snapshot.accessEpoch < (session?.accessEpoch ?? -1))) || (key.startsWith('revision-lifecycle:') && (!lifecycleReading(value, objectFromKey(key) || '') || lifecycleReading(value, objectFromKey(key) || '')!.snapshot.accessEpoch < (session?.accessEpoch ?? -1))) || (key.startsWith('revision-authorship:') && (!authorReading(value, objectFromKey(key) || '') || authorReading(value, objectFromKey(key) || '')!.snapshot.accessEpoch < (session?.accessEpoch ?? -1))) || (key.startsWith('revision-dependencies:') && !dependencySnapshot(value, objectFromKey(key) || '')) || !currentWikiSearchCache(key, value)) return false;
     if (!sessionIsActive(session) || session.unavailableObjects.has(objectFromKey(key) || '') || session.unavailableObjects.has(session.revisionRepositories.get(objectFromKey(key) || '') || '') || [...(session.revisionFiles.get(objectFromKey(key) || '') || [])].some(id => session.unavailableObjects.has(id))) return false;
     if (key === 'state' || key.startsWith('revision:')) rememberRevisionSources(value);
@@ -664,7 +671,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const cachedState = (() => { try { return JSON.parse(rawRead('state') || 'null') as { access?: Record<string, ObjectAccess>; spaces?: { id: string }[] } | null; } catch { return null; } })();
     const cachedObjects = savedEntries().flatMap(([key, json]) => { try { return draftObjects(key, JSON.parse(json)); } catch { return []; } });
     const known = new Set([...(session.visibleObjects || []), ...session.objectGenerations.keys(), ...cachedObjects, ...rawOutbox().map(queuedObject).filter((id): id is string => id !== null), ...Object.keys(cachedState?.access || {}), ...(cachedState?.spaces || []).map(space => space.id)]);
-    invalidateObjects([...known].filter(id => !visible.has(id)));
+    invalidateObjects([...known].filter(id => !suiteNotificationApp(id) && !visible.has(id)));
     for (const [id, value] of Object.entries(access)) session.objectCapabilities.set(id, value.capabilities);
     let draftsChanged = false;
     const draftEntries = savedEntries();
@@ -763,7 +770,8 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     });
   };
   let initialTaskAccessVerification: Promise<unknown> | null = null;
-  const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }, authorityIds: readonly string[] = []): Promise<T> => {
+  const request = async <T,>(path: string, options?: { method: MutationMethod; body: unknown; id?: string; queued?: boolean }, authorityIds: readonly string[] = [], runtime?: { signal?: AbortSignal }): Promise<T> => {
+    runtime?.signal?.throwIfAborted();
     assertSession(session);
     syncDurableQuarantine();
     if (options?.queued) { holdLegacyTaskUpdates(); if (!canQueue(path, options.method, options.body)) throw new RequestError('This operation requires an explicit online save and cannot submit from the outbox.', 403, 'ACTION_FORBIDDEN'); }
@@ -828,6 +836,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     const relatedIds = [...new Set([...authorityIds, ...selectedProjectIds, ...(queuedWiki?.ancestorIds || []), ...(bulkDestination ? [bulkDestination, ...bulkTaskIds] : importSource ? [importSource] : boardMove ? [boardMove.taskId, boardMove.position?.beforeTaskId, boardMove.position?.afterTaskId].filter((id): id is string => typeof id === 'string') : [])])];
     const relatedGenerations = relatedIds.map(id => ({ id, generation: session.objectGenerations.get(id) || 0 }));
     const referenceUnavailable = () => {
+      if (notificationRequest) return new RequestError('Notification access must be refreshed. Reload your inbox before retrying this exact request.', 409, 'ACCESS_CHANGED');
       if (revisionProjectRequest || selectedProjectIds.some(id => session.unavailableObjects.has(id) || session.visibleObjects !== null && !session.visibleObjects.has(id) || relatedGenerations.some(item => item.id === id && item.generation !== (session.objectGenerations.get(id) || 0)))) return new RequestError('A selected project is unavailable. Your tag draft remains available for export.', 404, 'REVISION_PROJECT_UNAVAILABLE');
       if (dependencyRequest) return new RequestError('A selected related revision is unavailable. Your relationship draft remains available for export.', 404, 'REVISION_DEPENDENCY_UNAVAILABLE');
       if (wikiRequest) return new RequestError('A wiki parent or destination is unavailable. Your draft remains available for export.', 404, 'WIKI_PATH_UNAVAILABLE');
@@ -838,7 +847,7 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       const code = authorityIds.some(changed) ? 'COLUMN_UNAVAILABLE' : bulkTaskIds.some(changed) ? 'TASK_REFERENCE_UNAVAILABLE' : (bulkDestination || importSource) ? 'PROJECT_REFERENCE_UNAVAILABLE' : 'TASK_REFERENCE_UNAVAILABLE';
       return new RequestError(bulkDestination ? 'A selected column, project or task is no longer available. Review a new bulk move preview.' : importSource ? 'The source project is no longer available. Its import preview has been removed.' : 'A selected card is no longer available. Review the move before saving.', 404, code);
     };
-    if (relatedIds.some(id => session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) throw referenceUnavailable();
+    if (relatedIds.some(id => notificationRequest ? !notificationObjectVisible(id) : session.unavailableObjects.has(id) || (session.visibleObjects !== null && !session.visibleObjects.has(id)))) throw referenceUnavailable();
     const ownershipMutation = options?.method === 'PATCH' && /^\/api\/tasks\/T\d+$/.test(path) && options.body && typeof options.body === 'object' && 'ownerId' in options.body;
     const projectMutation = Boolean(childParent) || Boolean(options && /^\/api\/projects\/PROJ\d+(?:\/(membership|members|watchers|silence))?$/.test(path));
     let taskGeneration = session.taskSnapshotGeneration;
@@ -858,11 +867,15 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (objectId && session.unavailableObjects.has(session.revisionRepositories.get(objectId) || '')) { invalidateObjects([objectId]); throw unavailable(); }
       if (objectId && (session.unavailableObjects.has(objectId) || (session.objectGenerations.get(objectId) || 0) !== objectGeneration)) throw unavailable();
       if (relatedGenerations.some(({ id, generation }) => session.unavailableObjects.has(id) || (session.objectGenerations.get(id) || 0) !== generation)) throw referenceUnavailable();
+      if (notificationRequest && relatedIds.some(id => suiteNotificationApp(id) && !notificationObjectVisible(id))) throw referenceUnavailable();
       if (notificationRequest && notificationGeneration !== notifications?.generation) throw new RequestError('Notification visibility changed. Reload your inbox; the exact request is retained.', 409, 'ACCESS_CHANGED');
       if (stackRequest && stackGeneration !== stacks?.generation) throw new RequestError('The revision stack changed while loading. Reload its current relationships.', 409, 'REVISION_STACK_CHANGED');
       if (taskRequest && taskGeneration !== session.taskSnapshotGeneration) throw new RequestError(`${reviewDraftRequest ? 'Private review' : revisionProjectRequest ? 'Revision project tags' : objectSubscriptionRequest ? 'Following' : revisionSubscriptionRequest ? 'Revision following' : metadataRequest ? 'Revision details' : reviewerRequest ? 'Revision reviewers' : lifecycleRequest ? 'Revision lifecycle' : dependencyRequest ? 'Related revision' : repositoryRequest ? 'Repository' : citationRequest ? 'Citation evidence' : path.startsWith('/api/files') ? 'File' : path.startsWith('/api/projects/') ? 'Project' : 'Task'} visibility changed while loading. Reload this object; unsaved drafts are retained.`, 409, 'ACCESS_CHANGED');
     };
     const controller = new AbortController();
+    const abortRequest = () => controller.abort(runtime?.signal?.reason);
+    runtime?.signal?.addEventListener('abort', abortRequest, { once: true });
+    if (runtime?.signal?.aborted) abortRequest();
     session.controllers.add(controller);
     if (stackRequest) stacks?.controllers.add(controller);
     if (notificationRequest && !options) notifications?.controllers.add(controller);
@@ -881,9 +894,11 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
     }
     try {
       const response = await fetch(applicationPath(path), { method: options?.method || 'GET', headers, credentials: 'same-origin', cache: 'no-store', signal: controller.signal, ...(options ? { body: JSON.stringify(options.body) } : {}) });
+      runtime?.signal?.throwIfAborted();
       assertSession(session);
       if (response.status === 401) { lockSession('Your session ended or changed in another tab. Sign in again.'); throw new RequestError('Your session ended. Sign in again.', 401); }
       const data: unknown = await response.json();
+      runtime?.signal?.throwIfAborted();
       if (stateTicket !== null && stateTicket < stateOrder!.applied) throw new RequestError('A newer workspace snapshot has already loaded.', 409, 'STATE_SUPERSEDED');
       if (response.ok) rememberRevisionSources(data);
       if (response.ok && bulkMove && !(data && typeof data === 'object' && 'projectId' in data && data.projectId === objectId && 'saved' in data && data.saved === true && 'refreshRequired' in data && data.refreshRequired === true && 'boardVersion' in data && Number.isSafeInteger(data.boardVersion) && Number(data.boardVersion) > 0 && 'destinationProjectId' in data && data.destinationProjectId === bulkDestination && 'destinationBoardVersion' in data && Number.isSafeInteger(data.destinationBoardVersion) && Number(data.destinationBoardVersion) > 0)) throw new RequestError('The server returned an unrecognized move receipt. Keep the submitted request and retry it exactly to confirm the outcome.', 502, 'INVALID_RECEIPT');
@@ -932,9 +947,15 @@ export function createWorkspaceClient(session: WorkspaceSession | null = current
       if (path === '/api/state' && response.ok) reconcileStackMetadata(data);
       assertObject();
       if (stateTicket !== null) stateOrder!.applied = stateTicket;
+      if (!options && /^\/api\/notifications(?:[?]|$)/.test(path) && isNotificationInbox(data, selfId) && data.accessEpoch === session.accessEpoch) {
+        for (const item of data.items) if (suiteNotificationApp(item.event.objectId)) {
+          notifications!.suiteSources.set(item.event.objectId, data.accessEpoch);
+          session.unavailableObjects.delete(item.event.objectId);
+        }
+      }
       return data as T;
     } catch (error) { assertObject(); throw error; }
-    finally { notifications?.controllers.delete(controller); stacks?.controllers.delete(controller); session.controllers.delete(controller); session.objectControllers.delete(controller); session.taskReadControllers.delete(controller); }
+    finally { runtime?.signal?.removeEventListener('abort', abortRequest); notifications?.controllers.delete(controller); stacks?.controllers.delete(controller); session.controllers.delete(controller); session.objectControllers.delete(controller); session.taskReadControllers.delete(controller); }
   };
   const changeOutbox = async (change: (current: PendingMutation[]) => PendingMutation[]): Promise<PendingMutation[]> => {
     assertSession(session);

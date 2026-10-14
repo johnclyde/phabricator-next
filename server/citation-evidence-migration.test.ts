@@ -20,6 +20,8 @@ function schema16(path: string) {
   store.createComment(paper.revision.id, { versionId: paper.versions[0]!.id, body: 'Historical review comment' }, actor);
   const definitions = store.database.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name='entities' AND type IN ('index','trigger') AND name!='paste_identity_no_update' AND sql IS NOT NULL ORDER BY type,name").all() as { sql: string }[];
   store.database.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+    -- Notifications and their mail dependents did not exist at this historical boundary.
+    DROP TABLE mail_outbox; DROP TABLE notification_read_changes; DROP TABLE notification_operations; DROP TABLE notification_deliveries; DROP TABLE notification_events; DROP TABLE notification_read_state; DROP TABLE notification_cursor_secret;
     DROP TABLE revision_lifecycle_transactions; DROP TABLE revision_lifecycle_operations; DROP TABLE revision_lifecycle;
     DROP TABLE revision_author_transactions; DROP TABLE revision_author_operations; DROP TABLE revision_authorship;
     DROP TABLE revision_dependency_edges; DROP TABLE revision_dependency_transactions; DROP TABLE revision_dependency_operations; DROP TABLE revision_dependency_versions;
@@ -44,7 +46,7 @@ test('schema 16 upgrade adds empty evidence tables and preserves all existing so
   const directory = mkdtempSync(join(tmpdir(), 'citation-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema16(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 41);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 42);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) {

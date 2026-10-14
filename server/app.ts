@@ -1,5 +1,11 @@
 import { LandingService } from './landing.ts';
 import { SuiteService } from './suite.ts';
+import { SuiteNotifications } from './suite-notifications.ts';
+import { SuiteImportService } from './suite-import.ts';
+import { waitForConpherenceUpdate } from './conpherence-live.ts';
+import { MailService } from './mail.ts';
+import type { MailConfiguration, MailTransport } from './mail-config.ts';
+import { suiteNotificationApp } from '../shared/notifications.ts';
 import type { LocalLandingBinding } from './git-landing.ts';
 import { Automation, type AutomationConfiguration } from './automation.ts';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -52,6 +58,8 @@ import { revisionViewInput, type RevisionViewAction, type RevisionViewInput } fr
 
 const MAX_BODY = 2_000_000;
 export interface AppOptions {
+  mail?: MailConfiguration;
+  mailTransport?: MailTransport;
   automation?: AutomationConfiguration;
   landingBindings?: readonly LocalLandingBinding[];
   store?: Store;
@@ -178,9 +186,20 @@ export function createApp(options: AppOptions = {}): App {
   const policies = new PolicyStore(store.database, { principalExists: id =>
     (auth.mode === 'local' && id === `local:${auth.workspaceId}`) || Boolean(store.database.prepare('SELECT id FROM auth_accounts WHERE id = ?').get(id)),
   });
+  const suite = new SuiteService(store, auth, policies);
+  const suiteNotifications = new SuiteNotifications(store, suite, actor => auth.revalidate(actor, 'write'));
+  store.notifications.connectSuite(suiteNotifications);
+  suite.connectNotifications(suiteNotifications.publish);
+  const suiteImports = new SuiteImportService(store, auth, {
+    validateAccess: (input, actor) => suite.validateImportAccess(input, actor),
+    validatePerson: (id, spaceId, actor) => suite.validateImportPerson(id, spaceId, actor),
+    create: (app, input, actor) => suite.importCreate(app, input, actor),
+    command: (id, action, input, actor) => suite.importCommand(id, action, input, actor),
+    detail: (id, actor) => suite.importDetail(id, actor),
+  });
   store.notifications.configure({
     eligible: principalId => auth.mode === 'local' && principalId === `local:${auth.workspaceId}` || Boolean(store.database.prepare('SELECT 1 FROM auth_accounts WHERE id=? AND disabled=0').get(principalId)),
-    canView: (revisionId, principalId) => policies.access(revisionId, principalId).view,
+    canView: (revisionId, principalId) => suiteNotificationApp(revisionId) ? suite.canView(revisionId, principalId) : policies.access(revisionId, principalId).view,
   });
   store.configureMentions({ resolve: (objectId, username, actor) => {
     const localId = `local:${auth.workspaceId}`;
@@ -197,7 +216,8 @@ export function createApp(options: AppOptions = {}): App {
     return target && policies.access(objectId, target.principalId).view ? target : null;
   } });
   const automation = new Automation(store, auth, policies, options.automation);
-  const suite = new SuiteService(store, auth, policies);
+  const mail = new MailService(store, auth, options.mail, basePath, (id, principal, sequence) => !!suiteNotificationApp(id) && suiteNotifications.emailEligible(id, principal, sequence), options.mailTransport);
+  mail.start();
   automation.start();
   const landing = new LandingService(store, auth, policies, automation, options.landingBindings);
   const ai = options.aiConfiguration ?? aiConfiguration;
@@ -327,6 +347,15 @@ export function createApp(options: AppOptions = {}): App {
   }
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
+    if (method === 'POST' && path === '/api/mail/preferences') return mail.mutate(input, rawKey, context);
+    if (method === 'POST' && path === '/api/suite-import/preview') return { status: 200, body: suiteImports.preview(input, context) };
+    if (method === 'POST' && path === '/api/suite-import/apply') return suiteImports.apply(input, rawKey, context);
+    const suitePreference = /^\/api\/suite\/([a-z]+)\/([^/]+)\/notifications$/.exec(path);
+    if (method === 'POST' && suitePreference) {
+      auth.revalidate(context, 'write'); suite.importDetail(suitePreference[2]!, context);
+      if (suite.rawRecord(suitePreference[2]!).app !== suitePreference[1]) throw new HttpError(404, 'Object was not found.');
+      return suiteNotifications.mutatePreference(suitePreference[2]!, input, rawKey, context);
+    }
     if (path.startsWith('/api/suite/')) return suite.mutate(method, path, input, rawKey, context);
     const access = new AccessLayer(store, auth, policies, context);
     const revisionLanding = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/landings$/.exec(path);
@@ -871,6 +900,18 @@ export function createApp(options: AppOptions = {}): App {
       }
       const docxDiscussionExport = req.method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/export-discussion$/.exec(path) : null;
       const context = auth.authenticate(req, req.method === 'GET' || docxDiscussionExport || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      if (req.method === 'GET' && path === '/api/conpherence/updates') {
+        if ([...url.searchParams.keys()].some(key => key !== 'after') || url.searchParams.getAll('after').length > 1) throw new HttpError(400, 'Conversation updates accept one after cursor.');
+        if (closing) throw new HttpError(503, 'The application is shutting down.');
+        const controller = new AbortController(), abort = () => controller.abort(), close = () => { if (!res.writableEnded) abort(); };
+        gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
+        if (req.aborted || res.destroyed) abort();
+        try {
+          const result = await waitForConpherenceUpdate(url.searchParams.get('after'), () => store.read(() => { auth.revalidate(context, 'read'); return policies.epoch(); }), controller.signal);
+          if (!res.destroyed) send(res, 200, result);
+        } finally { gitReads.delete(controller); req.off('aborted', abort); res.off('close', close); }
+        return;
+      }
       // Private identities are authorized before even parsing request JSON or retry metadata.
       const savedViewWrite = /^\/api\/revision-views\/([^/]+)(\/delete)?$/.exec(path);
       if (savedViewWrite && (req.method === 'PUT' && !savedViewWrite[2] || req.method === 'POST' && savedViewWrite[2])) {
@@ -931,6 +972,15 @@ export function createApp(options: AppOptions = {}): App {
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
+          if (path === '/api/mail/preferences') { if (url.search) throw new HttpError(400, 'Email preferences do not accept query parameters.'); send(res, 200, mail.preference(context)); return; }
+          const suiteProvenance = /^\/api\/suite-import\/provenance\/([^/]+)$/.exec(path);
+          if (suiteProvenance) { if (url.search) throw new HttpError(400, 'Import history does not accept query parameters.'); send(res, 200, { ...suiteImports.provenance(suiteProvenance[1]!, context), accessEpoch: policies.epoch() }); return; }
+          const suitePreference = /^\/api\/suite\/([a-z]+)\/([^/]+)\/notifications$/.exec(path);
+          if (suitePreference) {
+            suite.importDetail(suitePreference[2]!, context);
+            if (url.search || suite.rawRecord(suitePreference[2]!).app !== suitePreference[1]) throw new HttpError(404, 'Object was not found.');
+            send(res, 200, suiteNotifications.preference(suitePreference[2]!, context.principalId)); return;
+          }
           if (path.startsWith('/api/suite/')) { send(res, 200, suite.read(path, url.searchParams, context)); return; }
           if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/') || path.startsWith('/api/audit/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
@@ -1368,7 +1418,7 @@ export function createApp(options: AppOptions = {}): App {
       const key = req.headers['idempotency-key'];
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
-      const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
+      const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive' || path === '/api/suite-import/preview' || path === '/api/suite-import/apply') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
       if (req.method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
@@ -1392,6 +1442,7 @@ export function createApp(options: AppOptions = {}): App {
   let closing: Promise<void> | undefined;
   return { server, store, auth, policies, paperBuilds, automation, landing, close: () => closing ??= (async () => {
     for (const controller of gitReads) controller.abort();
+    await mail.close();
     await automation.close();
     await paperBuilds.close();
     if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));

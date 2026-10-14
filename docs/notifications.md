@@ -3,7 +3,7 @@
 NOTIFY-01 through NOTIFY-03 implement the native revision, task, Wiki and Paste inbox described here. Broader
 notification parity remains tracked in [the roadmap](roadmap.md).
 
-The notification inbox is private to the current workspace person. Revision, task, Wiki and Paste
+The notification inbox is private to the current workspace person. Revision, task, Wiki, Paste and the six suite application
 changes create durable events and recipient records in the same transaction as
 the change. A failed source or policy write cannot leave a notification behind.
 Exact retries reuse the original change rather than sending it again.
@@ -64,6 +64,53 @@ stay quiet. Paste comments pin their exact historical source. Wiki path openings
 capture a read boundary before resolving the page identity. See [Wiki/Paste
 following](object-subscriptions.md) for the complete event, access, recovery and
 migration contract.
+
+## Almanac, Conpherence, Calendar, Slowvote, Phame and Legalpad
+
+All six applications now publish to the same private inbox. Each logical change
+has one cause, captured object version, action, actor and time. Exact retries do
+not duplicate delivery. Notifications never copy message bodies, unpublished
+post text, ballot choices, signature contact details or agreement text. Links
+open the current authorized object with `#application/object-id`.
+
+Owners and object editors follow automatically. Conversation participants,
+calendar hosts and invitees (including occurrence-only invitees), poll voters
+and commenters, blog authors/editors, and agreement signers/required signers
+also follow their objects. Following an Almanac device or service includes its
+interfaces or bindings; following a Phame blog includes its posts. Every child
+still requires current access to all of its parent and Space dependencies.
+Explicitly choosing **Do not follow** on the child overrides this inheritance.
+
+Each object's **Your Notifications** panel offers automatic following, explicit
+following, opt-out, private mute and per-object email permission. These choices
+have an independent concurrency version and durable private history. They do
+not create object history or notify anyone. Unsaved choices and uncertain
+requests are retained separately; a refreshed object cannot silently overwrite
+an open preference draft. Recovery rechecks the current credential and access.
+
+Private conversation read/archive actions and no-effect changes stay silent.
+Vote events follow the poll's current result visibility. Phame draft events
+require current post editing rights even after publication. Legalpad signing
+and withdrawal events require current editing rights or their own acting signer;
+exemptions and voids require editing rights. A recipient losing the necessary
+role loses those events from the inbox, count, read operations and mail
+projection, even when they can still view the object. Signature contents and
+contacts are never present in a notification. New history imported from upstream
+does not manufacture past notifications.
+
+The personal preference API is `GET` or `POST
+/api/suite/:application/:object-id/notifications`. POST supplies
+`expectedPreferenceVersion`, `expectedAccessEpoch`,
+`following: default|following|ignored`, `muted`, and `email`, plus an
+`Idempotency-Key`. The recipient always comes from authenticated authority.
+Suite objects currently use explicit inbox read/unread or read-through actions;
+opening one does not automatically mark its notifications read.
+
+Email is off by default. Both account and per-object opt-in are required, along
+with operator configuration. Email considers only deliveries created after the
+latest opt-in; disabling and re-enabling cannot revive earlier notifications.
+Current following, mute, membership, Space and event-specific privacy are checked
+again at delivery. See [mail delivery](notification-email.md) for transport and recovery limits.
 
 ## Inbox and access
 
@@ -160,7 +207,11 @@ receipt. Legacy cache rows are strictly projected while pending legacy request
 bodies remain unchanged. Schema 33 adds Wiki/Paste preferences and target contexts
 without rewriting existing events, operations or pending read inputs. Schema 34
 is a mention-format fence with no DDL or historical-row rewrites; existing event
-and read-receipt shapes remain unchanged.
+and read-receipt shapes remain unchanged. Schema 42 replaces only the entity-only
+notification target foreign key with an insert trigger requiring an existing
+entity or suite record. The verified transaction rebuilds dependent tables while
+preserving event/read-operation bytes, row IDs and delivery sequences. Unknown
+schemas or failed copies roll back; no historical notifications are fabricated.
 
 Upstream comparison uses Phabricator
 [`5720a38`](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04):
@@ -171,11 +222,12 @@ Upstream comparison uses Phabricator
 - [Notification query](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/notification/query/PhabricatorNotificationQuery.php): current policy filtering and private read/unread selection.
 - [Panel controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/notification/controller/PhabricatorNotificationPanelController.php) and [clear controller](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/notification/controller/PhabricatorNotificationClearController.php): recent menu, unread count and clearing through an observed boundary.
 
-Mail, live Aphlict-style push transport, mobile system notifications, notification
-settings, project/package reviewer expansion, mentions outside the implemented
-discussion surfaces, Herald, delivery for
-other applications and background build jobs, global Feed/Conduit compatibility,
-upstream history import and unbounded scale remain gaps. This does not establish
+Aphlict protocol compatibility, mobile system notifications, project/package
+reviewer expansion, directed mentions outside the implemented discussion
+surfaces, Herald/build-job delivery, other applications, global Feed/Conduit
+compatibility, imported historical notification recipients and unbounded scale
+remain gaps. SMTP delivery is opt-in; suite preferences and room live refresh are
+native workflows, not claims of complete upstream notification settings parity. This does not establish
 full Notifications, Maniphest or Differential parity.
 
 ## Verification
@@ -211,3 +263,10 @@ NOTIFY-02 adds verified task delivery and private mute. Its final suite passed
 both production mounts and 180 desktop/mobile browser scenarios. Legacy
 revision event, read-operation and pending-request compatibility remained intact.
 See [task notification verification](task-notifications.md#verification).
+
+Suite notification verification includes byte-preserving schema migration and
+rollback, all six app recipient paths, parent following, private mute/opt-out,
+exact preference retries, current account revocation, Phame draft-role loss,
+hidden poll results, Legalpad contacts, and no retrospective email. Authenticated
+HTTP tests exercise conversation membership revocation and read-receipt recovery,
+blog inheritance, and ballot privacy through the real application routes.

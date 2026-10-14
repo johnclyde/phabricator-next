@@ -1,3 +1,4 @@
+import { mailFromEnvironment } from './mail-config.ts';
 import { landingBindingsFromEnvironment } from './landing.ts';
 import { automationFromEnvironment } from './automation.ts';
 import { resolve } from 'node:path';
@@ -18,7 +19,7 @@ const authMode = process.env.APP_AUTH_MODE ?? 'local';
 if (authMode !== 'local' && authMode !== 'password') throw new Error('APP_AUTH_MODE must be local or password.');
 const hosting = hostingConfiguration(process.env.APP_PUBLIC_ORIGIN, authMode);
 const gitRepositories = parseGitRepositories(process.env.APP_GIT_REPOSITORIES);
-const app = createApp({ landingBindings: landingBindingsFromEnvironment(), automation: automationFromEnvironment(), googleAuth: googleAuthFromEnvironment(), transcriptionModelDirectory: process.env.APP_TRANSCRIPTION_MODEL_DIR, revisionMetadata: revisionMetadataFromEnvironment(), revisionLifecycle: revisionLifecycleFromEnvironment(), revisionReviewers: revisionReviewersFromEnvironment(), paperRunner: texRunnerFromEnvironment(), port, basePath, authMode, publicOrigin: hosting?.origin, gitRepositories, databasePath: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite'), seed: process.env.SEED_DEMO !== 'false' && process.env.SEED_DEMO !== '0' });
+const app = createApp({ mail: mailFromEnvironment(), landingBindings: landingBindingsFromEnvironment(), automation: automationFromEnvironment(), googleAuth: googleAuthFromEnvironment(), transcriptionModelDirectory: process.env.APP_TRANSCRIPTION_MODEL_DIR, revisionMetadata: revisionMetadataFromEnvironment(), revisionLifecycle: revisionLifecycleFromEnvironment(), revisionReviewers: revisionReviewersFromEnvironment(), paperRunner: texRunnerFromEnvironment(), port, basePath, authMode, publicOrigin: hosting?.origin, gitRepositories, databasePath: process.env.DATABASE_PATH ?? resolve('.data/phabricator.sqlite'), seed: process.env.SEED_DEMO !== 'false' && process.env.SEED_DEMO !== '0' });
 app.server.listen(port, '127.0.0.1', () => console.log(`Phabricator Next is running at ${hosting?.origin ?? `http://127.0.0.1:${port}`}${basePath} (${authMode === 'local' ? 'local single-user' : 'password-authenticated shared workspace'} mode; ${hosting ? 'HTTPS proxy required; loopback upstream only' : 'loopback only'}).`));
 let stopping = false;
 const stop = (): void => {

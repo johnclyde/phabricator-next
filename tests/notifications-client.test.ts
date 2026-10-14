@@ -8,6 +8,12 @@ import { access } from './revision-subscriptions-client-fixture.ts';
 const id = '61eb8a98-0397-49d3-bf10-cf67fffcf83b', eventId = '61eb8a98-0397-49d3-bf10-cf67fffcf83c', horizon = 'a'.repeat(40), cursor = 'b'.repeat(40);
 const page = (principalId = 'local:notifications'): NotificationPage => ({ principalId, filter: 'all', horizon, unreadCount: 1, readVersion: 0, accessEpoch: 1, nextBefore: cursor, items: [{ id, read: false, version: 0, event: { format: 'phabricator.notification-event.v2', id: eventId, objectId: 'P1', kind: 'commented', cause: { type: 'comment', id: 'comment-1' }, actor: { principalId: 'U1', displayName: 'Reader' }, createdAt: '2026-10-11T00:00:00Z', context: { kind: 'revision', head: { versionId: 'version-1', number: 1, contentHash: 'a'.repeat(64) } } }, object: { id: 'P1', title: 'Private paper', kind: 'paper' } }] });
 const intent = (principalId = 'local:notifications') => ({ id, principalId, body: { action: 'read' as const, notificationId: id, expectedVersion: 0, expectedAccessEpoch: 1 }, revisionId: 'P1' });
+const roomId = `Z-${eventId}`;
+function suitePage(principalId: string, accessEpoch = 1): NotificationPage {
+  const original = page(principalId), item = original.items[0]!;
+  return { ...original, accessEpoch, items: [{ ...item, event: { ...item.event, objectId: roomId, kind: 'suite_message', context: { kind: 'suite', app: 'conpherence', version: 2, action: 'message', audience: 'all' } }, object: { id: roomId, title: 'Private conversation', kind: 'conpherence' } }] };
+}
+function inbox(value: NotificationPage) { const { filter: _filter, ...response } = value; return response; }
 function fixture(mode: 'local' | 'password' = 'local') {
   const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window'), entries = new Map<string, string>(), events = new EventTarget(); let quota = false;
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { get length() { return entries.size; }, key: (index: number) => [...entries.keys()][index] ?? null, getItem: (key: string) => entries.get(key) ?? null, setItem: (key: string, value: string) => { if (quota) throw new Error('Quota'); entries.set(key, value); }, removeItem: (key: string) => entries.delete(key) } });
@@ -57,6 +63,67 @@ test('task inbox items and read intents use task authority without denying visib
     const receipt = await f.client.request('/api/notifications/read', { method: 'POST', body: taskIntent.body, id }, ['T1']); await verifiedNotificationReceipt(receipt, taskIntent); assert.equal(calls, 1);
     f.client.writeStored(f.requestKey, taskIntent); f.client.retireUnavailableObject('T1'); assert.equal(f.client.readStored(f.key, null), null); assert.equal(f.client.draftIsHeld(f.requestKey), true); assert.equal(f.client.unavailableObject('P1'), false);
     assert.equal(notificationIntent({ ...taskIntent, revisionId: 'T1', objectId: undefined }, f.self), null);
+  } finally { globalThis.fetch = oldFetch; f.close(); }
+});
+test('suite read controls require a server inbox proof and survive incomplete workspace state', async () => {
+  const f = fixture('password'), oldFetch = fetch;
+  try {
+    const current = suitePage(f.self), cache = { summary: notificationSummary(current), pages: [current] };
+    const exact = { id, principalId: f.self, objectId: roomId, body: { action: 'read_object' as const, objectId: roomId, horizon, expectedAccessEpoch: 1 } };
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return Response.json(inbox(current)); };
+    assert.equal(f.client.writeStored(f.key, cache), false);
+    assert.equal(await f.client.retainDraft(f.requestKey, exact, null), 'unavailable');
+    await assert.rejects(f.client.request('/api/notifications/read', { method: 'POST', body: exact.body, id }, [roomId]), error => error instanceof RequestError && error.code === 'ACCESS_CHANGED');
+    assert.equal(calls, 0);
+    await f.client.request('/api/notifications?filter=all');
+    assert.equal(f.client.writeStored(f.key, cache), true);
+    assert.equal(await f.client.retainDraft(f.requestKey, exact, null), 'saved');
+    const generation = f.client.notificationGeneration();
+    f.client.reconcileAccess({ P1: access(), F1: access('F1') }, 1, ['S1']);
+    assert.equal(f.client.notificationGeneration(), generation);
+    assert.equal(f.client.unavailableObject(roomId), false);
+    assert.equal(f.client.draftIsHeld(f.requestKey), false);
+    assert.deepEqual(f.client.readStored(f.requestKey, null), exact);
+    assert.deepEqual(f.client.readStored(f.key, null), cache);
+    globalThis.fetch = async () => { calls++; return Response.json({ operationId: eventId, inputSha256: createHash('sha256').update(JSON.stringify(exact.body)).digest('hex'), changed: true, accessEpoch: 1 }); };
+    await verifiedNotificationReceipt(await f.client.request('/api/notifications/read', { method: 'POST', body: exact.body, id }, [roomId]), exact);
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = oldFetch; f.close(); }
+});
+test('suite inbox proofs expire on access changes while exact retry bytes remain source-free', async () => {
+  const f = fixture('password'), oldFetch = fetch;
+  try {
+    const current = suitePage(f.self), exact = { id, principalId: f.self, objectId: roomId, body: { action: 'read_object' as const, objectId: roomId, horizon, expectedAccessEpoch: 1 } };
+    globalThis.fetch = async () => Response.json(inbox(current));
+    await f.client.request('/api/notifications');
+    assert.equal(f.client.writeStored(f.key, { summary: notificationSummary(current), pages: [current] }), true);
+    assert.equal(await f.client.retainDraft(f.requestKey, exact, null), 'saved');
+    f.client.reconcileAccess({ P1: access() }, 2, ['S1']);
+    assert.equal(f.client.readStored(f.key, null), null);
+    assert.deepEqual(f.client.readStored(f.requestKey, null), exact);
+    assert.equal(f.client.draftIsHeld(f.requestKey), false);
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return Response.json({ ...inbox(suitePage(f.self, 2)), items: [], unreadCount: 0 }); };
+    await f.client.request('/api/notifications');
+    await assert.rejects(f.client.request('/api/notifications/read', { method: 'POST', body: exact.body, id }, [roomId]), error => error instanceof RequestError && error.code === 'ACCESS_CHANGED');
+    assert.equal(calls, 1);
+    const refreshed = suitePage(f.self, 2), refreshedCache = { summary: notificationSummary(refreshed), pages: [refreshed] };
+    assert.equal(f.client.writeStored(f.key, refreshedCache), false);
+    globalThis.fetch = async () => Response.json(inbox(refreshed));
+    await f.client.request('/api/notifications');
+    assert.equal(f.client.writeStored(f.key, refreshedCache), true);
+    globalThis.fetch = async () => Response.json({ error: 'Unavailable', code: 'NOTIFICATION_UNAVAILABLE' }, { status: 404 });
+    await assert.rejects(f.client.request('/api/notifications/read', { method: 'POST', body: exact.body, id }, [roomId]), error => error instanceof RequestError && error.code === 'NOTIFICATION_UNAVAILABLE');
+    assert.equal(f.client.unavailableObject(roomId), false);
+    f.client.retireUnavailableObject(roomId);
+    assert.equal(f.client.readStored(f.key, null), null);
+    assert.equal(f.client.draftIsHeld(f.requestKey), true);
+    const replacement = activateSession(f.session.state), next = createWorkspaceClient(replacement);
+    next.reconcileAccess({ P1: access() }, 2, ['S1']);
+    assert.equal(next.writeStored(f.key, refreshedCache), false);
+    assert.equal(await next.retainDraft(f.requestKey, exact, null), 'unavailable');
+    assert.equal(f.session.memory.size, 0);
   } finally { globalThis.fetch = oldFetch; f.close(); }
 });
 test('notification retirement is independent of manuscript snapshot generation', () => {
