@@ -21,7 +21,7 @@ test('schema39 preserves every schema38 table, row and schema object across upgr
     store.createRepository({name:'Preserved source',description:'Keep exact bytes',remoteUrl:'https://example.invalid/repo.git',defaultBranch:'main'});
     downgrade(store.database);store.database.exec("CREATE TABLE operator_data(note TEXT); INSERT INTO operator_data VALUES('Keep exact data');");
     const before=snapshot(store.database);store.close();store=new Store({path});const after=snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,40);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,41);
     for(const item of before.schema)assert.deepEqual(after.schema.find(row=>row.name===item.name),item);
     for(const [table,rows]of Object.entries(before.rows))assert.deepEqual(after.rows[table],rows,table);
     for(const table of ['revision_landings','revision_landing_preparations','revision_landing_events'])assert.deepEqual(after.rows[table],[]);

@@ -19,17 +19,18 @@ export function exportAutomation(value: unknown, name: string): void {
 /** Automation reads stay in this session and retire together when access changes. */
 export function useAutomationRead<T extends { accessEpoch: number }>(path: string | null, online: boolean) {
   const client = useWorkspace(), [data, setData] = useState<T | null>(null), [error, setError] = useState(''), [loading, setLoading] = useState(false);
-  const mounted = useRef(true), generation = useRef(0);
+  const mounted = useRef(true), generation = useRef(0), requestRef = useRef({ path, client, online }); requestRef.current = { path, client, online };
   const load = useCallback(async () => {
-    if (!path || !online || !client.isActive()) return;
+    const current = () => path === requestRef.current.path && client === requestRef.current.client && online === requestRef.current.online;
+    if (!path || !current() || !online || !client.isActive()) return;
     const ticket = ++generation.current; setLoading(true); setError('');
     try {
       const result = await client.request<T>(path);
-      if (!mounted.current || ticket !== generation.current || !client.isActive()) return;
+      if (!mounted.current || !current() || ticket !== generation.current || !client.isActive()) return;
       if (result.accessEpoch !== client.session?.accessEpoch) throw new Error('Access changed while loading. Refresh to inspect the current authorized result.');
       setData(result);
-    } catch (failure) { if (mounted.current && ticket === generation.current && client.isActive()) { setData(null); setError(isNetworkError(failure) ? 'Reconnect and refresh to load automation.' : automationError(failure)); } }
-    finally { if (mounted.current && ticket === generation.current) setLoading(false); }
+    } catch (failure) { if (mounted.current && current() && ticket === generation.current && client.isActive()) { setData(null); setError(isNetworkError(failure) ? 'Reconnect and refresh to load automation.' : automationError(failure)); } }
+    finally { if (mounted.current && current() && ticket === generation.current) setLoading(false); }
   }, [client, path, online]);
   useEffect(() => {
     mounted.current = true;
@@ -37,7 +38,7 @@ export function useAutomationRead<T extends { accessEpoch: number }>(path: strin
     const access = client.onAccessChange(clear), locked = onSessionLocked(clear);
     return () => { mounted.current = false; generation.current++; access(); locked(); };
   }, [client]);
-  useEffect(() => { setData(null); void load(); return () => { generation.current++; }; }, [load]);
+  useEffect(() => { setData(null); setLoading(false); setError(''); void load(); return () => { generation.current++; }; }, [load]);
   return { data, error, loading, reload: load, setData };
 }
 
@@ -45,11 +46,11 @@ export interface AutomationIntent { id: string; path: string; method: MutationMe
 function readIntent(value: unknown): AutomationIntent | null {
   if (!value || typeof value !== 'object') return null;
   const input = value as Record<string, unknown>;
-  return typeof input.id === 'string' && typeof input.path === 'string' && (/^(?:\/api\/(?:audit|herald|harbormaster|drydock|landings)\/|\/api\/revisions\/[DPL][1-9]\d*\/landings$)/.test(input.path)) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
+  return typeof input.id === 'string' && typeof input.path === 'string' && (/^(?:\/api\/(?:suite|audit|herald|harbormaster|drydock|landings)\/|\/api\/revisions\/[DPL][1-9]\d*\/landings$)/.test(input.path)) && ['POST', 'PUT', 'PATCH'].includes(String(input.method)) && typeof input.label === 'string' && 'body' in input ? input as unknown as AutomationIntent : null;
 }
 
 /** Retain one immutable request before sending it; recovery is always explicit. */
-export function useAutomationMutation(scope: 'audit' | 'herald' | 'harbormaster' | 'drydock' | `revision-builds:${string}` | `landing:${string}`, online: boolean) {
+export function useAutomationMutation(scope: 'audit' | 'herald' | 'harbormaster' | 'drydock' | `suite:${string}` | `revision-builds:${string}` | `landing:${string}`, online: boolean) {
   const client = useWorkspace(), key = `draft:automation:${scope}:request`;
   const [pending, setPending] = useState(() => readIntent(client.readStored(key, null))), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const mounted = useRef(true), sending = useRef(false);

@@ -36,6 +36,8 @@ The server intentionally binds to loopback. Password sign-in is available with `
 
 ## What works
 
+- [Almanac, Conpherence, Calendar, Slowvote, Phame and Legalpad](docs/collaboration-applications.md) provide service-directory records, private conversations, events and recurring schedules, polls, blogs, and version-bound agreements. Desktop/mobile workflows share Space restrictions, durable history and exact retry recovery. Each application's remaining upstream gaps are documented separately.
+
 - [Git commit and push rules](docs/git-automation.md): a trusted receive hook enforces ref/content rules, verifies accepted revisions and required exact-source builds, records decisions and starts commit builds. [Drydock](docs/drydock.md) adds authorized working-copy blueprints, fenced leases, a real local Git worker and Harbormaster integration. Providers and repository hooks require explicit operator configuration.
 - [Revision patches and landing](docs/revision-landing.md): build exact Git-backed code, LaTeX and legal-text revisions in Drydock; prepare, inspect and explicitly land accepted source as a squash commit with Herald rules and recovery. Local destination branches require explicit operator configuration.
 - [Audit](docs/audit.md): review immutable commits after landing, inspect their recorded changes, request auditors, raise concerns, accept or resign, and retain a complete decision history. Herald can request audits automatically.

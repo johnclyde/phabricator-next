@@ -1,0 +1,10 @@
+.suite-workspace .suite-content { overflow-wrap: anywhere; min-width: 0; }
+.suite-workspace .suite-content pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.suite-workspace .suite-content table { display: block; max-width: 100%; overflow-x: auto; }
+.suite-object-id { overflow-wrap: anywhere; }
+.suite-access, .suite-multi { border: 1px solid var(--border, #d3dae3); padding: 14px; margin: 0; min-width: 0; }
+.suite-multi { max-height: 300px; overflow-y: auto; }
+.suite-multi label { min-height: 44px; }
+.suite-access legend, .suite-multi legend { font-weight: 600; padding: 0 5px; }
+.suite-content article + article { border-top: 1px solid var(--border, #d3dae3); margin-top: 16px; padding-top: 12px; }
+@media(max-width: 700px) { .suite-workspace .automation-actions > .button { min-height: 44px; } .suite-workspace .automation-toolbar { align-items: stretch; } }

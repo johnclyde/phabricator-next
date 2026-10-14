@@ -1,4 +1,5 @@
 import { LandingService } from './landing.ts';
+import { SuiteService } from './suite.ts';
 import type { LocalLandingBinding } from './git-landing.ts';
 import { Automation, type AutomationConfiguration } from './automation.ts';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -196,6 +197,7 @@ export function createApp(options: AppOptions = {}): App {
     return target && policies.access(objectId, target.principalId).view ? target : null;
   } });
   const automation = new Automation(store, auth, policies, options.automation);
+  const suite = new SuiteService(store, auth, policies);
   automation.start();
   const landing = new LandingService(store, auth, policies, automation, options.landingBindings);
   const ai = options.aiConfiguration ?? aiConfiguration;
@@ -325,6 +327,7 @@ export function createApp(options: AppOptions = {}): App {
   }
 
   async function mutate(method: string, path: string, input: unknown, rawKey: string | undefined, context: AuthContext, signal?: AbortSignal): Promise<MutationResponse> {
+    if (path.startsWith('/api/suite/')) return suite.mutate(method, path, input, rawKey, context);
     const access = new AccessLayer(store, auth, policies, context);
     const revisionLanding = /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/landings$/.exec(path);
     if (method === 'POST' && revisionLanding) {
@@ -928,6 +931,7 @@ export function createApp(options: AppOptions = {}): App {
         store.read(() => {
           auth.revalidate(context, 'read');
           const access = new AccessLayer(store, auth, policies, context);
+          if (path.startsWith('/api/suite/')) { send(res, 200, suite.read(path, url.searchParams, context)); return; }
           if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/') || path.startsWith('/api/audit/')) { send(res, 200, automation.read(path, url.searchParams, context)); return; }
           if (path === '/api/state') { send(res, 200, access.state(ai())); return; }
           if (path === '/api/revision-views') {
