@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -9,7 +10,7 @@ import { initializeRevisionLifecycle } from './revision-lifecycle.ts';
 import { lifecycleAction } from '../tests/revision-lifecycle-fixture.ts';
 
 const actor = { principalId: 'alice', displayName: 'Original Alice', credentialId: null, requestId: 'lifecycle-migration' };
-const drop = (db: DatabaseSync) => db.exec('DROP TABLE revision_lifecycle_transactions; DROP TABLE revision_lifecycle_operations; DROP TABLE revision_lifecycle; PRAGMA user_version=25');
+const drop = (db: DatabaseSync) => withoutRepositoryOperationsSchema(db).exec('DROP TABLE revision_lifecycle_transactions; DROP TABLE revision_lifecycle_operations; DROP TABLE revision_lifecycle; PRAGMA user_version=25');
 function snapshot(db: DatabaseSync) {
   const schema = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all() as { type: string; name: string; tbl_name: string; sql: string }[];
   const tables = schema.filter(row => row.type === 'table').map(row => row.name);
@@ -27,7 +28,7 @@ test('schema26 preserves every schema25 row, definition and sequence with truthf
     }
     store.database.prepare('INSERT INTO idempotency(key,fingerprint,status,body,created_at) VALUES(?,?,?,?,?)').run('historical-lifecycle', 'exact', 200, '{"status":"accepted","literal":"  old receipt  "}', '2026-01-01T00:00:00Z');
     drop(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     for (const id of ids) {
@@ -52,7 +53,7 @@ test('schema26 collisions and malformed legacy status roll back all new schema a
       const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|column|verified/);
       db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 25); assert.deepEqual(snapshot(db), before);
       if (collision) db.exec('DROP TABLE revision_lifecycle_operations'); else db.prepare("UPDATE entities SET data=json_set(data,'$.status','needs_review') WHERE id=?").run(id);
-      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
   }
 });

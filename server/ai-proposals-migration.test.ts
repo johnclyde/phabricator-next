@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -15,7 +16,7 @@ function snapshot(db: DatabaseSync) {
 function downgrade(db: DatabaseSync) {
   db.exec('PRAGMA foreign_keys=OFF');
   for (const row of db.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name GLOB 'ai_proposal_*'").all() as { name: string }[]) db.exec(`DROP TRIGGER ${quote(row.name)}`);
-  db.exec('DROP TABLE ai_proposal_applications; DROP TABLE ai_proposal_results; DROP TABLE ai_proposal_requests; PRAGMA user_version=42; PRAGMA foreign_keys=ON');
+  withoutRepositoryOperationsSchema(db).exec('DROP TABLE ai_proposal_applications; DROP TABLE ai_proposal_results; DROP TABLE ai_proposal_requests; PRAGMA user_version=42; PRAGMA foreign_keys=ON');
 }
 function seed(store: Store) {
   const actor = { principalId: 'U1', displayName: 'Writer', credentialId: null, requestId: 'preserved-request' };
@@ -29,7 +30,7 @@ test('schema42 to43 adds empty AI evidence tables while preserving every existin
   const directory = mkdtempSync(join(tmpdir(), 'ai-proposal-migration-')), path = join(directory, 'workspace.sqlite'); let store = new Store({ path });
   try {
     seed(store); downgrade(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46); const after = snapshot(store.database);
     for (const table of before.tables) assert.deepEqual(after.tables.find(item => item.name === table.name), table, table.name);
     for (const definition of before.schema) assert.deepEqual(after.schema.find(item => item.name === definition.name), definition, definition.name);
     for (const table of after.tables.filter(item => item.name.startsWith('ai_proposal_'))) assert.deepEqual(table.rows, []);
@@ -44,6 +45,6 @@ test('schema42 migration collision rolls back without altering prior data or adv
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /Unexpected ai_proposal_results/);
     db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 42); assert.deepEqual(snapshot(db), before);
     db.exec('DROP TABLE ai_proposal_results'); db.close(); db = undefined;
-    const repaired = new Store({ path }); try { assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 45); } finally { repaired.close(); }
+    const repaired = new Store({ path }); try { assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 46); } finally { repaired.close(); }
   } finally { db?.close(); try { store.close(); } catch { /* Already closed before migration. */ } rmSync(directory, { recursive: true, force: true }); }
 });

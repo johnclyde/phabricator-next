@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -32,7 +33,7 @@ function schema16(path: string) {
     INSERT INTO entities_v16(rowid,id,kind,data) SELECT rowid,id,kind,data FROM entities;
     DROP TABLE entities; ALTER TABLE entities_v16 RENAME TO entities;`);
   for (const definition of definitions) store.database.exec(definition.sql);
-  store.database.exec('PRAGMA user_version=16; COMMIT; PRAGMA foreign_keys=ON;');
+  withoutRepositoryOperationsSchema(store.database).exec('PRAGMA user_version=16; COMMIT; PRAGMA foreign_keys=ON;');
   return store;
 }
 
@@ -46,7 +47,7 @@ test('schema 16 upgrade adds empty evidence tables and preserves all existing so
   const directory = mkdtempSync(join(tmpdir(), 'citation-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema16(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) {

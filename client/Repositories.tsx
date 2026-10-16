@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, FileCode2, Folder, FolderGit2, GitBranch, GitCommitHorizontal, History, RefreshCw } from 'lucide-react';
+import RepositoryOperations from './RepositoryOperations';
 import RepositoryImport, { parseImportDraft } from './RepositoryImport';
 import RepositoryComparison from './RepositoryComparison';
 import RepositoryBlame from './RepositoryBlame';
@@ -122,6 +123,7 @@ export default function RepositoryPage({ id, state, online, manageAccess, refres
     <a className="back-link" href="#repositories"><ArrowLeft size={14}/>All repositories</a>
     <div className="object-heading"><div><span className="object-id">{id} · Diffusion</span><h1><FolderGit2 size={26}/>{repository.name}</h1><p>{repository.description}</p></div><button className="button" onClick={() => void loadProfile()}><RefreshCw size={15}/>Reload Repository</button></div>
     <AccessSummary access={access} spaces={state.spaces} manage={manageAccess}/>
+    <RepositoryOperations repositoryId={id} online={online} canEdit={!!access?.capabilities.edit}/>
     {retainedImport && !importing && <section className="panel card-body"><h2>Retained Import Request</h2><p>An import request is saved for this repository. Retrying uses its original commit and input, even if the source is no longer available for browsing.</p><button className="button" disabled={!online || !access?.capabilities.edit} onClick={() => setImporting(retainedImport.input.commitId)}>Review Saved Import</button></section>}
     {importing && <RepositoryImport repositoryId={id} commitId={selection?.commitId || importing} state={state} online={online} close={() => setImporting(null)} refreshWorkspace={refreshWorkspace} opened={opened}/>}
     <div className="repository-metadata"><span>Registered remote: <code>{repository.remoteUrl || 'None'}</code></span><span>Default branch: <code>{repository.defaultBranch}</code></span></div>

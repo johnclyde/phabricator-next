@@ -1,3 +1,5 @@
+import { GitHostingService } from './git-hosting.ts';
+import { RepositorySyncService, withRepositorySyncLock, type RepositorySyncBinding, type RepositorySyncOptions } from './repository-sync.ts';
 import { OwnersService } from './owners-routes.ts';
 import { AIProposalService } from './ai-proposals.ts';
 import { SearchService } from './search.ts';
@@ -84,6 +86,8 @@ export interface AppOptions {
   revisionReviewers?: RevisionReviewerConfig;
   revisionMetadata?: RevisionMetadataConfig;
   gitRepositories?: Readonly<Record<string, string>>;
+  repositorySyncBindings?: readonly RepositorySyncBinding[];
+  repositorySyncOptions?: RepositorySyncOptions;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
   docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; replaceBatch?: typeof replaceDocxBatch; inspectResolution?: typeof inspectDocxResolution; resolve?: typeof resolveDocxChanges; exportDiscussion?: typeof exportDocxDiscussion };
@@ -91,7 +95,7 @@ export interface AppOptions {
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
   aiConfiguration?: () => AppState['ai'];
 }
-export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; automation: Automation; landing: LandingService; close: () => Promise<void> }
+export interface App { server: Server; store: Store; auth: Auth; policies: PolicyStore; paperBuilds: PaperBuildService; automation: Automation; landing: LandingService; repositorySync: RepositorySyncService; gitHosting: GitHostingService; close: () => Promise<void> }
 
 function security(req: IncomingMessage, res: ServerResponse, configuredPort: number, hosting: HostedOrigin | undefined, basePath: string): void {
   assertHostingRequest(req, configuredPort, hosting, basePath);
@@ -184,7 +188,15 @@ export function createApp(options: AppOptions = {}): App {
   if (options.store && options.revisionLifecycle) throw new Error('Configure revisionLifecycle on the supplied Store, or let createApp create the Store.');
   if (options.store && options.revisionReviewers) throw new Error('Configure revisionReviewers on the supplied Store, or let createApp create the Store.');
   if (options.store && options.revisionMetadata) throw new Error('Configure revisionMetadata on the supplied Store, or let createApp create the Store.');
-  const git = options.gitObserver ?? createGitObserver(options.gitRepositories ?? {});
+  const repositories = { ...options.gitRepositories };
+  for (const binding of options.repositorySyncBindings ?? []) {
+    if (repositories[binding.repositoryId] && repositories[binding.repositoryId] !== binding.path) throw new Error('Repository synchronization and browsing must use the same configured path.');
+    if (options.gitObserver) throw new Error('Repository synchronization requires native Git observation.');
+    repositories[binding.repositoryId] = binding.path;
+    if (binding.mode === 'observe' && options.landingBindings?.some(landing => landing.repositoryId === binding.repositoryId)) throw new Error('Observed repositories may not also receive local landings.');
+    if (options.landingBindings?.some(landing => landing.repositoryId === binding.repositoryId && landing.repositoryPath !== binding.path)) throw new Error('Hosted Git and local landing must use the same configured repository path.');
+  }
+  const git = options.gitObserver ?? createGitObserver(repositories);
   const basePath = normalizeBasePath(options.basePath ?? '/');
   const store = options.store ?? createStore({ path: options.databasePath, revisionLifecycle: options.revisionLifecycle, revisionReviewers: options.revisionReviewers, revisionMetadata: options.revisionMetadata });
   let auth: Auth;
@@ -231,7 +243,11 @@ export function createApp(options: AppOptions = {}): App {
   const mail = new MailService(store, auth, options.mail, basePath, (id, principal, sequence) => !!suiteNotificationApp(id) && suiteNotifications.emailEligible(id, principal, sequence), options.mailTransport);
   mail.start();
   automation.start();
-  const landing = new LandingService(store, auth, policies, automation, options.landingBindings);
+  const repositorySync = new RepositorySyncService(store.database, options.repositorySyncBindings ?? [], options.repositorySyncOptions);
+  const notifyRepositoryChanged = (id: string) => repositorySync.notifyChanged(id);
+  const gitHosting = new GitHostingService(store, auth, policies, automation, id => repositorySync.binding(id), id => repositorySync.snapshot(id).configuration ?? '', notifyRepositoryChanged);
+  repositorySync.start();
+  const landing = new LandingService(store, auth, policies, automation, options.landingBindings, notifyRepositoryChanged);
   const ai = options.aiConfiguration ?? aiConfiguration;
   const analyzeAI = options.analyzeAI ?? analyzeWithAI;
   const aiProposals = new AIProposalService(store, { configuration: () => { const config = ai(); return { ...config, localConfigured: config.localConfigured ?? false, localModel: config.localModel ?? null }; }, provider: options.aiProposalProvider, replaceWordBatch: options.docxProcessor?.replaceBatch, authorize: (actor, id, action) => {
@@ -392,7 +408,17 @@ export function createApp(options: AppOptions = {}): App {
       return trackDocxWork(landing.prepare(revisionLanding[1]!, input, rawKey, context, signal));
     }
     const landingCommand = /^\/api\/landings\/(LAND-[a-f0-9-]+)\/commands$/.exec(path);
-    if (method === 'POST' && landingCommand) return landing.command(landingCommand[1]!, input, rawKey, context);
+    if (method === 'POST' && landingCommand) {
+      if (closing || signal?.aborted) throw new HttpError(503, 'The landing request is no longer active.');
+      const id = landingCommand[1]!, repositoryId = landing.detail(id, context).operation.prepared.repositoryId;
+      const binding = repositorySync.binding(repositoryId);
+      if (!binding) return landing.command(id, input, rawKey, context);
+      return trackDocxWork(withRepositorySyncLock(binding.path, signal ?? AbortSignal.timeout(60_000), async () => {
+        if (closing || signal?.aborted) throw new HttpError(503, 'The landing request is no longer active.');
+        if (gitHosting.pending(repositoryId)) throw new HttpError(409, 'Resolve the pending Git receive before landing another revision.', 'GIT_RECEIVE_PENDING');
+        return landing.command(id, input, rawKey, context);
+      }));
+    }
     if (path.startsWith('/api/herald/') || path.startsWith('/api/harbormaster/') || path.startsWith('/api/drydock/') || path.startsWith('/api/audit/')) {
       let commit;
       if (method === 'POST' && (path === '/api/harbormaster/builds' || path === '/api/drydock/leases') && input && typeof input === 'object' && 'repositoryId' in input) {
@@ -914,6 +940,11 @@ export function createApp(options: AppOptions = {}): App {
         if (url.search) throw new HttpError(400, 'Model asset URLs do not accept query parameters.');
         await serveTranscriptionModel(req, res, path, transcriptionDirectory); return;
       }
+      if (path.startsWith('/git/')) {
+        const endpoint = /^\/git\/(R[1-9]\d*)\.git\/(info\/refs|git-upload-pack|git-receive-pack)$/.exec(path);
+        if (!endpoint) throw new HttpError(404, 'Git service not found.');
+        await gitHosting.serve(req, res, endpoint[1]!, endpoint[2]!, url.searchParams); return;
+      }
       if (path !== '/api' && !path.startsWith('/api/')) { await serveStatic(req, res, options.distPath ?? resolve('dist'), path, basePath, auth.providers().google); return; }
       if (path.startsWith('/api/phriction.') || path.startsWith('/api/harbormaster.')) {
         send(res, 200, await conduitRequest(req, path.slice(5), url, store, auth, policies, basePath, hosting?.origin, automation)); return;
@@ -944,6 +975,29 @@ export function createApp(options: AppOptions = {}): App {
       }
       const docxDiscussionExport = req.method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/export-discussion$/.exec(path) : null;
       const context = auth.authenticate(req, req.method === 'GET' || docxDiscussionExport || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      const repositoryOperations = /^\/api\/repositories\/(R[1-9]\d*)\/operations(\/sync)?$/.exec(path);
+      if (repositoryOperations && (req.method === 'GET' && !repositoryOperations[2] || req.method === 'POST' && repositoryOperations[2])) {
+        const id = repositoryOperations[1]!, write = req.method === 'POST';
+        const authorize = () => { auth.revalidate(context, 'read'); if (write) auth.revalidate(context, 'write'); policies.require(id, context.principalId, write ? 'edit' : 'view'); store.getRepository(id); };
+        store.read(authorize);
+        if (url.search) throw new HttpError(400, 'Repository operations do not accept query parameters.');
+        let receipt: import('../shared/repository-sync.ts').RepositorySyncReceipt | undefined;
+        if (write) {
+          const key = req.headers['idempotency-key'];
+          if (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key)) throw new HttpError(400, 'Provide an Idempotency-Key for this synchronization request.');
+          const input = object(await body(req), ['expectedConfiguration', 'expectedAccessEpoch']);
+          if (typeof input.expectedConfiguration !== 'string' || !/^[a-f0-9]{64}$/.test(input.expectedConfiguration) || !Number.isSafeInteger(input.expectedAccessEpoch)) throw new HttpError(400, 'Provide the exact repository configuration and access epoch.');
+          receipt = store.read(() => {
+            authorize(); if (input.expectedAccessEpoch !== policies.epoch()) throw new HttpError(409, 'Workspace access changed. Reload repository operations.');
+            return repositorySync.request(id, { requestId: key, actorId: context.principalId, expectedConfiguration: input.expectedConfiguration as string, expectedAccessEpoch: input.expectedAccessEpoch as number }).receipt;
+          });
+        }
+        store.read(() => {
+          authorize(); const snapshot = repositorySync.snapshot(id);
+          const cloneUrl = snapshot.mode === 'unconfigured' ? null : new URL(`${basePath}git/${id}.git`, hosting?.origin ?? `http://${req.headers.host}`).href;
+          send(res, 200, { snapshot, canSync: snapshot.targets.length > 0 && context.scopes.includes('write') && policies.access(id, context.principalId).edit, cloneUrl, accessEpoch: policies.epoch(), pendingReceives: gitHosting.pending(id), ...(receipt ? { receipt } : {}) });
+        }); return;
+      }
       if (req.method === 'GET' && path === '/api/conpherence/updates') {
         if ([...url.searchParams.keys()].some(key => key !== 'after') || url.searchParams.getAll('after').length > 1) throw new HttpError(400, 'Conversation updates accept one after cursor.');
         if (closing) throw new HttpError(503, 'The application is shutting down.');
@@ -1497,7 +1551,7 @@ export function createApp(options: AppOptions = {}): App {
       if (key !== undefined && (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(key))) throw new HttpError(400, 'Idempotency-Key must contain 1–200 letters, numbers, dots, underscores, colons, or hyphens.');
       if (url.search) throw new HttpError(400, 'Mutation URLs may not contain query parameters.');
       const input = await body(req, req.method === 'POST' && (path === '/api/files' || path === '/api/herald/receive' || path === '/api/suite-import/preview' || path === '/api/suite-import/apply') ? 24 * 1024 * 1024 : /^\/api\/pastes(?:\/PA[1-9]\d{0,14})?$/.test(path) ? PASTE_MAX_BYTES * 6 + 65_536 : MAX_BODY);
-      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/ai-proposals(?:\/[^/]+\/apply)?$/.test(path) || path === '/api/drydock/leases' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch|resolve)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
+      if (req.method === 'POST' && (path === '/api/harbormaster/builds' || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/ai-proposals(?:\/[^/]+\/apply)?$/.test(path) || path === '/api/drydock/leases' || /^\/api\/landings\/LAND-[a-f0-9-]+\/commands$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/landings$/.test(path) || /^\/api\/repositories\/R\d+\/import-revision$/.test(path) || /^\/api\/revisions\/[DPL]\d+\/import-git$/.test(path) || path === '/api/revisions/docx' || /^\/api\/revisions\/[DPL]\d+\/docx\/(?:import|replace|replace-batch|resolve)$/.test(path) || /^\/api\/revisions\/[DPL][1-9]\d{0,14}\/transcript-edits$/.test(path))) {
         const controller = new AbortController(); const abort = () => controller.abort();
         const close = () => { if (!res.writableEnded) abort(); };
         gitReads.add(controller); req.once('aborted', abort); res.once('close', close);
@@ -1518,8 +1572,10 @@ export function createApp(options: AppOptions = {}): App {
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   let closing: Promise<void> | undefined;
-  return { server, store, auth, policies, paperBuilds, automation, landing, close: () => closing ??= (async () => {
+  return { server, store, auth, policies, paperBuilds, automation, landing, repositorySync, gitHosting, close: () => closing ??= (async () => {
     for (const controller of gitReads) controller.abort();
+    await gitHosting.close();
+    await repositorySync.close();
     await mail.close();
     await automation.close();
     await paperBuilds.close();

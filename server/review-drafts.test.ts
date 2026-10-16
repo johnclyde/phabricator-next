@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -181,12 +182,12 @@ test('schema35 adds private storage without changing historical rows and refuses
     const f = fixture(s); s.createComment(f.id, { body: 'Historical @literal comment\r\n😀', versionId: f.version.id }, alice);
     // Remove exactly the three introduced tables (including their indexes and
     // triggers) to construct the prior schema, not merely relabel a new schema.
-    s.database.exec("DROP TABLE review_draft_operations; DROP TABLE review_draft_entries; DROP TABLE review_draft_sets; CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Preserve'); PRAGMA user_version=34");
+    withoutRepositoryOperationsSchema(s.database).exec("DROP TABLE review_draft_operations; DROP TABLE review_draft_entries; DROP TABLE review_draft_sets; CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Preserve'); PRAGMA user_version=34");
     const before = snapshot(s.database); s.close(); s = new Store({ path });
-    assert.equal(s.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+    assert.equal(s.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     const after = snapshot(s.database); for (const row of before.schema) assert.deepEqual(after.schema.find(next => next.name === row.name), row); for (const [table, rows] of Object.entries(before.rows)) assert.deepEqual(after.rows[table], rows);
     assert.deepEqual(s.reviewDrafts.snapshot(f.id, alice.principalId).entries, []); assert.deepEqual(s.database.prepare('PRAGMA foreign_key_check').all(), []);
-    s.database.exec("DROP TABLE review_draft_operations; DROP TABLE review_draft_entries; DROP TABLE review_draft_sets; CREATE TABLE review_draft_sets(operator_note TEXT); INSERT INTO review_draft_sets VALUES('Do not overwrite'); PRAGMA user_version=34");
+    withoutRepositoryOperationsSchema(s.database).exec("DROP TABLE review_draft_operations; DROP TABLE review_draft_entries; DROP TABLE review_draft_sets; CREATE TABLE review_draft_sets(operator_note TEXT); INSERT INTO review_draft_sets VALUES('Do not overwrite'); PRAGMA user_version=34");
     const collision = snapshot(s.database); s.close(); assert.throws(() => new Store({ path }), /review_draft_sets schema/);
     const db = new DatabaseSync(path); try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 34); assert.deepEqual(snapshot(db), collision); } finally { db.close(); }
   } finally { if (s.database.isOpen) s.close(); rmSync(directory, { recursive: true, force: true }); }

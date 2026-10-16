@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -120,12 +121,12 @@ test('query validation rejects unsupported ordering, malformed IDs/cursors, over
  assert.deepEqual(parseWikiDocumentSearchQuery({paths:['A/','a','b/'],ids:[3,1,3]}).paths,['a/','b/']);assert.deepEqual(parseWikiDocumentSearchQuery({ids:[3,1,3]}).ids,[1,3]);
 });
 
-function schema21(path:string){const store=new Store({path});const doc=make(store,'/');store.draftDocument(doc.id,{...pins(store,doc.id),title:'Existing draft',content:'Exact existing draft\r\n😀'},actor);store.database.exec("DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; CREATE VIEW legacy_search_versions AS SELECT id,data FROM wiki_versions; ALTER TABLE wiki_versions ADD COLUMN operator_note TEXT; PRAGMA user_version=21;");return store;}
+function schema21(path:string){const store=new Store({path});const doc=make(store,'/');store.draftDocument(doc.id,{...pins(store,doc.id),title:'Existing draft',content:'Exact existing draft\r\n😀'},actor);withoutRepositoryOperationsSchema(store.database).exec("DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; CREATE VIEW legacy_search_versions AS SELECT id,data FROM wiki_versions; ALTER TABLE wiki_versions ADD COLUMN operator_note TEXT; PRAGMA user_version=21;");return store;}
 function snapshot(db:DatabaseSync){const schema=db.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all() as {name:string;sql:string}[];const tables=(db.prepare("SELECT name FROM sqlite_schema WHERE type='table'").all() as {name:string}[]).map(row=>row.name);return {schema,rows:new Map(tables.map(name=>[name,db.prepare(`SELECT rowid,* FROM ${name} ORDER BY rowid`).all()]))};}
 
 test('schema22 identities are durable and immutable while migration preserves every old row/schema including SQLite sequences',()=>{
  const directory=mkdtempSync(join(tmpdir(),'wiki-schema22-')),path=join(directory,'workspace.sqlite');let store=schema21(path);const before=snapshot(store.database);store.close();
- try{store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,45);for(const item of before.schema)assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(item.name)!.sql,item.sql,item.name);for(const [table,rows]of before.rows)assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all(),rows,table);
+ try{store=new Store({path});assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,46);for(const item of before.schema)assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(item.name)!.sql,item.sql,item.name);for(const [table,rows]of before.rows)assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM ${table} ORDER BY rowid`).all(),rows,table);
   const ids=[store.wikiDocumentIdentity('W1'),...store.documentHistory('W1').versions.map(version=>store.wikiContentIdentity(version.id))];assert.match(ids[0]!.phid,/^PHID-WIKI-[a-f0-9]{20}$/);assert.equal(new Set(ids.map(item=>item.phid)).size,3);
   const cursor=contents(store,{limit:1}).nextAfter!;store.close();store=new Store({path});assert.deepEqual([store.wikiDocumentIdentity('W1'),...store.documentHistory('W1').versions.map(version=>store.wikiContentIdentity(version.id))],ids);assert.equal(contents(store,{limit:1,after:cursor}).contents.length,1);
   assert.throws(()=>store.database.exec('UPDATE wiki_document_identifiers SET phid=phid'),/immutable/);assert.throws(()=>store.database.exec('DELETE FROM wiki_content_identifiers'),/immutable/);assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(),[]);

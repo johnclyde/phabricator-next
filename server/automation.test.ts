@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -100,9 +101,9 @@ test('schema37 adds automation without rewriting any existing schema36 rows and 
   try {
     store.createTask({ title: 'Preserve existing work' });
     const tables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'herald_%' OR name LIKE 'harbormaster_%')").all().map(row => String(row.name));
-    store.database.exec('PRAGMA foreign_keys=OFF'); for (const table of tables.reverse()) store.database.exec(`DROP TABLE ${table}`); store.database.exec('PRAGMA user_version=36'); const before = snapshot(store.database); store.close();
-    store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45); const after = snapshot(store.database); for (const table of before) assert.deepEqual(after.find(item => item.name === table.name), table); assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
-    store.database.exec('PRAGMA user_version=46'); store.close(); assert.throws(() => new Store({ path }), /newer than/);
+    store.database.exec('PRAGMA foreign_keys=OFF'); for (const table of tables.reverse()) store.database.exec(`DROP TABLE ${table}`); withoutRepositoryOperationsSchema(store.database).exec('PRAGMA user_version=36'); const before = snapshot(store.database); store.close();
+    store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46); const after = snapshot(store.database); for (const table of before) assert.deepEqual(after.find(item => item.name === table.name), table); assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
+    store.database.exec('PRAGMA user_version=47'); store.close(); assert.throws(() => new Store({ path }), /newer than/);
   } finally { try { store.close(); } catch { /* Already closed for reopen. */ } rmSync(directory, { recursive: true, force: true }); }
 });
 

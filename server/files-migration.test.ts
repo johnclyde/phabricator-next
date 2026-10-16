@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,7 +13,7 @@ import { migrateFiles } from './files-migration.ts';
 function schema15(path: string) {
   const store = new Store({ path }); seedDemo(store);
   const db = store.database;
-  db.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
+  withoutRepositoryOperationsSchema(db).exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
     -- Notifications and their mail dependents did not exist at this historical boundary.
     DROP TABLE mail_outbox; DROP TABLE notification_read_changes; DROP TABLE notification_operations; DROP TABLE notification_deliveries; DROP TABLE notification_events; DROP TABLE notification_read_state; DROP TABLE notification_cursor_secret;
     DROP TABLE revision_lifecycle_transactions; DROP TABLE revision_lifecycle_operations; DROP TABLE revision_lifecycle;
@@ -50,7 +51,7 @@ test('schema 15 upgrade preserves old evidence bytes, entity rowids, schema obje
   const directory = mkdtempSync(join(tmpdir(), 'files-migration-')); const path = join(directory, 'workspace.sqlite'); let store = schema15(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path }); const db = store.database;
-    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 45); assert.equal(db.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
+    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 46); assert.equal(db.prepare('PRAGMA foreign_keys').get()!.foreign_keys, 1);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
     const after = snapshot(db);
     for (const [table, records] of Object.entries(before.records)) {
@@ -65,7 +66,7 @@ test('schema 15 upgrade preserves old evidence bytes, entity rowids, schema obje
     assert.throws(() => db.prepare("UPDATE wiki_versions SET data='{}' WHERE id=?").run(wiki.id), /immutable/);
     db.prepare("UPDATE entities SET data=data WHERE id='PROJ1'").run();
     assert.equal((db.prepare("SELECT COUNT(*) AS n FROM legacy_entity_updates WHERE id='PROJ1'").get() as { n: number }).n, 1);
-    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45, 'migration is not repeated on reopen');
+    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46, 'migration is not repeated on reopen');
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

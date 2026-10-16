@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,7 +18,7 @@ function downgrade(db: DatabaseSync) {
   db.exec('PRAGMA foreign_keys=OFF');
   for (const { type, name } of snapshot(db).schema.filter(row => owned.test(row.name) && (row.type === 'trigger' || row.type === 'index'))) db.exec(`DROP ${type.toUpperCase()} ${quote(name)}`);
   for (const { name } of snapshot(db).schema.filter(row => owned.test(row.name) && row.type === 'table')) db.exec(`DROP TABLE ${quote(name)}`);
-  db.exec('PRAGMA user_version=43; PRAGMA foreign_keys=ON');
+  withoutRepositoryOperationsSchema(db).exec('PRAGMA user_version=43; PRAGMA foreign_keys=ON');
 }
 test('schema43 to44 preserves every prior row and definition, seeds default task settings, and reopens unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'discovery-migration-')), path = join(dir, 'workspace.sqlite'); let store = new Store({ path });
@@ -26,7 +27,7 @@ test('schema43 to44 preserves every prior row and definition, seeds default task
     store.createProject({ name: 'Preserved project' });
     store.database.exec("CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Preserve exact data')");
     downgrade(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     const after = snapshot(store.database);
     for (const row of before.schema) assert.deepEqual(after.schema.find(item => item.name === row.name), row, row.name);
     for (const table of before.tables) assert.deepEqual(after.tables.find(item => item.name === table.name), table, table.name);

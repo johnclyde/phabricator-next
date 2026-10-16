@@ -173,6 +173,26 @@ export class Automation {
   landingReceive(facts:GitReceiveFacts,actor:BuildActor):GitReceiveReceipt {
     return this.git.receive(facts,{...this.receiveHooks(),canReceive:value=>{this.authorize(actor,value.repositoryId,true);if(value.pusherId!==actor.principalId)throw new HttpError(403,'The landing pusher changed.');return true;},projectIds:()=>[]});
   }
+  /** Only the server's authenticated Git transport may supply these inspected facts. */
+  hostedReceive(facts: GitReceiveFacts, context: AuthContext): GitReceiveReceipt {
+    const receipt = this.git.receive(facts, {
+      ...this.receiveHooks(),
+      canReceive: value => {
+        if (context.kind !== 'token') throw new HttpError(401, 'Hosted Git requires an access token.');
+        this.auth.revalidate(context, 'read'); this.auth.revalidate(context, 'write');
+        if (value.pusherId !== context.principalId) throw new HttpError(403, 'The authenticated Git pusher changed.');
+        this.policies.require(value.repositoryId, context.principalId, 'view');
+        this.policies.require(value.repositoryId, context.principalId, 'edit');
+        return true;
+      },
+      projectIds: id => {
+        const row = this.store.database.prepare("SELECT data FROM entities WHERE id=? AND kind='repository'").get(id) as { data: string } | undefined;
+        const repository = row ? JSON.parse(row.data) as { projectId?: string | null } : null;
+        return repository?.projectId ? [repository.projectId] : [];
+      },
+    });
+    return presentGitReceiveReceipt(receipt, context.principalId, this.herald, this.policies);
+  }
   private hooks() { return {
     canReadGitReview: (_rule: HeraldRule, snapshot: HeraldSnapshot) => !snapshot.git?.review?.revision || this.policies.access(snapshot.git.review.revision.revisionId, _rule.authorId).view,
     canEvaluate: (rule: HeraldRule, snapshot: HeraldSnapshot) => this.enabled(rule.authorId) && this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId).view && (!snapshot.git || rule.actions.every(action => action.type === 'nothing') || this.policies.access(heraldPolicyObjectId(snapshot), rule.authorId).edit) && (rule.ruleType !== 'global' || this.manager(rule.authorId)) && (rule.ruleType !== 'object' || Boolean(rule.objectId && this.policies.access(rule.objectId, rule.authorId).edit)),

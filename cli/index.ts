@@ -39,6 +39,7 @@ import { gitComparisonCommand } from './git-comparison';
 import { gitBlameCommand } from './git-blame';
 import { gitPatchCommand } from './git-patch';
 import { ownersCommand } from './owners';
+import { repositorySyncCommand } from './repository-sync';
 
 const help = `Phabricator Next — arc (initial CLI)
 
@@ -73,6 +74,8 @@ const help = `Phabricator Next — arc (initial CLI)
   arc create-owners --intent REQUEST.json [--request-id KEY]
   arc edit-owners OWN-UUID --intent REQUEST.json [--request-id KEY]
   arc repositories [--limit N] [--json]
+  arc repository-sync R1 [--json]
+  arc sync-repository R1 [--configuration SHA256 --access-epoch N --request-id KEY] [--json]
   arc refs R1 [--json]
   arc browse R1 --commit FULL_ID [--path PATH] [--file] [--json]
   arc history R1 --commit FULL_ID [--path PATH] [--after N] [--limit N] [--json]
@@ -239,6 +242,10 @@ history. A successful edit with no effect returns the prior published version. K
 file and request ID printed before submission; retry unchanged with that ID after
 an uncertain result. Output contains returned metadata and a content hash, never
 the raw source. A receipt may be historical and is not a fresh editing base.
+repository-sync reads hosting and synchronization status. sync-repository creates
+a new request against the current operator configuration, or retries the exact
+configuration, access epoch and request ID printed before its original submission.
+Synchronization runs on the server; it never changes the local working copy.
 Password workspaces require an operator-issued PHABRICATOR_TOKEN environment
 variable. Tokens are never accepted as command arguments or sent on redirects.
 This is not a drop-in Arcanist replacement; working-copy patch application and
@@ -298,7 +305,7 @@ async function main() {
       commit: { type: 'string' }, path: { type: 'string' }, file: { type: 'boolean' }, after: { type: 'string' },
       base: { type: 'string' }, 'before-path': { type: 'string' }, 'after-path': { type: 'string' },
       'parent-path': { type: 'string', multiple: true }, 'ancestor-path': { type: 'string', multiple: true },
-      'request-id': { type: 'string' },
+      'request-id': { type: 'string' }, configuration: { type: 'string' },
       intent: { type: 'string' },
       draft: { type: 'boolean' }, 'test-plan': { type: 'string' }, 'metadata-version': { type: 'string' }, 'project-version': { type: 'string' }, 'subscription-version': { type: 'string' }, 'mute-version': { type: 'string' }, principal: { type: 'string' }, direction: { type: 'string' }, 'relationship-version': { type: 'string' }, snapshot: { type: 'string' }, 'lifecycle-version': { type: 'string' }, 'author-version': { type: 'string' }, 'reviewer-version': { type: 'string' },
       'version-id': { type: 'string' }, 'content-hash': { type: 'string' },
@@ -351,6 +358,7 @@ async function main() {
     } finally { await reader.cancel(); reader.releaseLock(); }
     return Buffer.concat(chunks, size);
   };
+  if (await repositorySyncCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await ownersCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await paperCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;
   if (await fileCommand({ command, args, options: values, optionNames: tokens.flatMap(token => token.kind === 'option' ? [token.name] : []), request, download })) return;

@@ -1,3 +1,4 @@
+import { REPOSITORY_OPERATIONS_TABLES, withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -25,16 +26,20 @@ test('schema34 is only a format fence: legacy comments, preferences, receipts an
     store.createTaskComment(task.id, { body: '@future' }, alice);
     const paste = store.pastes.create({ content: '\ufeffOriginal paste\r\n' }, alice);
     store.pastes.comment(paste.id, { body: '@future', contentVersion: 1 }, alice);
-    store.database.exec("CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Keep exact bytes'); PRAGMA user_version=33");
+    withoutRepositoryOperationsSchema(store.database).exec("CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Keep exact bytes'); PRAGMA user_version=33");
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
-    assert.deepEqual(snapshot(store.database), before);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
+    const after = snapshot(store.database);
+    for (const entry of before.schema) assert.deepEqual(after.schema.find(item => item.name === entry.name), entry, entry.name);
+    for (const [name, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[name], rows, name); assert.deepEqual(after.foreignKeys[name], before.foreignKeys[name], name); }
+    assert.deepEqual(Object.keys(after.rows).filter(name => !(name in before.rows)).sort(), [...REPOSITORY_OPERATIONS_TABLES]);
+    for (const name of REPOSITORY_OPERATIONS_TABLES) assert.deepEqual(after.rows[name], []);
     let resolutions = 0;
     store.configureMentions({ resolve: () => { resolutions++; return { principalId: 'future', displayName: 'Future' }; } });
     assert.deepEqual(store.mutate('old-comment', 'exact-original', () => { throw new Error('Never execute historical write again'); }), receipt);
     assert.equal(resolutions, 0); assert.equal(store.detail(revision.revision.id).comments[0]!.mentions, undefined);
-    assert.deepEqual(snapshot(store.database), before);
-    store.close(); store = new Store({ path }); assert.deepEqual(snapshot(store.database), before);
+    assert.deepEqual(snapshot(store.database), after);
+    store.close(); store = new Store({ path }); assert.deepEqual(snapshot(store.database), after);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     assert.equal(store.database.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
   } finally { if (store.database.isOpen) store.close(); rmSync(directory, { recursive: true, force: true }); }
@@ -43,9 +48,9 @@ test('schema34 is only a format fence: legacy comments, preferences, receipts an
 test('a future mention schema is rejected without modifying any saved record', () => {
   const directory = mkdtempSync(join(tmpdir(), 'mention-future-')), path = join(directory, 'db.sqlite'), store = new Store({ path });
   try {
-    store.createTask({ title: 'Preserve future data' }, alice); store.database.exec('PRAGMA user_version=46');
+    store.createTask({ title: 'Preserve future data' }, alice); store.database.exec('PRAGMA user_version=47');
     const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /newer|schema|version/i);
     const db = new DatabaseSync(path);
-    try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 46); assert.deepEqual(snapshot(db), before); } finally { db.close(); }
+    try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 47); assert.deepEqual(snapshot(db), before); } finally { db.close(); }
   } finally { if (store.database.isOpen) store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

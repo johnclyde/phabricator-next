@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -173,23 +174,23 @@ test('schema18 to19 is additive and preserves all existing raw rows, schema and 
   try {
     store.createRevision({ testPlan: 'Fixture verification plan.', title: 'Legacy bytes', kind: 'document', files: [{ path: 'old.md', content: '\ufeffExact\r\nsource 😀' }] }, actor);
     store.database.prepare('INSERT INTO idempotency VALUES(?,?,?,?,?)').run('old', 'old-request', 201, '{ "keep" : "formatting" }', '2025-01-01');
-    store.database.exec("DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete; CREATE VIEW legacy_versions AS SELECT id,data FROM versions; CREATE INDEX legacy_versions_number ON versions(number); PRAGMA user_version=18;");
+    withoutRepositoryOperationsSchema(store.database).exec("DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete; CREATE VIEW legacy_versions AS SELECT id,data FROM versions; CREATE INDEX legacy_versions_number ON versions(number); PRAGMA user_version=18;");
     const schemas = store.database.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string; sql: string }[];
     const tables = (store.database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map(row => row.name);
     const rows = new Map(tables.map(name => [name, store.database.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all()]));
     store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     for (const schema of schemas) assert.equal(store.database.prepare('SELECT sql FROM sqlite_schema WHERE name=?').get(schema.name)!.sql, schema.sql, schema.name);
     for (const [name, before] of rows) assert.deepEqual(store.database.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all(), before, name);
     assert.deepEqual(store.database.prepare('PRAGMA foreign_key_check').all(), []);
     assert.deepEqual(store.database.prepare('SELECT * FROM revision_docx_packages').all(), []);
-    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+    store.close(); store = new Store({ path }); assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('schema19 failure is atomic and leaves schema18 reopenable', () => {
   const directory = mkdtempSync(join(tmpdir(), 'docx-migration-failure-')), path = join(directory, 'workspace.sqlite'); const first = new Store({ path });
-  first.database.exec('DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete; PRAGMA user_version=18;'); first.close();
+  withoutRepositoryOperationsSchema(first.database).exec('DROP TABLE wiki_conduit_receipts; DROP TABLE wiki_content_identifiers; DROP TABLE wiki_document_identifiers; DROP TABLE wiki_transactions; DROP TABLE wiki_publication; DROP TABLE wiki_cursor_secret; DROP TABLE wiki_locations; DROP TABLE revision_docx_packages; DROP TRIGGER docx_versions_no_update; DROP TRIGGER docx_versions_no_delete; PRAGMA user_version=18;'); first.close();
   const exec = DatabaseSync.prototype.exec;
   try {
     DatabaseSync.prototype.exec = function(sql: string) { if (sql.includes('PRAGMA user_version = 19')) { exec.call(this, sql.replace('PRAGMA user_version = 19;', '')); throw new Error('injected schema19 failure'); } return exec.call(this, sql); };
@@ -197,7 +198,7 @@ test('schema19 failure is atomic and leaves schema18 reopenable', () => {
   } finally { DatabaseSync.prototype.exec = exec; }
   try {
     const db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 18); assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name='revision_docx_packages'").get(), undefined); db.close();
-    const reopened = new Store({ path }); assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version, 45); reopened.close();
+    const reopened = new Store({ path }); assert.equal(reopened.database.prepare('PRAGMA user_version').get()!.user_version, 46); reopened.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,7 +12,7 @@ import { lifecycleAction } from '../tests/revision-lifecycle-fixture.ts';
 
 const actor = { principalId: 'alice', displayName: 'Original Alice', credentialId: null, requestId: 'reviewer-migration' };
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-function drop(db: DatabaseSync) { db.exec('DROP TABLE revision_reviewer_transactions; DROP TABLE revision_reviewer_operations; DROP TABLE revision_reviewer_baselines; DROP TABLE revision_reviewers; PRAGMA user_version=26'); }
+function drop(db: DatabaseSync) { withoutRepositoryOperationsSchema(db).exec('DROP TABLE revision_reviewer_transactions; DROP TABLE revision_reviewer_operations; DROP TABLE revision_reviewer_baselines; DROP TABLE revision_reviewers; PRAGMA user_version=26'); }
 function snapshot(db: DatabaseSync) {
   const schema = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all() as { type: string; name: string; tbl_name: string; sql: string }[];
   const tables = schema.filter(row => row.type === 'table').map(row => row.name); if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name='sqlite_sequence'").get()) tables.push('sqlite_sequence');
@@ -39,7 +40,7 @@ test('schema27 preserves all schema26 rows, schema, sequences, original receipts
     store.database.prepare("UPDATE entities SET data=json_set(data,'$.status','accepted') WHERE id=?").run(unknown);
     store.database.prepare("UPDATE revision_lifecycle SET data=json_set(data,'$.status','accepted') WHERE revision_id=?").run(unknown);
     drop(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45); const after = snapshot(store.database);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46); const after = snapshot(store.database);
     for (const [table, rows] of Object.entries(before.rows)) { assert.deepEqual(after.rows[table], rows, table); assert.deepEqual(after.foreignKeys[table], before.foreignKeys[table], table); }
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item, item.name);
     assert.deepEqual(store.revisionReviewers.state(unknown).acceptance, { kind: 'legacy', head: null, transactionId: null });
@@ -63,7 +64,7 @@ test('schema27 malformed history or sidecar name collisions roll back and preser
       const before = snapshot(store.database); store.close(); assert.throws(() => new Store({ path }), /schema|column|verified/);
       db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 26); assert.deepEqual(snapshot(db), before);
       if (collision) db.exec('DROP TABLE revision_reviewer_operations'); else db.prepare("UPDATE versions SET data=json_set(data,'$.contentHash',?) WHERE revision_id=?").run('a'.repeat(64), id);
-      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+      db.close(); db = undefined; repaired = new Store({ path }); assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     } finally { db?.close(); repaired?.close(); rmSync(directory, { recursive: true, force: true }); }
   }
 });

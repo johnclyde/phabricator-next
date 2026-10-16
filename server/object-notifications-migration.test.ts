@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,7 +13,7 @@ const alice:ActorAttribution={principalId:'alice',displayName:'Alice',credential
 const tables=['object_mute_transactions','object_subscription_transactions','object_subscriptions','object_mutes','object_subscription_operations'];
 const epoch=(s:Store)=>Number(s.database.prepare("SELECT value FROM policy_meta WHERE name='epoch'").get()!.value);
 function snapshot(db:DatabaseSync){const schema=db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all() as {type:string;name:string}[],names=schema.filter(row=>row.type==='table').map(row=>row.name);names.push('sqlite_sequence');return {schema,rows:Object.fromEntries(names.map(name=>[name,db.prepare(`SELECT rowid,* FROM "${name}" ORDER BY rowid`).all()])),foreignKeys:Object.fromEntries(names.map(name=>[name,db.prepare(`PRAGMA foreign_key_list("${name}")`).all()]))};}
-function downgrade(s:Store){for(const name of tables)s.database.exec(`DROP TABLE ${name}`);s.database.exec('PRAGMA user_version=32');}
+function downgrade(s:Store){for(const name of tables)s.database.exec(`DROP TABLE ${name}`);withoutRepositoryOperationsSchema(s.database).exec('PRAGMA user_version=32');}
 function seed(s:Store){
  const w=s.createDocument({title:'Wiki original',slug:'/',content:'Exact source\r\n😀'},alice),p=s.pastes.create({title:'Paste original',content:'\ufeffExact paste\r\n'},alice);s.pastes.comment(p.id,{contentVersion:1,body:'Earlier comment'},bob);
  const d=s.createRevision({kind:'paper',title:'Revision',testPlan:'Inspect.',files:[{path:'paper.txt',content:'Body'}]},alice),t=s.createTask({title:'Task',ownerId:'bob'},alice);
@@ -26,7 +27,7 @@ function seed(s:Store){
 
 test('schema33 preserves every schema32 row, rowid, schema object and historical read receipt without backfilling follows',()=>{
  const dir=mkdtempSync(join(tmpdir(),'object-notifications-migration-')),path=join(dir,'db.sqlite');let s=new Store({path});
- try{const old=seed(s);downgrade(s);s.database.exec("CREATE TABLE operator_notes(note TEXT);INSERT INTO operator_notes VALUES('Keep exact record')");const before=snapshot(s.database);s.close();s=new Store({path});assert.equal(s.database.prepare('PRAGMA user_version').get()!.user_version,45);
+ try{const old=seed(s);downgrade(s);s.database.exec("CREATE TABLE operator_notes(note TEXT);INSERT INTO operator_notes VALUES('Keep exact record')");const before=snapshot(s.database);s.close();s=new Store({path});assert.equal(s.database.prepare('PRAGMA user_version').get()!.user_version,46);
   const after=snapshot(s.database);for(const [name,data] of Object.entries(before.rows)){assert.deepEqual(after.rows[name],data,name);assert.deepEqual(after.foreignKeys[name],before.foreignKeys[name],name);}for(const value of before.schema)assert.deepEqual(after.schema.find(row=>row.name===value.name),value,value.name);for(const name of tables)assert.deepEqual(after.rows[name],[],'no fabricated following from old authors, editors or comments');
   assert.equal(s.objectSubscriptions.effective(old.w.id,'alice'),false);assert.equal(s.objectSubscriptions.effective(old.p.id,'alice'),true,'immutable Paste author is an automatic role, not backfilled history');assert.equal(s.objectSubscriptions.effective(old.p.id,'bob'),false);assert.deepEqual(s.notifications.operation(old.operationId).input,old.input);assert.deepEqual(s.replay('old-read','original-fingerprint'),old.receipt);
   const stable=snapshot(s.database);initializeObjectSubscriptions(s.database);assert.deepEqual(snapshot(s.database),stable);s.close();s=new Store({path});assert.deepEqual(snapshot(s.database),stable);

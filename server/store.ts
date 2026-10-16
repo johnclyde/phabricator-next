@@ -1,3 +1,5 @@
+import { initializeHostedGit } from './git-hosting.ts';
+import { initializeRepositorySync } from './repository-sync.ts';
 import { initializeOwners } from './owners.ts';
 import { initializeOwnersRouting } from './owners-routing.ts';
 import { initializeManiphest, readManiphestConfig, taskFormInput, taskManiphestValues, taskChanges } from './maniphest.ts';
@@ -265,7 +267,7 @@ export class Store {
     this.database = new DatabaseSync(path);
     this.database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     const version = (this.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 45) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
+    if (version > 46) { this.database.close(); throw new Error(`Database schema ${version} is newer than this application supports.`); }
     this.fresh = version === 0;
     if (version === 0) this.database.exec(`
       BEGIN IMMEDIATE;
@@ -593,6 +595,10 @@ export class Store {
     }
     if (version < 45) {
       try { this.transaction(() => { initializeOwners(this.database); initializeOwnersRouting(this.database); this.database.exec('PRAGMA user_version = 45'); }); }
+      catch (error) { this.database.close(); throw error; }
+    }
+    if (version < 46) {
+      try { this.transaction(() => { initializeRepositorySync(this.database); initializeHostedGit(this.database); this.database.exec('PRAGMA user_version = 46'); }); }
       catch (error) { this.database.close(); throw error; }
     }
     this.revisionViews = new RevisionViewStore(this.database);

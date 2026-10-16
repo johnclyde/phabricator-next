@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,7 +14,7 @@ function snapshot(db: DatabaseSync) {
 }
 function downgrade(db: DatabaseSync) {
   for (const name of ['revision_landing_events', 'revision_landing_preparations', 'revision_landings']) db.exec(`DROP TABLE ${name}`);
-  db.exec('PRAGMA user_version=38');
+  withoutRepositoryOperationsSchema(db).exec('PRAGMA user_version=38');
 }
 test('schema39 preserves every schema38 table, row and schema object across upgrade and reopen', () => {
   const dir=mkdtempSync(join(tmpdir(),'landing-migration-')),path=join(dir,'workspace.sqlite');let store=new Store({path});
@@ -21,7 +22,7 @@ test('schema39 preserves every schema38 table, row and schema object across upgr
     store.createRepository({name:'Preserved source',description:'Keep exact bytes',remoteUrl:'https://example.invalid/repo.git',defaultBranch:'main'});
     downgrade(store.database);store.database.exec("CREATE TABLE operator_data(note TEXT); INSERT INTO operator_data VALUES('Keep exact data');");
     const before=snapshot(store.database);store.close();store=new Store({path});const after=snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,45);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version,46);
     for(const item of before.schema)assert.deepEqual(after.schema.find(row=>row.name===item.name),item);
     for(const [table,rows]of Object.entries(before.rows))assert.deepEqual(after.rows[table],rows,table);
     for(const table of ['revision_landings','revision_landing_preparations','revision_landing_events'])assert.deepEqual(after.rows[table],[]);

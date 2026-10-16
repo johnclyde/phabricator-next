@@ -1,0 +1,28 @@
+.repository-operations { margin: 16px 0; }
+.repository-operations .panel-heading, .repository-operation-heading, .repository-operation-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.repository-operations .panel-heading h2 { margin-right: auto; }
+.repository-operation-heading h3 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.repository-operation-targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; margin: 14px 0; }
+.repository-operation-target { border: 1px solid var(--border); border-radius: 4px; padding: 14px; min-width: 0; }
+.repository-operation-target dl { margin: 14px 0 0; }
+.repository-operation-target dl div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin: 7px 0; }
+.repository-operation-target dt { color: var(--muted); font-size: 12px; }
+.repository-operation-target dd { margin: 0; font-size: 12px; }
+.repository-operations p, .repository-sync-history li { overflow-wrap: anywhere; }
+.repository-clone-url { margin-top: 14px; max-width: 750px; }
+.repository-clone-url input { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+.repository-sync-running, .repository-sync-queued { background: #e8f1fb; color: #17558a; }
+.repository-sync-failed, .repository-sync-retrying { background: #fff1df; color: #805000; }
+.repository-sync-history { margin-top: 18px; }
+.repository-sync-history summary { cursor: pointer; padding: 12px 0; }
+.repository-sync-history ol { padding-left: 20px; }
+.repository-sync-history li { margin-bottom: 12px; }
+.repository-sync-recovery { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 12px; }
+.repository-operation-actions { justify-content: flex-start; }
+@media (max-width: 600px) {
+  .repository-operations .button, .repository-sync-history summary { min-height: 44px; }
+  .repository-operations .panel-heading { align-items: stretch; }
+  .repository-operations .panel-heading h2 { width: 100%; }
+  .repository-operation-target dl div { flex-direction: column; }
+  .repository-operation-actions .button { flex: 1 1 auto; }
+}

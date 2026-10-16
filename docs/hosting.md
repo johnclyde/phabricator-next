@@ -138,3 +138,5 @@ of operator backups still require the deployment checks above. The live local
 preview, schema 34 and all 91 existing records remained unchanged.
 
 Optional [revision landing](revision-landing.md) requires explicit local bare-repository and branch bindings. Installation does not enable a destination, remote push, or worker fleet. Keep actual paths and deployment settings in the operator repository.
+
+Automatic repository refresh, authenticated Git smart HTTP and outbound mirrors use explicit [repository operations configuration](repository-operations.md). Bare repository storage must be writable by the service account and included in backups. These workers run in the application process and do not depend on GitHub Actions.

@@ -36,7 +36,7 @@ function requestPins(input:RevisionLandingPrepareInput):RevisionLandingPins {con
 export class LandingService {
   readonly records:RevisionLandingStore;
   readonly transport:LocalGitLanding;
-  constructor(private readonly store:Store,private readonly auth:Auth,private readonly policies:PolicyStore,private readonly automation:Automation,private readonly bindings:readonly LocalLandingBinding[]=[]) {
+  constructor(private readonly store:Store,private readonly auth:Auth,private readonly policies:PolicyStore,private readonly automation:Automation,private readonly bindings:readonly LocalLandingBinding[]=[],private readonly repositoryChanged:(id:string)=>void=()=>{}) {
     this.transport=new LocalGitLanding(bindings);
     this.records=new RevisionLandingStore(store.database,this.transport,{
       authorize:(operation,actor,phase)=>{
@@ -52,6 +52,7 @@ export class LandingService {
       },
       afterLand:(operation,facts,actor)=>{
         this.automation.landingReceive(facts,{...actor,workspaceId:this.auth.workspaceId});
+        this.repositoryChanged(facts.repositoryId);
         const current=this.store.revisionLifecycle.snapshot(operation.revisionId,actor.principalId);
         // Recovery records the historical landing, but never closes newer work.
         if(current.head.versionId!==operation.patch.versionId||current.head.contentHash!==operation.patch.contentHash||current.lifecycle.status!=='accepted'||!current.actions.some(action=>action.action==='close'&&action.available))return;

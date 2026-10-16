@@ -302,6 +302,28 @@ export class Auth {
     const context: AuthContext = { workspaceId: this.workspaceId, principalId: row.account_id, displayName: state.account!.displayName, credentialId: row.id, kind: 'session', sessionContext: row.context, scopes: [...SCOPES] };
     this.revalidate(context, scope); return context;
   }
+  /** Git clients use access tokens, never browser cookies or local implicit authority. */
+  authenticateGit(req: IncomingMessage, scope: 'read' | 'write' = 'read'): AuthContext {
+    const authorization = this.header(req, 'authorization');
+    const names = req.rawHeaders.filter((_value, index) => index % 2 === 0).map(name => name.toLowerCase());
+    if (names.filter(name => name === 'authorization').length !== 1 || names.includes('cookie') || req.headers.cookie !== undefined || !authorization || authorization.length > 1_024) {
+      throw new HttpError(401, 'Git access requires one access token and no browser cookies.');
+    }
+    const bearer = /^Bearer (phab_[A-Za-z0-9_-]{43})$/i.exec(authorization);
+    let token: string | undefined = bearer?.[1], username: string | undefined;
+    if (!bearer) {
+      const basic = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(authorization);
+      const decoded = basic ? Buffer.from(basic[1]!, 'base64') : null;
+      if (!basic || !decoded || decoded.toString('base64') !== basic[1]) throw new HttpError(401, 'A valid Git access token is required.');
+      const credentials = /^([a-z][a-z0-9._-]{2,63}):(phab_[A-Za-z0-9_-]{43})$/.exec(decoded.toString('utf8'));
+      if (!credentials) throw new HttpError(401, 'Use your workspace username and access token for Git.');
+      username = credentials[1]; token = credentials[2];
+    }
+    const context = this.tokenContext(token, scope);
+    if (username !== undefined && this.account(context.principalId)?.username !== username) throw new HttpError(401, 'A valid Git access token is required.');
+    if (scope === 'write') this.revalidate(context, 'read');
+    return context;
+  }
   /** Conduit carries tokens in its body. Never rewrite headers or weaken cookie CSRF checks. */
   authenticateConduit(req: IncomingMessage, token: unknown, scope: AuthScope = 'read'): AuthContext {
     const authorization = req.headers.authorization;

@@ -1,3 +1,4 @@
+import { withoutRepositoryOperationsSchema } from '../tests/migration-fixture.ts';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -16,7 +17,7 @@ function snapshot(database: DatabaseSync) {
   return { schema, rows: Object.fromEntries(tables.map(name => [name, database.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all()])) };
 }
 function downgrade(database: DatabaseSync) {
-  database.exec('DROP TABLE audit_events; DROP TABLE audit_commits; PRAGMA user_version=39');
+  withoutRepositoryOperationsSchema(database).exec('DROP TABLE audit_events; DROP TABLE audit_commits; PRAGMA user_version=39');
 }
 function savedCommit(format: 'sha1' | 'sha256' = 'sha1'): GitAutomationObject {
   const commitId = 'a'.repeat(format === 'sha1' ? 40 : 64), id = `GC-${hash(['R1', commitId])}`;
@@ -37,7 +38,7 @@ test('schema40 preserves every schema39 schema object and row, adds empty Audit 
     const before = snapshot(store.database);
     store.close(); store = new Store({ path });
     const after = snapshot(store.database);
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 45);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
     for (const item of before.schema) assert.deepEqual(after.schema.find(row => row.name === item.name), item);
     for (const [table, rows] of Object.entries(before.rows)) assert.deepEqual(after.rows[table], rows, table);
     assert.deepEqual(after.rows.audit_commits, []);

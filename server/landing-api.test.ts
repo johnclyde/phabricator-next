@@ -12,13 +12,14 @@ import type { RevisionLandingDetail, RevisionLandingPrepareInput, RevisionLandin
 import type { HeraldRule, HeraldRuleInput } from '../shared/herald.ts';
 import { resolveRevisionPatch } from './revision-patch.ts';
 import { HttpError } from './validation.ts';
+import { withRepositorySyncLock } from './repository-sync.ts';
 
 const members=(...principalIds:string[])=>({kind:'principals' as const,principalIds});
 const rule:HeraldRuleInput={name:'Reject landing source',contentType:'push-content',ruleType:'global',objectId:null,enabled:true,match:'all',repetition:'every',conditions:[{field:'always',operator:'true',value:null}],actions:[{type:'block-push',value:'A private rule explanation.'}]};
-async function start(basePath='/') {
+async function start(basePath='/',hosted=false) {
   const git=await createGitFixture(),store=new Store({path:':memory:'}),provision=createAuth({database:store.database,mode:'local',basePath:'/',provisioning:true});
   const alice=await provision.createAccount({username:'alice',displayName:'Alice Author',password:'Alice landing API fixture password'}),bob=await provision.createAccount({username:'bob',displayName:'Bob Editor',password:'Bob landing API fixture password'});
-  const app=createApp({store,seed:false,authMode:'password',basePath,gitRepositories:{R1:git.barePath},landingBindings:[{key:'local',repositoryId:'R1',repositoryPath:git.barePath,branches:['refs/heads/main']}],automation:{managers:['alice']}});await app.automation.close();
+  const app=createApp({store,seed:false,authMode:'password',basePath,gitRepositories:{R1:git.barePath},...(hosted?{repositorySyncBindings:[{repositoryId:'R1',path:git.barePath,mode:'host' as const}]}:{}),landingBindings:[{key:'local',repositoryId:'R1',repositoryPath:git.barePath,branches:['refs/heads/main']}],automation:{managers:['alice']}});await app.automation.close();
   const actor:ActorAttribution={principalId:alice.id,displayName:alice.displayName,credentialId:null,requestId:'landing-source'};
   store.createRepository({name:'Landing source',remoteUrl:'https://example.invalid/never-fetched.git'});
   const tokens={alice:app.auth.createToken(alice.id,{name:'Author',scopes:['read','write']}).token,bob:app.auth.createToken(bob.id,{name:'Editor',scopes:['read','write']}).token,reader:app.auth.createToken(alice.id,{name:'Read only',scopes:['read']}).token};
@@ -32,8 +33,58 @@ async function start(basePath='/') {
   const input=async(baseCommitId=git.importCommit):Promise<RevisionLandingPrepareInput>=>{const read=await request<RevisionLandingSnapshot>(path);assert.equal(read.status,200,JSON.stringify(read.body));return {...read.body.pins,binding:'local',branch:'refs/heads/main',baseCommitId,expectedTargetCommitId:baseCommitId};};
   const prepare=async()=>{const data=await input(),key=randomUUID(),result=await request<RevisionLandingDetail>(path,'POST',data,'alice',key);assert.equal(result.status,201,JSON.stringify(result.body));return {data,key,detail:result.body,commands:`/api/landings/${result.body.operation.id}/commands`};};
   const policy=(subject:string,changes:Record<string,unknown>,principalId=alice.id)=>{const current=app.policies.policy(subject,principalId);app.policies.setPolicy(subject,{expectedVersion:current.version,spaceId:current.spaceId,...current.rules,...changes},principalId);};
-  return {...app,git,observer,alice,bob,actor,id,path,request,input,prepare,accept,policy,close:async()=>{await app.close();store.close();await git.close();}};
+  return {...app,git,observer,alice,bob,actor,id,path,request,input,prepare,accept,policy,shutdown:app.close,close:async()=>{await app.close();store.close();await git.close();}};
 }
+
+test('hosted landings share the receive lock and an unsuccessful attempt remains retryable',async()=>{
+  const app=await start('/',true);try{
+    const prepared=await app.prepare(),command={command:'land',expectedVersion:1},key=randomUUID();
+    await withRepositorySyncLock(app.git.barePath,AbortSignal.timeout(30_000),async()=>{
+      const blocked=await app.request(prepared.commands,'POST',command,'alice',key);
+      assert.equal(blocked.status,409);assert.equal(blocked.body.code,'REPOSITORY_SYNC_BUSY');
+      assert.equal((await app.git.git(['rev-parse','refs/heads/main'])).trim(),app.git.importCommit);
+      assert.equal(app.landing.transport.state(prepared.detail.operation.prepared),'ready');
+      assert.equal(app.landing.records.detail(prepared.detail.operation.id,app.actor).operation.state,'prepared');
+      assert.equal(app.store.database.prepare('SELECT count(*) AS n FROM git_receive_records').get()!.n,0);
+    });
+    const landed=await app.request<RevisionLandingDetail>(prepared.commands,'POST',command,'alice',key);
+    assert.equal(landed.status,200,JSON.stringify(landed.body));assert.equal(landed.body.operation.state,'landed');
+    assert.equal((await app.git.git(['rev-parse','refs/heads/main'])).trim(),prepared.detail.operation.prepared.commitId);
+  }finally{await app.close();}
+});
+
+test('hosted landings cannot advance a branch while an earlier receive needs reconciliation',async()=>{
+  const app=await start('/',true);try{
+    const prepared=await app.prepare(),now=new Date().toISOString();
+    app.store.database.prepare("INSERT INTO hosted_git_receives(id,repository_id,configuration,actor,state,input,created_at,updated_at) VALUES(?,? ,?,?,'pending',?,?,?)")
+      .run('http-interrupted-fixture','R1',app.repositorySync.snapshot('R1').configuration,JSON.stringify(app.actor),`${app.git.importCommit} ${app.git.importNextCommit} refs/heads/main\n`,now,now);
+    const blocked=await app.request(prepared.commands,'POST',{command:'land',expectedVersion:1});
+    assert.equal(blocked.status,409);assert.equal(blocked.body.code,'GIT_RECEIVE_PENDING');
+    assert.equal((await app.git.git(['rev-parse','refs/heads/main'])).trim(),app.git.importCommit);
+    assert.equal(app.landing.transport.state(prepared.detail.operation.prepared),'ready');
+    assert.equal(app.landing.records.detail(prepared.detail.operation.id,app.actor).operation.state,'prepared');
+    assert.equal(app.store.database.prepare('SELECT count(*) AS n FROM git_receive_records').get()!.n,0);
+  }finally{await app.close();}
+});
+
+test('shutdown at the hosted landing lock boundary aborts execution without changing Git or recording success',async()=>{
+  const app=await start('/',true);let shutdown:Promise<void>|undefined;
+  const original=app.repositorySync.binding.bind(app.repositorySync);
+  try{
+    const prepared=await app.prepare(),key=randomUUID();
+    // Initiate shutdown after routing and authorization, immediately before the
+    // asynchronous repository lock begins. The request controller must cancel it.
+    app.repositorySync.binding=id=>{const binding=original(id);shutdown??=app.shutdown();return binding;};
+    const response=await app.request(prepared.commands,'POST',{command:'land',expectedVersion:1},'alice',key);
+    assert.ok(shutdown,'the command reached its hosted repository binding');await shutdown;
+    assert.equal(response.status,499);assert.equal(response.body.code,'REPOSITORY_SYNC_CANCELLED');
+    assert.equal((await app.git.git(['rev-parse','refs/heads/main'])).trim(),app.git.importCommit);
+    assert.equal(app.landing.transport.state(prepared.detail.operation.prepared),'ready');
+    assert.equal(app.landing.records.detail(prepared.detail.operation.id,app.actor).operation.state,'prepared');
+    assert.equal(app.store.database.prepare('SELECT count(*) AS n FROM git_receive_records').get()!.n,0);
+    assert.equal(app.store.database.prepare('SELECT count(*) AS n FROM idempotency WHERE key LIKE ?').get(`%:${key}`)!.n,0);
+  }finally{app.repositorySync.binding=original;await shutdown;await app.close();}
+});
 
 test('mounted landing API prepares an imported revision against its parent and lands, closes and replays exact evidence',async()=>{
   const app=await start('/mounted/');try{
