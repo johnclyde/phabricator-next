@@ -1,5 +1,7 @@
 # Paper builds and exact source versions
 
+For browser-local writing, live math previews and reopening offline, use [Papers on this device](device-papers.md). That workflow does not require this optional server compiler.
+
 Paper compilation is an explicit operation on a saved paper revision. Each request identifies the immutable version ID, its SHA-256 content hash, a `.tex` entrypoint in that snapshot, and the operator's compiler configuration ID. Saving another version never retargets a submitted build. Building an older version is supported and remains visibly associated with that version.
 
 The compiler runs in a separate, isolated container. The application has no fallback that executes TeX on the API host, downloads packages during compilation, sends manuscripts to an external service, or reports a simulated PDF as a successful build. See [the worker configuration](tex-worker.md) for the pinned engine, package bundle, container image and resource limits. An unconfigured compiler is explicitly unavailable; a configured runtime that cannot execute a job reports a failed build.

@@ -1,0 +1,35 @@
+# Papers on this device
+
+Open **Papers → Papers on this device**, or **Open papers on this device** from the sign-in screen. The same screen is available at `#device-papers`. Opening this screen directly does not start a workspace session or make workspace API requests. If you visit it from an already opened workspace, that session’s expiry, cross-tab sign-out and unsaved-draft protections remain active.
+
+Choose **Keep papers in this browser profile**, then create a paper or import UTF-8 `.tex`, `.bib`, or other text sources. A `.paper.json` export restores a complete text project as a new independent copy. The editor supports multiple source files, file paths, live KaTeX previews, title changes, automatic device saves, and source/project downloads. Wait for **Saved on this device** before closing the tab.
+
+Before disconnecting, wait for **Ready to reopen offline**. This confirms the app shell, rendering code and math fonts have been installed in this browser. You can then close the tab, reopen the same site, choose the device-paper library and continue editing. The workspace itself still requires session verification. Initial installation requires a connection; private browsing, disabled storage or cleared site data can prevent reopening.
+
+## Storage and ownership
+
+Device papers are explicit local copies, stored in IndexedDB for this origin and application mount. They have no server account, workspace authorization, review acceptance or publication identity. The application never silently caches authenticated manuscripts into this library. **Save a device copy** on a selected paper version or editing draft requires explicit acknowledgment and copies its text files. Linked figures, binary attachments, review history and server permissions are not copied.
+
+Anyone using this browser profile can open device papers after sign-out. They are not protected by the workspace password and are not encrypted by this application. Delete them from the library when they should no longer remain on this device. Signing out still clears ordinary authenticated workspace drafts; it does not silently delete deliberately retained device papers.
+
+Device edits are not uploaded, synchronized or automatically submitted on reconnect. They do not update a workspace revision or invalidate its acceptance: they are independent documents until the author explicitly publishes their source through a workspace review workflow. Automatic synchronization, conflict merging between devices, encrypted local vaults, attached-figure projects and full account-aware offline workspace access remain separate work.
+
+Each save uses an IndexedDB transaction with strict durability requested. The UI reports success only after transaction completion. Revision checks reject an update or delete when another tab changed the stored record; stale writes cannot overwrite another tab or resurrect a deleted paper. The conflicting editor keeps its own text and offers export, a new independent copy, or explicit replacement with the latest saved copy. Quota and unavailable-storage errors remain visible and keep edits in the current tab. Navigation warns if the latest edits have not been saved.
+
+The browser may deny persistent-storage requests or remove site data. **Keep storage on this device** requests protection from automatic storage eviction where supported; it is not a backup. Export projects periodically and before clearing browser data. Normal exports preserve file paths, contents and line endings without local IDs or authentication metadata. An invalid intermediate draft can still be downloaded as a recovery export; its title/path problems must be corrected before importing it again.
+
+Projects currently support 200 text files, 2 MiB per file and 10 MiB of UTF-8 source in total. Paths must be unique safe relative paths. Import rejects invalid encodings, null bytes and malformed projects. JSON imports are bounded separately to accommodate escaped source; their decoded source must still satisfy the project limits. These are storage/import safeguards, not a restriction on the number of suggested edits in reviews.
+
+## Math preview
+
+KaTeX is bundled locally, including its fonts and license. The reader renders common inline/display mathematics, equation environments, prose and headings from the selected file. Unsupported or unfinished expressions and document commands remain visible as source; the original text is never rewritten by the renderer. The same preview appears during workspace paper creation and version editing.
+
+Rendering runs in a disposable local worker, canceled when source changes and stopped after a timeout. Input and output budgets bound preview work; remaining equations stay visible as source. These limits never truncate the saved paper.
+
+The preview is not full LaTeX compilation: it does not expand included files, produce a publication PDF, run bibliography tools or implement arbitrary document classes and packages. Explicit server-side PDF builds remain a separate optional capability. Writing and previewing device papers needs neither that compiler nor an AI provider.
+
+The public offline-shell manifest pins the built JavaScript, CSS and fonts by size and SHA-256. The service worker verifies these assets before publishing replacement offline HTML and preserves the previous complete shell if an update fails. It never stores manuscript source, API responses, authentication responses or opt-in transcription models in the shell cache. Device-paper source remains in its separate IndexedDB store.
+
+## Verification
+
+Meaningful coverage includes portable schema/import/export checks, native IndexedDB transaction completion and concurrent updates/deletes, storage failures, first-use offline fonts, closing and reopening a paper with the network disconnected, independent conflicting edits, multi-file backup round trips, and explicit workspace-to-device copies. All 88 targeted browser checks passed at root and mounted paths on desktop and mobile layouts, including a complete browser-process restart with the same saved profile and networking disabled. Physical-device and browser-eviction behavior still need wider qualification.

@@ -1,0 +1,23 @@
+.paper-math-preview { min-width: 0; color: var(--text, #28313a); }
+.paper-math-note { color: var(--muted, #687684); font: 12px/1.5 system-ui, sans-serif; margin: 0 0 12px; }
+.paper-math-content { background: var(--panel, #fff); border: 1px solid var(--border, #d7dce2); border-radius: 3px; min-width: 0; padding: 24px; font: 17px/1.65 Georgia, 'Times New Roman', serif; overflow-wrap: anywhere; }
+.paper-math-content > :first-child { margin-top: 0; }
+.paper-math-content > :last-child { margin-bottom: 0; }
+.paper-math-content p { white-space: pre-wrap; margin: 0 0 1em; }
+.paper-math-content h2, .paper-math-content h3, .paper-math-content h4, .paper-math-content h5 { font-family: inherit; line-height: 1.35; margin: 1.4em 0 .65em; }
+.paper-math-content h2 { font-size: 1.6em; }
+.paper-math-content h3 { font-size: 1.35em; }
+.paper-math-content h4 { font-size: 1.15em; }
+.paper-math-content h5 { font-size: 1em; }
+.paper-math-content code { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.paper-math-command { color: var(--muted, #687684); }
+.paper-math-fallback { color: #8f4514; background: #fff5e8; padding: 2px 4px; border-radius: 2px; }
+.paper-math-source { font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 10px; background: var(--subtle, #f4f6f8); white-space: pre-wrap; overflow-wrap: anywhere; }
+.paper-math-equation { min-width: 0; max-width: 100%; overflow-x: auto; padding: 4px 0; margin: .75em 0; }
+.paper-math-display { display: block; min-width: min-content; }
+.paper-math-display .katex-display { margin: .5em 0; }
+.paper-math-inline { display: inline-block; max-width: 100%; overflow-x: auto; vertical-align: middle; }
+.paper-math-content .katex { font-size: 1.05em; text-indent: 0; }
+@media (max-width: 600px) {
+  .paper-math-content { padding: 14px; font-size: 16px; }
+}

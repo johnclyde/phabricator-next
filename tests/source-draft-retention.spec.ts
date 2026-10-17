@@ -69,7 +69,7 @@ test('closing creation dialogs keeps competing tab drafts separate', async ({ pa
     for (const tab of [page, other]) { await tab.getByRole('button', { name: 'Close dialog', exact: true }).click(); await tab.goto('./#home'); await open(tab); }
     await expect(page.getByRole('dialog').getByLabel('Title', { exact: true })).toHaveValue('First tab task draft.');
     await expect(other.getByRole('dialog').getByLabel('Title', { exact: true })).toHaveValue('Second tab task draft.');
-    await expect(other.getByRole('dialog').getByText('This draft is only in this tab. Keep it open or export it.', { exact: true })).toBeVisible();
+    await expect(other.getByRole('dialog').getByText('Draft not retained. Keep open or export.', { exact: true })).toBeVisible();
     expect(await other.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true); await other.screenshot({ path: info.outputPath('create-draft-conflict.png') });
     await expect.poll(() => retained(page, 'draft:task:new')).toMatchObject({ title: 'First tab task draft.' });
   } finally { await other.close(); }

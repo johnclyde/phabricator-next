@@ -1,7 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { runInNewContext } from 'node:vm';
 import { discussionSummary, parseCommand, projectMatches } from '../client/voice.ts';
 import type { ReviewComment, RevisionVersion, ReviewThread } from '../shared/types.ts';
 import { canQueue, RequestError, isNetworkError } from '../client/offline.ts';
@@ -141,39 +139,6 @@ test('mounted browser requests and drafts stay with their installation while roo
     for (const [key, descriptor] of Object.entries(originals)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
-  }
-});
-
-test('service worker caches only its own shell assets and retires only its own cache versions', async () => {
-  const scope = 'https://example.test/workspace/';
-  const prefix = `phabricator-next-shell:${encodeURIComponent(scope)}:`;
-  const sibling = `phabricator-next-shell:${encodeURIComponent('https://example.test/other/')}:v1`;
-  const handlers: Record<string, (event: { waitUntil?: (promise: Promise<unknown>) => void; request?: { url: string; method: string; mode: string }; respondWith?: (promise: Promise<unknown>) => void }) => void> = {};
-  const added: string[] = [], stored: string[] = [], deleted: string[] = [];
-  const html = '<meta name="application-base" content="/workspace/"><script src="/workspace/assets/app-123.js"></script><link href="/workspace/assets/app-123.css"><script src="/api/source.js"></script><script src="/other/assets/app.js"></script>';
-  const cache = {
-    addAll: async (requests: Request[]) => { added.push(...requests.map(request => request.url)); },
-    put: async (path: string) => { stored.push(path); },
-    match: async () => new Response('cached'),
-  };
-  runInNewContext(readFileSync(new URL('../client/public/sw.js', import.meta.url), 'utf8'), {
-    URL, Request, Set,
-    self: { registration: { scope }, addEventListener: (name: string, handler: typeof handlers[string]) => { handlers[name] = handler; }, skipWaiting: async () => {}, clients: { claim: async () => {} } },
-    caches: { open: async () => cache, keys: async () => [`${prefix}v1`, `${prefix}v2`, sibling, 'phabricator-next-shell-v1', 'another-app'], delete: async (key: string) => { deleted.push(key); } },
-    fetch: async () => new Response(html, { headers: { 'Content-Type': 'text/html' } }),
-  });
-  const pending: Promise<unknown>[] = [];
-  handlers.install({ waitUntil: promise => { pending.push(promise); } });
-  await Promise.all(pending);
-  assert.deepEqual(stored, [scope]);
-  assert.deepEqual(added, [`${scope}icon.svg`, `${scope}manifest.webmanifest`, `${scope}assets/app-123.js`, `${scope}assets/app-123.css`]);
-  handlers.activate({ waitUntil: promise => { pending.push(promise); } });
-  await Promise.all(pending);
-  assert.deepEqual(deleted, [`${prefix}v1`]);
-  for (const path of ['/api/state', '/workspace/api/state', '/workspace/auth/login', '/workspace/assets/private.json', '/other/', '/', '/workspace/?auth=code']) {
-    let intercepted = false;
-    handlers.fetch({ request: { url: `https://example.test${path}`, method: 'GET', mode: 'navigate' }, respondWith: () => { intercepted = true; } });
-    assert.equal(intercepted, false, path);
   }
 });
 

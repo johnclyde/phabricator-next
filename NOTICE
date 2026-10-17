@@ -23,6 +23,11 @@ Sagalaev and is distributed under the BSD 3-Clause License. Its complete
 notice is included in client/public/licenses/highlight.js.txt and copied
 to licenses/highlight.js.txt in browser builds.
 
+The bundled KaTeX mathematics renderer and fonts are copyright 2013-2020
+Khan Academy and other contributors and are distributed under the MIT
+License. Its complete notice is included in client/public/licenses/katex.txt
+and copied to licenses/katex.txt in browser builds.
+
 Optional browser transcription uses Transformers.js and Hugging Face
 Tokenizers (Apache 2.0), Hugging Face Jinja (MIT), and ONNX Runtime (MIT).
 Their license texts and ONNX Runtime third-party notices are included in

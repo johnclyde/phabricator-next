@@ -3,7 +3,7 @@ const SCOPE = new URL(self.registration.scope);
 const BASE = SCOPE.pathname;
 const SHELL = SCOPE.href;
 const CACHE_PREFIX = `phabricator-next-shell:${encodeURIComponent(SHELL)}:`;
-const CACHE = `${CACHE_PREFIX}v2`;
+const CACHE = `${CACHE_PREFIX}v3`;
 const STATIC = new Set([new URL('icon.svg', SCOPE).href, new URL('manifest.webmanifest', SCOPE).href]);
 const MODEL_CACHE = `phabricator-next-transcription:${encodeURIComponent(SCOPE.href)}:v1`;
 const MODEL_MARKER = new URL('transcription-model/installed.json', SCOPE).href;
@@ -48,25 +48,103 @@ async function verifiedRuntime(request) {
 
 function isBuiltAsset(url) {
   return url.origin === SCOPE.origin && url.pathname.startsWith(`${BASE}assets/`) && !url.search &&
-    /^[A-Za-z0-9_.-]+\.(?:js|css)$/.test(url.pathname.slice(`${BASE}assets/`.length));
+    /^[A-Za-z0-9_.-]+\.(?:js|mjs|css|woff2?|ttf)$/.test(url.pathname.slice(`${BASE}assets/`.length));
+}
+
+async function boundedBytes(response, maximum) {
+  if (!response || response.status !== 200 || !response.body) throw new Error('Missing offline asset');
+  const reader = response.body.getReader(), chunks = []; let size = 0;
+  try {
+    while (true) {
+      const next = await reader.read(); if (next.done) break;
+      size += next.value.byteLength;
+      if (size > maximum) { await reader.cancel(); throw new Error('Oversized offline asset'); }
+      chunks.push(next.value);
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+const sha256 = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+
+function shellManifestURL(html) {
+  const declaredBase = html.match(/<meta\b[^>]*\bname=["']application-base["'][^>]*\bcontent=["']([^"']+)["']/i)?.[1];
+  if (declaredBase !== BASE) throw new Error('App shell mount does not match service worker');
+  const path = html.match(/<meta\b[^>]*\bname=["']application-shell["'][^>]*\bcontent=["']([^"']+)["']/i)?.[1];
+  if (!path) throw new Error('App shell manifest is missing');
+  const url = new URL(path, SCOPE);
+  if (url.origin !== SCOPE.origin || url.search || url.hash || !url.pathname.startsWith(`${BASE}assets/`) ||
+      !/^offline-shell-[0-9a-f]{64}\.json$/.test(url.pathname.slice(`${BASE}assets/`.length))) throw new Error('Invalid app shell manifest');
+  return url.href;
+}
+
+async function readShellManifest(response, url, html) {
+  const bytes = await boundedBytes(response, 262144);
+  if (await sha256(bytes) !== url.match(/offline-shell-([0-9a-f]{64})\.json$/)?.[1]) throw new Error('App shell manifest changed');
+  const manifest = JSON.parse(new TextDecoder().decode(bytes));
+  if (!manifest || Object.keys(manifest).sort().join(',') !== 'files,format' || manifest.format !== 'phabricator.offline-shell.v1' ||
+      !Array.isArray(manifest.files) || !manifest.files.length || manifest.files.length > 512) throw new Error('Invalid app shell manifest');
+  const seen = new Set(); let total = 0;
+  for (const file of manifest.files) {
+    if (!file || Object.keys(file).sort().join(',') !== 'bytes,path,sha256' || typeof file.path !== 'string' ||
+        !/^assets\/[A-Za-z0-9_.-]+\.(?:js|mjs|css|woff2?|ttf)$/.test(file.path) ||
+        /^assets\/(?:transcription-(?:worker|runtime)-|pdf\.worker)/.test(file.path) || seen.has(file.path) ||
+        !Number.isSafeInteger(file.bytes) || file.bytes <= 0 || file.bytes > 33554432 || !/^[0-9a-f]{64}$/.test(file.sha256)) throw new Error('Invalid offline asset');
+    seen.add(file.path); total += file.bytes;
+  }
+  if (total > 67108864) throw new Error('Offline shell is too large');
+  for (const match of html.matchAll(/(?:src|href)="([^\"]+\.(?:js|css))"/g)) {
+    const asset = new URL(match[1], SCOPE);
+    if (isBuiltAsset(asset) && !seen.has(asset.pathname.slice(BASE.length))) throw new Error('App shell manifest omits an entry asset');
+  }
+  return manifest;
 }
 
 async function cacheShell(response) {
   if (!response.ok || !response.headers.get('content-type')?.includes('text/html')) throw new Error('Could not cache app shell');
   const html = await response.clone().text();
-  const declaredBase = html.match(/<meta\b[^>]*\bname=["']application-base["'][^>]*\bcontent=["']([^"']+)["']/i)?.[1];
-  if (declaredBase !== BASE) throw new Error('App shell mount does not match service worker');
-  const assets = [...html.matchAll(/(?:src|href)="([^\"]+\.(?:js|css))"/g)]
-    .map(match => new URL(match[1], SCOPE)).filter(isBuiltAsset).map(url => url.href);
+  const manifestURL = shellManifestURL(html);
+  const manifestResponse = await fetch(manifestURL, { cache: 'reload', credentials: 'omit' });
+  const manifest = await readShellManifest(manifestResponse.clone(), manifestURL, html);
   const cache = await caches.open(CACHE);
-  // Save the new shell only after every asset it needs is available offline.
-  await cache.addAll([...STATIC, ...new Set(assets)].map(url => new Request(url, { cache: 'reload' })));
+  // Content-addressed assets may be staged incrementally; the HTML is the commit
+  // marker and keeps pointing at the previous complete release on any failure.
+  for (let start = 0; start < manifest.files.length; start += 6) {
+    await Promise.all(manifest.files.slice(start, start + 6).map(async file => {
+      const url = new URL(file.path, SCOPE).href;
+      let asset = await cache.match(url);
+      if (!asset) asset = await fetch(url, { cache: 'reload', credentials: 'omit' });
+      const bytes = await boundedBytes(asset.clone(), file.bytes);
+      if (bytes.byteLength !== file.bytes || await sha256(bytes) !== file.sha256) throw new Error('Offline asset changed');
+      await cache.put(url, asset);
+    }));
+  }
+  await cache.addAll([...STATIC].map(url => new Request(url, { cache: 'reload', credentials: 'omit' })));
+  await cache.put(manifestURL, manifestResponse);
   await cache.put(SHELL, response);
 }
 
+async function shellReady() {
+  try {
+    if (!await caches.has(CACHE)) return false;
+    const cache = await caches.open(CACHE), response = await cache.match(SHELL);
+    if (!response) return false;
+    const html = await response.text(), url = shellManifestURL(html);
+    const manifest = await readShellManifest(await cache.match(url), url, html);
+    const urls = [...STATIC, ...manifest.files.map(file => new URL(file.path, SCOPE).href)];
+    return (await Promise.all(urls.map(path => cache.match(path)))).every(Boolean);
+  } catch { return false; }
+}
+
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'phabricator.offline-shell.status.v1' || !event.ports[0]) return;
+  event.waitUntil(shellReady().then(ready => event.ports[0].postMessage({ type: 'phabricator.offline-shell.status.v1', ready })));
+});
+
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
-    await cacheShell(await fetch(SHELL, { cache: 'reload' }));
+    await cacheShell(await fetch(SHELL, { cache: 'reload', credentials: 'omit' }));
     await self.skipWaiting();
   })());
 });
