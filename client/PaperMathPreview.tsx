@@ -81,7 +81,7 @@ export default function PaperMathPreview({ source, className = '' }: { source: s
   }, [document.parsed, current]);
 
   return <section className={`paper-math-preview ${className}`.trim()} aria-label="Paper reading preview">
-    <p className="paper-math-note">Math preview · rendered on this device. Package layout, citations and unsupported commands remain as source.</p>
+    <p className="paper-math-note">Paper preview · rendered on this device. Unsupported body commands remain as source.</p>
     {(preview.limited || current?.rendering?.limited) && <p className="paper-math-note">Some content is shown as source to keep editing responsive. Your complete source is retained.</p>}
     {(current?.rendering?.failed ?? 0) > 0 && <p className="paper-math-note">Unfinished or unsupported equations are shown as source.</p>}
     {current?.error && <p className="paper-math-note" role="status">{current.error}</p>}

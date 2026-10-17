@@ -4,12 +4,30 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RevisionDetail } from '../shared/types';
 
-const SOURCE = String.raw`\section{Finite sums}
+const SOURCE = String.raw`\documentclass{article}
+\usepackage{amsmath,amssymb}
+\title{Finite sums}
+\author{A. Researcher}
+\date{}
+\begin{document}
+\maketitle
+\section{Proof}
 For every $n \in \mathbb{N}$,
 \[
 \sum_{k=1}^{n} k = \frac{n(n+1)}{2}.
 \]
+\end{document}
 `;
+async function expectDocumentPreview(page: Page) {
+  const preview = page.getByRole('region', { name: 'Paper reading preview', exact: true });
+  await expect(preview.getByRole('heading', { name: 'Finite sums', exact: true })).toBeVisible();
+  await expect(preview.getByText('A. Researcher', { exact: true })).toBeVisible();
+  await expect(preview.getByRole('heading', { name: 'Proof', exact: true })).toBeVisible();
+  await expect(preview.locator('.katex')).toHaveCount(2);
+  for (const command of ['documentclass', 'usepackage', 'begin{document}', 'end{document}', 'maketitle']) {
+    await expect(preview).not.toContainText(`\\${command}`);
+  }
+}
 async function create(page: Page, title = 'Offline research') {
   await page.getByLabel('Keep papers in this browser profile', { exact: true }).check();
   await page.getByLabel('New paper title', { exact: true }).fill(title);
@@ -29,6 +47,10 @@ test('the paper editor opens around the source with secondary controls tucked aw
   const position = await source.boundingBox();
   expect(position).not.toBeNull();
   expect(position!.y).toBeLessThan(page.viewportSize()!.height * 0.65);
+  const starterPreview = page.getByRole('region', { name: 'Paper reading preview', exact: true });
+  await expect(starterPreview.getByRole('heading', { name: 'Introduction', exact: true })).toBeVisible();
+  await expect(starterPreview.locator('.katex')).toHaveCount(2);
+  await expect(starterPreview.locator('.paper-math-command')).toHaveCount(0);
   await source.fill(SOURCE); await saved(page);
   await expect(page.getByRole('button', { name: 'Export project', exact: true })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Delete device paper', exact: true })).toBeHidden();
@@ -41,7 +63,7 @@ test('the paper editor opens around the source with secondary controls tucked aw
   await page.locator('summary').filter({ hasText: /^Paper options$/ }).click();
   await page.getByRole('button', { name: 'Preview only', exact: true }).click();
   await expect(source).toHaveCount(0);
-  await expect(page.locator('.katex')).toHaveCount(2);
+  await expectDocumentPreview(page);
   await page.getByRole('button', { name: 'Source only', exact: true }).click();
   await expect(source).toHaveValue(SOURCE);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
@@ -68,14 +90,17 @@ test('first-use math fonts and device papers survive closing and reopening offli
   await reopened.goto(paperURL);
   await expect(reopened.getByLabel('Paper title', { exact: true })).toHaveValue('Offline research');
   await expect(reopened.getByLabel('Paper source', { exact: true })).toHaveValue(SOURCE);
-  await expect(reopened.locator('.katex')).toHaveCount(2);
+  await expectDocumentPreview(reopened);
   await reopened.evaluate(() => document.fonts.ready);
   expect(await reopened.evaluate(() => document.fonts.check('16px KaTeX_Main'))).toBe(true);
   await reopened.getByRole('button', { name: 'references.bib', exact: true }).click();
   await expect(reopened.getByLabel('Paper source', { exact: true })).toHaveValue('@book{sample,title={Sample reference},year={2026}}');
   await reopened.getByRole('button', { name: 'main.tex', exact: true }).click();
-  await reopened.getByLabel('Paper source', { exact: true }).fill(SOURCE + '\nAn offline continuation.'); await saved(reopened);
-  await reopened.reload(); await expect(reopened.getByLabel('Paper source', { exact: true })).toHaveValue(SOURCE + '\nAn offline continuation.');
+  const continued = SOURCE.replace(String.raw`\end{document}`, String.raw`An offline continuation.
+\end{document}`);
+  await reopened.getByLabel('Paper source', { exact: true }).fill(continued); await saved(reopened);
+  await reopened.reload(); await expect(reopened.getByLabel('Paper source', { exact: true })).toHaveValue(continued);
+  await expect(reopened.getByRole('region', { name: 'Paper reading preview', exact: true })).toContainText('An offline continuation.');
   await expect(reopened.locator('.katex')).toHaveCount(2);
   expect(await reopened.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   await reopened.screenshot({ path: info.outputPath('offline-paper.png'), fullPage: true });
@@ -128,8 +153,12 @@ test('explicit workspace copies retain exact source without changing the reviewe
   const response = await request.post(new URL('api/revisions', baseURL!).href, { data: { kind: 'paper', title: 'Copy original paper', testPlan: 'Device copy test.', files: [{ path: 'main.tex', content: SOURCE }, { path: 'chapters/proof.tex', content: 'Original proof.' }] } });
   expect(response.ok()).toBe(true); const detail = await response.json() as RevisionDetail;
   await page.goto(`./#${detail.revision.id}`);
-  await page.locator('summary').filter({ hasText: /^Paper details$/ }).click();
-  await page.getByRole('button', { name: 'Save a device copy', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit & add version', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'File content', exact: true })).toHaveValue(SOURCE);
+  await expectDocumentPreview(page);
+  const paperDetails = page.locator('summary').filter({ hasText: /^Paper details$/ });
+  await paperDetails.click();
+  await paperDetails.locator('..').getByRole('button', { name: 'Save a device copy', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save source files on this device', exact: true })).toBeDisabled();
   await page.getByLabel('Keep this paper accessible on this device after sign-out', { exact: true }).check();
   await page.getByRole('button', { name: 'Save source files on this device', exact: true }).click();
