@@ -3,6 +3,7 @@ import type { AppState, RevisionDetail } from '../shared/types';
 import type { AIProposalDetail, AIProposalList } from '../shared/ai-proposals';
 import type { ObjectAccess } from '../shared/policy';
 import { reviewerApi as api, reviewerSignIn as signIn } from './revision-reviewers-browser';
+import { openPaperTools } from './paper-focus-browser';
 
 test.skip(process.env.E2E_AI_PROPOSALS_FIXTURE !== '1', 'Requires the explicit synthetic proposal adapter; never calls a real model.');
 
@@ -13,7 +14,7 @@ async function create(page: Page, title: string, content = 'A rough argument.\nA
   await page.goto('./#home');
   return api<RevisionDetail>(page, '/revisions', { title, kind, summary: '', testPlan: 'Verify explicit AI proposals using an injected test adapter. No provider is called.', files: [{ path: kind === 'paper' ? 'paper.tex' : 'draft.md', content }] });
 }
-async function open(page: Page, id: string) { await page.goto(`./#${id}`); await expect(panel(page).getByRole('heading', { name: 'AI edit proposals', exact: true })).toBeVisible(); await expect(panel(page)).toContainText('test-only-hosted-model'); }
+async function open(page: Page, id: string, paper = false) { await page.goto(`./#${id}`); if (paper) await openPaperTools(page, 'AI edit proposals'); await expect(panel(page).getByRole('heading', { name: 'AI edit proposals', exact: true })).toBeVisible(); await expect(panel(page)).toContainText('test-only-hosted-model'); }
 async function generate(page: Page, instruction = 'Clarify rough phrasing while preserving every claim.') { await panel(page).getByLabel('Editing instruction', { exact: true }).fill(instruction); await expect(hosted(page)).toBeEnabled(); await hosted(page).click(); await expect(inspection(page)).toContainText('Inspect the complete proposal'); await expect(inspection(page)).toContainText('ready'); }
 
 test('complete AI proposals page every edit and explicitly apply them as one new text version', async ({ page }, info) => {
@@ -94,11 +95,11 @@ test('lost apply receipt retries every edit exactly once and keeps a newer autho
 
 test('selected LaTeX passage uploads only its scope and stale proposals remain bound to their original version', async ({ page }) => {
   const source = '\\section{Argument}\nFirst rough claim.\nSecond rough claim.\n', created = await create(page, 'Scoped paper AI proposal', source, 'paper'), id = created.revision.id;
-  await open(page, id); await page.getByRole('button', { name: 'Source', exact: true }).click(); await page.getByLabel('Passage start line', { exact: true }).fill('2'); await page.getByLabel('Passage end line', { exact: true }).fill('2'); await page.getByRole('button', { name: 'Use line range for AI', exact: true }).click(); await expect(page.locator('.comment-form blockquote')).toHaveCount(0); await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('');
+  await open(page, id, true); await page.getByRole('button', { name: 'Source', exact: true }).click(); await page.getByLabel('Passage start line', { exact: true }).fill('2'); await page.getByLabel('Passage end line', { exact: true }).fill('2'); await page.getByRole('button', { name: 'Use line range for AI', exact: true }).click(); await expect(page.locator('.comment-form blockquote')).toHaveCount(0); await expect(page.getByLabel('Review comment', { exact: true })).toHaveValue('');
   await panel(page).getByRole('button', { name: 'Use selected passage only', exact: true }).click(); await expect(panel(page)).toContainText('Adjacent text, other files, comments, and binary attachments are excluded.'); await generate(page);
   const list = await api<AIProposalList>(page, `/revisions/${id}/ai-proposals`), result = await api<AIProposalDetail>(page, `/revisions/${id}/ai-proposals/${list.items[0]!.id}`); expect(result.proposal.request.scope?.quote).toBe('First rough claim.'); expect(result.proposal.result?.edits).toHaveLength(1);
   await api(page, `/revisions/${id}/versions`, { expectedVersion: 1, files: [{ path: 'paper.tex', content: `${source}Independent newer source.\n` }], message: 'Concurrent source change' });
-  await page.reload(); await page.getByLabel('Version to inspect', { exact: true }).selectOption('1'); await panel(page).getByRole('button', { name: 'Inspect proposal', exact: true }).click(); await expect(inspection(page)).toContainText('This proposal is stale.'); await expect(inspection(page).getByRole('button', { name: 'Apply all 1 edits as one version', exact: true })).toBeDisabled();
+  await page.reload(); await openPaperTools(page, 'AI edit proposals'); await page.getByLabel('Version to inspect', { exact: true }).selectOption('1'); await panel(page).getByRole('button', { name: 'Inspect proposal', exact: true }).click(); await expect(inspection(page)).toContainText('This proposal is stale.'); await expect(inspection(page).getByRole('button', { name: 'Apply all 1 edits as one version', exact: true })).toBeDisabled();
   await page.getByLabel('Version to inspect', { exact: true }).selectOption('2'); await expect(inspection(page)).toHaveCount(0); await expect(panel(page).getByRole('button', { name: 'Use selected passage only', exact: true })).toBeDisabled(); expect((await api<RevisionDetail>(page, `/revisions/${id}`)).versions).toHaveLength(2);
 });
 

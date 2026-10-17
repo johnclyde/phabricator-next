@@ -5,6 +5,7 @@ import './styles.css';
 import 'katex/dist/katex.min.css';
 import './paper-math.css';
 import './device-papers.css';
+import './paper-focus.css';
 import { applicationBase, applicationPath } from './mount';
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><AppEntry/></React.StrictMode>);

@@ -1,0 +1,36 @@
+/* Paper work keeps application navigation available without filling the page. */
+.paper-focus .menu-toggle { display: flex; color: #bcc7d2; }
+.paper-focus .sidebar { width: 270px; top: 0; z-index: 50; transform: translateX(-100%); visibility: hidden; }
+.paper-focus .sidebar.is-open { transform: translateX(0); visibility: visible; }
+.paper-focus .close-nav { display: flex; margin-left: auto; }
+.paper-focus .drawer-backdrop { position: fixed; inset: 0; background: #23334699; z-index: 45; border: 0; }
+.paper-focus .main { margin-left: auto; margin-right: auto; max-width: 1240px; }
+.paper-focus .brand { width: auto; }
+.paper-focus .mobile-tabs { display: none; }
+.paper-focus .revision-page-heading { padding-bottom: 16px; }
+.paper-focus .comparison-picker { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 250px); }
+.paper-focus .comparison-picker .comparison-toolbar { padding: 6px 12px; gap: 8px; }
+.paper-focus .comparison-picker .comparison-toolbar > label { flex-basis: 110px; }
+.paper-focus .comparison-file-controls { border-bottom: 1px solid var(--border); }
+.paper-focus .comparison-file-controls .file-toolbar { padding: 6px 12px; }
+.paper-focus .comparison-options { grid-column: 1 / -1; }
+.paper-focus .exact-comparison .comparison-identity { padding: 6px 12px; }
+.paper-revision-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.paper-revision-layout > .right-column { display: block; grid-row: auto; }
+.paper-disclosure { min-width: 0; border: 1px solid var(--border); border-radius: 3px; background: #fff; }
+.paper-disclosure > summary { padding: 12px 16px; min-height: 44px; color: #46647a; font-weight: 600; cursor: pointer; }
+.paper-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
+.paper-disclosure-content { display: flex; flex-direction: column; gap: 16px; padding: 16px; min-width: 0; }
+.paper-disclosure-content > .panel { margin: 0; }
+.revision-comparison-panel > .paper-disclosure { border-width: 1px 0 0; border-radius: 0; }
+.paper-version-editor { scroll-margin-top: 70px; }
+.paper-version-editor:empty { display: none; }
+@media (max-width: 760px) {
+  .paper-focus .topbar { height: 52px; grid-template-rows: 44px; }
+  .paper-focus .global-search { display: none; }
+  .paper-focus .main { margin-top: 52px; padding-bottom: 24px; }
+  .paper-focus .breadcrumbs { min-height: 36px; height: auto; padding-block: 10px; }
+  .paper-focus .comparison-picker { display: block; }
+  .paper-disclosure-content { padding: 10px; gap: 12px; }
+  .paper-version-editor { scroll-margin-top: 62px; }
+}

@@ -18,6 +18,34 @@ async function create(page: Page, title = 'Offline research') {
   await expect(page.getByText('Saved on this device', { exact: true })).toBeVisible();
 }
 async function saved(page: Page) { await expect(page.getByText('Saved on this device', { exact: true })).toBeVisible(); }
+async function revealOptions(page: Page) {
+  const summary = page.locator('summary').filter({ hasText: /^Paper options$/ });
+  if (await summary.locator('..').getAttribute('open') === null) await summary.click();
+}
+
+test('the paper editor opens around the source with secondary controls tucked away', async ({ page }) => {
+  await page.goto('./#device-papers'); await create(page, 'Focused writing');
+  const source = page.getByLabel('Paper source', { exact: true });
+  const position = await source.boundingBox();
+  expect(position).not.toBeNull();
+  expect(position!.y).toBeLessThan(page.viewportSize()!.height * 0.65);
+  await source.fill(SOURCE); await saved(page);
+  await expect(page.getByRole('button', { name: 'Export project', exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Delete device paper', exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Add source file', exact: true })).toBeHidden();
+  await expect(page.getByLabel('Source file path', { exact: true })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Inline equation', exact: true })).toBeHidden();
+  await revealOptions(page);
+  await expect(page.getByRole('button', { name: 'Export project', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Source file path', { exact: true })).toHaveValue('main.tex');
+  await page.locator('summary').filter({ hasText: /^Paper options$/ }).click();
+  await page.getByRole('button', { name: 'Preview only', exact: true }).click();
+  await expect(source).toHaveCount(0);
+  await expect(page.locator('.katex')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Source only', exact: true }).click();
+  await expect(source).toHaveValue(SOURCE);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
 
 test('first-use math fonts and device papers survive closing and reopening offline without signing in', async ({ page, context, baseURL }, info) => {
   const url = new URL(baseURL!); url.port = '4312'; url.hash = 'device-papers';
@@ -31,6 +59,7 @@ test('first-use math fonts and device papers survive closing and reopening offli
   await create(page);
   await page.getByLabel('Paper source', { exact: true }).fill(SOURCE); await saved(page);
   await expect(page.locator('.katex')).toHaveCount(2);
+  await revealOptions(page);
   await page.getByRole('button', { name: 'Add source file', exact: true }).click();
   await page.getByLabel('Source file path', { exact: true }).fill('references.bib');
   await page.getByLabel('Paper source', { exact: true }).fill('@book{sample,title={Sample reference},year={2026}}'); await saved(page);
@@ -70,8 +99,10 @@ test('competing tabs preserve the winner and offer an independent copy of confli
 test('portable exports round-trip multiple files and invalid temporary edits remain exportable', async ({ page }) => {
   await page.goto('./#device-papers'); await create(page, 'Exported paper');
   await page.getByLabel('Paper source', { exact: true }).fill(SOURCE); await saved(page);
+  await revealOptions(page);
   await page.getByRole('button', { name: 'Add source file', exact: true }).click();
   await page.getByLabel('Paper source', { exact: true }).fill('Second file.'); await saved(page);
+  await revealOptions(page);
   const downloadWait = page.waitForEvent('download'); await page.getByRole('button', { name: 'Export project', exact: true }).click();
   const download = await downloadWait, payload = await readFile((await download.path())!, 'utf8');
   const exported = JSON.parse(payload); expect(exported.files).toEqual([{ path: 'main.tex', content: SOURCE }, { path: 'section-2.tex', content: 'Second file.' }]);
@@ -87,6 +118,7 @@ test('portable exports round-trip multiple files and invalid temporary edits rem
   await page.getByLabel('Import paper files', { exact: true }).setInputFiles({ name: 'backup.paper.json', mimeType: 'application/json', buffer: Buffer.from(payload) });
   await expect(page.getByLabel('Paper source', { exact: true })).toHaveValue(SOURCE);
   await page.getByRole('button', { name: 'section-2.tex', exact: true }).click(); await expect(page.getByLabel('Paper source', { exact: true })).toHaveValue('Second file.');
+  await revealOptions(page);
   page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: 'Delete device paper', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Saved papers', exact: true })).toBeVisible();
   await expect(page.locator('.device-paper-list > a')).toHaveCount(1);
@@ -96,6 +128,7 @@ test('explicit workspace copies retain exact source without changing the reviewe
   const response = await request.post(new URL('api/revisions', baseURL!).href, { data: { kind: 'paper', title: 'Copy original paper', testPlan: 'Device copy test.', files: [{ path: 'main.tex', content: SOURCE }, { path: 'chapters/proof.tex', content: 'Original proof.' }] } });
   expect(response.ok()).toBe(true); const detail = await response.json() as RevisionDetail;
   await page.goto(`./#${detail.revision.id}`);
+  await page.locator('summary').filter({ hasText: /^Paper details$/ }).click();
   await page.getByRole('button', { name: 'Save a device copy', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save source files on this device', exact: true })).toBeDisabled();
   await page.getByLabel('Keep this paper accessible on this device after sign-out', { exact: true }).check();
@@ -122,9 +155,10 @@ test('device papers survive workspace sign-out while protected workspace content
   await expect(page.getByRole('dialog')).toContainText('Deliberately saved device papers remain');
   await page.getByRole('button', { name: /sign out and clear drafts/i }).click();
   await expect(page.getByRole('heading', { name: 'Sign in to your workspace', exact: true })).toBeVisible();
-  await page.getByRole('link', { name: 'Open papers on this device', exact: true }).click();
+  await expect(page.getByRole('link', { name: 'Open papers on this device', exact: true })).toHaveCount(0);
+  await page.goto(paperURL);
   await expect(page.getByText('Ready to reopen offline', { exact: false })).toBeVisible();
-  await context.setOffline(true); await page.goto(paperURL);
+  await context.setOffline(true); await page.reload();
   await expect(page.getByLabel('Paper source', { exact: true })).toHaveValue('Private device argument $x^2$.');
   await page.getByRole('link', { name: 'Workspace papers', exact: true }).click();
   await expect(page.getByRole('heading', { name: /^(Workspace locked|Sign in to your workspace)$/ })).toBeVisible();
@@ -137,6 +171,7 @@ test('failed saves retain editable recovery text and insertion uses Windows-text
   await page.getByLabel('Import paper files', { exact: true }).setInputFiles({ name: 'windows.tex', mimeType: 'text/plain', buffer: Buffer.from('First\r\nSecond\r\nThird\r\n') });
   const source = page.getByLabel('Paper source', { exact: true }); await expect(source).toBeVisible();
   await source.evaluate(element => { const area = element as HTMLTextAreaElement; area.setSelectionRange(6, 6); });
+  await page.locator('summary').filter({ hasText: /^Insert$/ }).click();
   await page.getByRole('button', { name: 'Inline equation', exact: true }).click(); await saved(page);
   await expect(source).toHaveValue('First\n\\(x\\)Second\nThird\n');
   await page.evaluate(() => {
@@ -147,6 +182,7 @@ test('failed saves retain editable recovery text and insertion uses Windows-text
   await source.fill('Unsaved but exportable $z$.');
   await expect(page.getByRole('alert')).toContainText('insufficient browser storage');
   await expect(page.getByText('Latest edits are not saved', { exact: true })).toBeVisible();
+  await revealOptions(page);
   const downloadWait = page.waitForEvent('download'); await page.getByRole('button', { name: 'Export project', exact: true }).click();
   const exported = JSON.parse(await readFile((await (await downloadWait).path())!, 'utf8'));
   expect(exported.files[0].content).toBe('Unsaved but exportable $z$.');

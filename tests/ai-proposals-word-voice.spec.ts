@@ -7,6 +7,7 @@ import type { AppState, RevisionDetail } from '../shared/types';
 import type { FileRecord } from '../shared/files';
 import type { AIProposalDetail, AIProposalList } from '../shared/ai-proposals';
 import { reviewerApi as api } from './revision-reviewers-browser';
+import { openPaperTools } from './paper-focus-browser';
 
 test.skip(process.env.E2E_AI_PROPOSALS_FIXTURE !== '1', 'Uses only the explicit synthetic proposal adapter, never a real provider.');
 const panel = (page: Page) => page.getByRole('region', { name: 'AI edit proposals', exact: true });
@@ -70,7 +71,7 @@ test('voice reviews every proposal page, dictates only an instruction, and requi
   await installSpeech(page); await page.goto('./#home');
   const created = await api<RevisionDetail>(page, '/revisions', { title: 'Voice AI review', kind: 'paper', testPlan: 'Review exact AI edits by voice.', files: [{ path: 'argument.tex', content: Array.from({ length: 12 }, (_, index) => `Claim ${index + 1} has rough wording.`).join('\n') }] }), id = created.revision.id;
   const writes: string[] = []; page.on('request', request => { if (request.method() === 'POST' && request.url().includes(`/revisions/${id}/ai-proposals`)) writes.push(request.url()); });
-  await page.goto(`./#${id}`); await page.getByRole('button', { name: 'Voice and commands', exact: true }).click(); await page.getByLabel('Speak responses (on-device only)', { exact: true }).check();
+  await page.goto(`./#${id}`); await openPaperTools(page, 'AI edit proposals'); await page.getByRole('button', { name: 'Voice and commands', exact: true }).click(); await page.getByLabel('Speak responses (on-device only)', { exact: true }).check();
   await command(page, 'set AI instruction to Confirm AI proposal! Keep citations.');
   await expect(panel(page).getByLabel('Editing instruction', { exact: true })).toHaveValue('Confirm AI proposal! Keep citations.'); expect(writes).toHaveLength(0);
   await command(page, 'confirm AI proposal'); expect(writes).toHaveLength(0);

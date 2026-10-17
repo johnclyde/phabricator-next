@@ -8,6 +8,7 @@ import type { ObjectAccess } from '../shared/policy';
 import type { RevisionDependencyDirection, RevisionDependencyPage, RevisionDependencyReceipt } from '../shared/revision-dependencies';
 import { normalizeBasePath } from '../shared/mount';
 import { authAccounts } from './auth-fixture';
+import { openPaperTools } from './paper-focus-browser';
 
 const panel = (page: Page) => page.getByRole('region', { name: 'Related Revisions', exact: true });
 const list = (page: Page, direction: RevisionDependencyDirection) => panel(page).getByRole('region', { name: direction === 'parents' ? 'Parent Revisions' : 'Child Revisions', exact: true });
@@ -31,7 +32,7 @@ test('parent and child revision edits preserve source, acceptance and historical
   await start(page, 'parents'); await pick(page, 'parents', b.revision.id); await save(page, 'parents'); await expect(list(page, 'parents').getByRole('link')).toContainText(b.revision.id);
   await start(page, 'children'); await pick(page, 'children', c.revision.id); await save(page, 'children'); await expect(list(page, 'children').getByRole('link')).toContainText(c.revision.id); await expect(page.getByLabel('Version to inspect')).toHaveValue('1');
   const after = await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`); expect(after.versions).toEqual(before.versions); expect(after.reviews).toEqual(before.reviews); expect(after.revision.status).toBe('accepted'); expect(after.revision.currentVersion).toBe(2);
-  await list(page, 'parents').getByRole('link').click(); await expect(page).toHaveURL(new RegExp(`#${b.revision.id}$`)); await expect(list(page, 'children').getByRole('link')).toContainText(id); await list(page, 'children').getByRole('link').click(); await expect(page.getByLabel('Version to inspect')).toHaveValue('1');
+  await list(page, 'parents').getByRole('link').click(); await expect(page).toHaveURL(new RegExp(`#${b.revision.id}$`)); await openPaperTools(page, 'Review and publishing'); await expect(list(page, 'children').getByRole('link')).toContainText(id); await list(page, 'children').getByRole('link').click(); await expect(page.getByLabel('Version to inspect')).toHaveValue('1');
   await start(page, 'children'); await pick(page, 'children', c.revision.id, 'Remove'); await save(page, 'children'); await expect(list(page, 'children').getByRole('link')).toHaveCount(0);
   await panel(page).getByText('Relationship History', { exact: true }).click(); await expect(panel(page).locator('.revision-dependency-history')).toContainText(`removed child ${c.revision.id}`);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);

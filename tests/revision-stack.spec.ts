@@ -9,6 +9,7 @@ import type { FileRecord } from '../shared/files';
 import type { ObjectAccess } from '../shared/policy';
 import { normalizeBasePath } from '../shared/mount';
 import { authAccounts } from './auth-fixture';
+import { openPaperTools } from './paper-focus-browser';
 
 const stack = (page: Page) => page.getByRole('region', { name: 'Revision Stack', exact: true });
 const selected = (page: Page) => stack(page).getByRole('region', { name: 'Selected Stack Revision' });
@@ -33,7 +34,7 @@ test('whole visible stack preserves branch merges, original authors, closed node
   await expect(stack(page).locator('.revision-stack-seed')).toContainText(id); expect(await stack(page).locator('svg path').count()).toBe(5); await expect(selected(page)).toContainText(`Original author: ${graph.nodes.find(node => node.id === id)!.originalAuthor?.displayName ?? 'Not recorded'}`);
   await expect(selected(page)).toContainText(`Current author: ${graph.nodes.find(node => node.id === id)!.author?.displayName ?? 'Unassigned'}`);
   await row(page, f.parent.revision.id).focus(); await page.keyboard.press('Enter'); await expect(selected(page)).toContainText(f.sibling.revision.id); await expect(selected(page)).toContainText(f.ancestor.revision.id);
-  await selected(page).getByRole('link', { name: `${f.parent.revision.id} ${f.parent.revision.title}`, exact: true }).click(); await expect(page.getByRole('heading', { level: 1, name: new RegExp(`^${f.parent.revision.id} `) })).toBeVisible(); await open(page); await row(page, id).click(); await selected(page).getByRole('link', { name: `${id} ${f.seed.revision.title}`, exact: true }).click(); await expect(page.getByRole('heading', { level: 1, name: new RegExp(`^${id} `) })).toBeVisible(); await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1'); await open(page);
+  await selected(page).getByRole('link', { name: `${f.parent.revision.id} ${f.parent.revision.title}`, exact: true }).click(); await expect(page.getByRole('heading', { level: 1, name: new RegExp(`^${f.parent.revision.id} `) })).toBeVisible(); await openPaperTools(page, 'Review and publishing'); await open(page); await row(page, id).click(); await selected(page).getByRole('link', { name: `${id} ${f.seed.revision.title}`, exact: true }).click(); await expect(page.getByRole('heading', { level: 1, name: new RegExp(`^${id} `) })).toBeVisible(); await expect(page.getByLabel('Version to inspect', { exact: true })).toHaveValue('1'); await open(page);
   expect((await api<RevisionDetail>(request, baseURL!, `/revisions/${id}`)).versions).toEqual(before.versions); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   if (info.project.name === 'mobile') { const bounds = (await stack(page).getByRole('button', { name: 'Reload Stack', exact: true }).boundingBox())!; expect(bounds.height).toBeGreaterThanOrEqual(44); expect(bounds.height).toBeLessThanOrEqual(80); }
   const folder = `.data/revision-stack-visual/${normalizeBasePath(process.env.APP_BASE_PATH) === '/' ? 'root' : 'mounted'}`; await mkdir(folder, { recursive: true }); await stack(page).locator('.revision-stack-board').evaluate(element => element.scrollIntoView({ block: 'start' })); await page.evaluate(() => scrollBy(0, -120)); await page.screenshot({ path: `${folder}/${info.project.name}-stack.png` });
