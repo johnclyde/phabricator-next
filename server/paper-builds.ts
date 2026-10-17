@@ -10,6 +10,7 @@ import type { Auth } from './auth.ts';
 import type { PolicyStore } from './policy.ts';
 import type { Store } from './store.ts';
 import { HttpError, object, string } from './validation.ts';
+import { validatePaperBuildConcurrency, type PaperBuildConcurrency } from './paper-build-config.ts';
 
 /** Runner boundary is deliberately independent of HTTP and durable job storage. */
 export interface PaperRunner {
@@ -50,8 +51,10 @@ export class PaperBuildService {
   private timer?: ReturnType<typeof setInterval>;
   private running = new Map<string, { token: string; controller: AbortController; promise: Promise<void> }>();
   private stopping = false;
+  private readonly concurrency: PaperBuildConcurrency;
   readonly configuration: PaperBuildConfiguration;
-  constructor(private store: Store, private auth: Auth, private policies: PolicyStore, private runner: PaperRunner | null = null, private now: () => number = Date.now) {
+  constructor(private store: Store, private auth: Auth, private policies: PolicyStore, private runner: PaperRunner | null = null, private now: () => number = Date.now, concurrency: number = 2) {
+    this.concurrency = validatePaperBuildConcurrency(concurrency);
     this.configuration = runner ? { available: true, reason: null, toolchain: runner.toolchain, toolchainId: hash(JSON.stringify(['paper-build-v1', 'tex-container-v1', runner.toolchain])) }
       : { available: false, reason: 'An isolated paper compiler is not configured by the server operator.', toolchain: null, toolchainId: null };
   }
@@ -160,7 +163,7 @@ export class PaperBuildService {
           catch { this.terminal(build,'The submitting credential or source permission is no longer available.'); active.controller.abort(); }
         }
       });
-      while (this.running.size < 2) {
+      while (this.running.size < this.concurrency) {
         const claim = this.claim(); if (!claim) break;
         const controller = new AbortController();
         const promise = this.execute(claim.build,claim.token,controller).finally(() => { if(this.running.get(claim.build.id)?.token===claim.token)this.running.delete(claim.build.id); if(!this.stopping) this.wake(); });
@@ -170,7 +173,7 @@ export class PaperBuildService {
   }
   private claim(): {build:PaperBuild; token:string} | null {
     return this.store.transaction(() => {
-      const active=this.store.database.prepare("SELECT count(*) AS total FROM paper_builds WHERE json_extract(data,'$.status')='running'").get() as {total:number}; if(active.total>=2) return null;
+      const active=this.store.database.prepare("SELECT count(*) AS total FROM paper_builds WHERE json_extract(data,'$.status')='running'").get() as {total:number}; if(active.total>=this.concurrency) return null;
       const rows=this.store.database.prepare("SELECT * FROM paper_builds WHERE json_extract(data,'$.status')='queued' ORDER BY sequence LIMIT 100").all() as unknown as JobRow[]; const row=rows.find(candidate=>!this.running.has(candidate.id)); if(!row) return null;
       const build=JSON.parse(row.data) as PaperBuild;
       try { this.authorize(JSON.parse(row.context) as AuthContext,row.revision_id,true); this.toolchain(build); this.source(row.revision_id,build); }

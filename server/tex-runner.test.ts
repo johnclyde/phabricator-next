@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { deflateSync, gzipSync } from 'node:zlib';
 import type { SourceFile } from '../shared/types.ts';
 import type { RevisionAsset } from '../shared/files.ts';
 import { sourceSnapshotCanonical, validateSourceSnapshot } from '../shared/source-snapshot.ts';
-import { createTexRunner, normalizeTexLog, parseTexArchive, parseTexDiagnostics, parseTexMapping, parseTexPageGeometry, texRunnerFromEnvironment, validateTexInput, type TexRunnerInput } from './tex-runner.ts';
+import { createTexRunner, normalizeTexLog, parseTexArchive, parseTexDiagnostics, parseTexMapping, parseTexPageGeometry, TEX_BUNDLE_SHA256, TEX_RUNNER_POLICY_VERSION, texRunnerFromEnvironment, validateTexInput, type TexRunnerInput } from './tex-runner.ts';
 
 const geometry = JSON.stringify({ pages: [{ object: '3 0 R' }], qpdf: [{}, { 'obj:3 0 R': { value: { '/Type': '/Page', '/MediaBox': [0, 0, 612, 792] } } }] });
 const files: SourceFile[] = [{ path: 'paper/main.tex', content: '\\documentclass{article}\n\\begin{document}Hello\\end{document}\n' }];
@@ -49,6 +50,64 @@ test('TeX runner is opt-in, pinned and limited to a local Docker Unix socket', (
   assert.equal(texRunnerFromEnvironment({}), null);
   assert.throws(() => createTexRunner({ image: 'compiler:latest', dockerSocket: '/run/docker.sock' }), /pinned/);
   assert.throws(() => createTexRunner({ image: `sha256:${'a'.repeat(64)}`, dockerSocket: 'tcp://example.org:2375' }), /local/);
+});
+
+test('restrictive service umask preserves a private work directory and readable mounted source', { skip: process.platform === 'win32' }, async () => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'tex-mode-'));
+  const workDir = join(directory, 'jobs'), socket = join(directory, 'docker.sock'), observed = join(directory, 'observed.json');
+  const source = [...files, { path: 'paper/sections/deep/proof.tex', content: 'A nested proof.' }];
+  const asset = binary('paper/figures/nested/chart.png', png(), 'image/png');
+  const request = input(source, 'paper/main.tex', [asset]);
+  try {
+    // This CLI double inspects the real source staging at the Docker boundary; it
+    // never executes TeX. A subprocess isolates the umask and PATH from other tests.
+    const cli = join(directory, 'docker');
+    await writeFile(cli, `#!${process.execPath}
+import assert from 'node:assert/strict';
+import { statSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+const args = process.argv.slice(2), command = args[2];
+if (command === 'info') process.stdout.write(JSON.stringify({ OSType: 'linux', MemoryLimit: true, SwapLimit: true, CpuCfsQuota: true, PidsLimit: true, SecurityOptions: ['name=seccomp'] }));
+else if (command === 'image') process.stdout.write(JSON.stringify(${JSON.stringify({ 'org.phabricator.tex.engine': 'Tectonic 0.17.0', 'org.phabricator.tex.policy': TEX_RUNNER_POLICY_VERSION, 'org.phabricator.tex.bundle': TEX_BUNDLE_SHA256 })}));
+else if (command === 'run') {
+  assert.equal(args[args.indexOf('--user') + 1], '65534:65534');
+  const mount = args[args.indexOf('--mount') + 1];
+  assert.ok(mount.endsWith(',target=/source,readonly'));
+  const source = mount.slice('type=bind,source='.length, -',target=/source,readonly'.length);
+  const mode = path => statSync(path).mode & 0o777;
+  assert.equal(mode(${JSON.stringify(workDir)}), 0o700, 'the host work directory must remain private');
+  for (const path of ${JSON.stringify([...source.map(file => file.path), asset.path])}) {
+    const file = join(source, path);
+    assert.equal(mode(file), 0o444, path + ' must be readable by the container UID');
+    for (let parent = dirname(file); parent === source || parent.startsWith(source + '/'); parent = dirname(parent)) assert.equal(mode(parent), 0o755, parent + ' must be traversable');
+  }
+  assert.equal(readFileSync(join(source, 'paper/sections/deep/proof.tex'), 'utf8'), 'A nested proof.');
+  assert.equal(readFileSync(join(source, ${JSON.stringify(asset.path)})).toString('hex'), ${JSON.stringify(Buffer.from(asset.data).toString('hex'))});
+  writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ checked: true }));
+  process.stdout.write(Buffer.alloc(512));
+} else assert.equal(command, 'rm');
+`, { mode: 0o700 });
+    await chmod(cli, 0o700);
+    const program = `
+import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
+import { readdir } from 'node:fs/promises';
+import { createTexRunner } from ${JSON.stringify(new URL('./tex-runner.ts', import.meta.url).href)};
+process.umask(0o077);
+const server = createServer();
+await new Promise((resolve, reject) => { server.once('error', reject); server.listen(${JSON.stringify(socket)}, resolve); });
+try {
+  const request = ${JSON.stringify(request)};
+  request.assets[0].data = Uint8Array.from(${JSON.stringify(Array.from(asset.data))});
+  const runner = createTexRunner({ image: 'sha256:' + 'a'.repeat(64), dockerSocket: ${JSON.stringify(socket)}, workDir: ${JSON.stringify(workDir)} });
+  const result = await runner.run(request, new AbortController().signal);
+  assert.equal(result.success, false, 'the CLI double does not produce compiled artifacts');
+  assert.deepEqual(await readdir(${JSON.stringify(workDir)}), [], 'temporary source is cleaned up');
+} finally { await new Promise(resolve => server.close(resolve)); }
+`;
+    await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', program], { cwd: resolve('.'), env: { ...process.env, PATH: `${directory}:${process.env.PATH ?? ''}` }, timeout: 30_000 });
+    assert.deepEqual(JSON.parse(await readFile(observed, 'utf8')), { checked: true });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('TeX input validation verifies exact immutable UTF-8 files, paths and entrypoint', () => {

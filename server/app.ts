@@ -44,6 +44,7 @@ import type { FileListQuery } from '../shared/files.ts';
 import { AccessLayer } from './access.ts';
 import { createGitObserver, type GitObserver } from './git.ts';
 import { PaperBuildService, type PaperRunner } from './paper-builds.ts';
+import { validatePaperBuildConcurrency } from './paper-build-config.ts';
 import { canonicalWikiPath } from '../shared/wiki.ts';
 import { conduitRequest } from './conduit.ts';
 import { wikiDocumentQuery } from './wiki-query.ts';
@@ -90,6 +91,7 @@ export interface AppOptions {
   repositorySyncOptions?: RepositorySyncOptions;
   gitObserver?: GitObserver;
   paperRunner?: PaperRunner | null;
+  paperBuildConcurrency?: number;
   docxProcessor?: { inspect: typeof inspectDocx; replace: typeof replaceDocx; replaceBatch?: typeof replaceDocxBatch; inspectResolution?: typeof inspectDocxResolution; resolve?: typeof resolveDocxChanges; exportDiscussion?: typeof exportDocxDiscussion };
   aiProposalProvider?: AIProposalGenerator;
   analyzeAI?: (kind: RevisionKind, files: SourceFile[], provider?: 'openai' | 'ollama') => Promise<ReviewAnalysis>;
@@ -182,6 +184,7 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, dist: stri
 }
 
 export function createApp(options: AppOptions = {}): App {
+  const paperBuildConcurrency = validatePaperBuildConcurrency(options.paperBuildConcurrency);
   const hosting = hostingConfiguration(options.publicOrigin, options.authMode ?? 'local');
   const transcriptionDirectory = transcriptionModelDirectory(options.transcriptionModelDirectory);
   if (options.gitObserver && options.gitRepositories) throw new Error('Provide either gitObserver or gitRepositories, not both.');
@@ -255,7 +258,7 @@ export function createApp(options: AppOptions = {}): App {
     if (action.startsWith('generate:')) auth.revalidate(actor, action === 'generate:openai' ? 'review:hosted' : 'review:local');
     new AccessLayer(store, auth, policies, actor).require(id, action === 'read' ? 'view' : action === 'apply' ? 'edit' : 'interact');
   } });
-  const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null);
+  const paperBuilds = new PaperBuildService(store, auth, policies, options.paperRunner ?? null, Date.now, paperBuildConcurrency);
   paperBuilds.start();
   const pending = new Map<string, { fingerprint: string; promise: Promise<MutationResponse> }>();
   const gitReads = new Set<AbortController>();

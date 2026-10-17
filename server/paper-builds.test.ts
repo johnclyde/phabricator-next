@@ -42,10 +42,10 @@ function compilerManifest(input:Parameters<PaperRunner['run']>[0],result:Awaited
     artifacts:result.artifacts.filter(item=>item.kind!=='manifest').map(item=>({kind:item.kind,sha256:createHash('sha256').update(item.data).digest('hex'),bytes:item.data.byteLength})).sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:0)};
 }
 async function until(predicate:()=>boolean) {for(let i=0;i<200;i++){if(predicate())return;await delay(10);}assert.fail('Timed out waiting for paper build state.');}
-async function start(runner:PaperRunner|null=controlled().runner) {
+async function start(runner:PaperRunner|null=controlled().runner, concurrency?: number) {
   const store=new Store({path:':memory:'});const provision=createAuth({database:store.database,mode:'local',basePath:'/',provisioning:true});
   const alice=await provision.createAccount({username:'alice',displayName:'Alice',password:'Alice durable paper build password'});const bob=await provision.createAccount({username:'bob',displayName:'Bob',password:'Bob durable paper build password'});
-  const app=createApp({store,seed:false,authMode:'password',paperRunner:runner});const tokens={alice:app.auth.createToken(alice.id,{name:'Alice',scopes:['read','write']}),bob:app.auth.createToken(bob.id,{name:'Bob',scopes:['read','write']}),reader:app.auth.createToken(alice.id,{name:'Reader',scopes:['read']})};
+  const app=createApp({store,seed:false,authMode:'password',paperRunner:runner,paperBuildConcurrency:concurrency});const tokens={alice:app.auth.createToken(alice.id,{name:'Alice',scopes:['read','write']}),bob:app.auth.createToken(bob.id,{name:'Bob',scopes:['read','write']}),reader:app.auth.createToken(alice.id,{name:'Reader',scopes:['read']})};
   store.createRepository({name:'Paper repository',remoteUrl:'https://example.invalid/paper.git'});
   const detail=store.createRevision({ testPlan: 'Fixture verification plan.',kind:'paper',title:'Paper compiler lifecycle',repositoryId:'R1',files:[{path:'main.tex',content:'\\documentclass{article}\n\\begin{document}Old source.\\end{document}'},{path:'refs.bib',content:'@article{a,title={Title}}'}]});
   const version=detail.versions[0]!;const id=detail.revision.id;const route=`/api/revisions/${id}/paper-builds`;
@@ -120,16 +120,63 @@ test('compiler unavailable, changed pins, malformed queries and child identity f
   }finally{await configured.close();}
 });
 
-test('restart recovery fences stale attempts and bounds global concurrency across two scheduler instances',async()=>{
+test('single-worker application queues later builds and automatically advances after each completion', async () => {
+  const fake = controlled(); const app = await start(fake.runner, 1);
+  try {
+    const jobs: PaperBuild[] = [];
+    for (const key of ['serial-first', 'serial-second', 'serial-third']) {
+      const response = await app.request<PaperBuild>(app.route, 'POST', app.input, 'alice', key);
+      assert.equal(response.status, 201); jobs.push(response.body);
+    }
+    await until(() => fake.calls.length === 1);
+    app.paperBuilds.tick();
+    assert.deepEqual(jobs.map(job => app.get(job.id).status), ['running', 'queued', 'queued']);
+    assert.equal(fake.calls.length, 1);
+    fake.calls[0]!.finish(success());
+    await until(() => fake.calls.length === 2);
+    assert.deepEqual(jobs.map(job => app.get(job.id).status), ['succeeded', 'running', 'queued']);
+    fake.calls[1]!.finish(success());
+    await until(() => fake.calls.length === 3);
+    assert.deepEqual(jobs.map(job => app.get(job.id).status), ['succeeded', 'succeeded', 'running']);
+    fake.calls[2]!.finish(success());
+    await until(() => jobs.every(job => app.get(job.id).status === 'succeeded'));
+    assert.equal(fake.calls.length, 3);
+  } finally { await app.close(); }
+});
+
+test('single-worker cancellation keeps the local slot until the old runner has settled', async () => {
+  const fake = controlled(false); const app = await start(fake.runner, 1);
+  try {
+    const first = await app.request<PaperBuild>(app.route, 'POST', app.input, 'alice', 'draining-first');
+    const second = await app.request<PaperBuild>(app.route, 'POST', app.input, 'alice', 'draining-second');
+    await until(() => fake.calls.length === 1);
+    await app.request(`${app.route}/${first.body.id}/cancel`, 'POST', {}, 'alice', 'draining-cancel');
+    app.paperBuilds.tick();
+    assert.equal(app.get(first.body.id).status, 'canceled');
+    assert.equal(fake.calls[0]!.signal.aborted, true);
+    assert.equal(fake.calls.length, 1, 'a canceled but still draining runner occupies the local slot');
+    assert.equal(app.get(second.body.id).status, 'queued');
+    fake.calls[0]!.finish(success());
+    await until(() => fake.calls.length === 2);
+    assert.deepEqual(app.get(first.body.id).artifacts, []);
+    fake.calls[1]!.finish(success());
+    await until(() => app.get(second.body.id).status === 'succeeded');
+  } finally {
+    for (const call of fake.calls) call.finish({ success: false, artifacts: [], diagnostics: [], error: 'Test cleanup.' });
+    await app.close();
+  }
+});
+
+for (const concurrency of [1, 2]) test(`restart recovery fences stale attempts and bounds ${concurrency} global worker leases across two scheduler instances`,async()=>{
   const directory=mkdtempSync(join(tmpdir(),'paper-restart-'));const path=join(directory,'workspace.sqlite');const store=new Store({path});const auth=createAuth({database:store.database,mode:'local',basePath:'/'});const policies=new PolicyStore(store.database,{principalExists:()=>true});let now=1_800_000_000_000;
   const context=auth.authenticate({headers:{}} as IncomingMessage);const detail=store.createRevision({ testPlan: 'Fixture verification plan.',kind:'paper',title:'Restart fixture',files:[{path:'main.tex',content:'Exact source'}]});const version=detail.versions[0]!;
-  const old=controlled(false),fresh=controlled();const first=new PaperBuildService(store,auth,policies,old.runner,()=>now);const secondStore=new Store({path});const secondAuth=createAuth({database:secondStore.database,mode:'local',basePath:'/'});const second=new PaperBuildService(secondStore,secondAuth,new PolicyStore(secondStore.database,{principalExists:()=>true}),fresh.runner,()=>now);
+  const old=controlled(false),fresh=controlled();const first=new PaperBuildService(store,auth,policies,old.runner,()=>now,concurrency);const secondStore=new Store({path});const secondAuth=createAuth({database:secondStore.database,mode:'local',basePath:'/'});const second=new PaperBuildService(secondStore,secondAuth,new PolicyStore(secondStore.database,{principalExists:()=>true}),fresh.runner,()=>now,concurrency);
   try{
-    const input={versionId:version.id,contentHash:version.contentHash,entrypoint:'main.tex',toolchainId:first.configuration.toolchainId!};const jobs=[1,2,3].map(()=>store.transaction(()=>first.submit(detail.revision.id,input,context)));first.tick();second.tick();assert.equal(old.calls.length,2);assert.equal(fresh.calls.length,0,'global limit applies across services');
-    now+=31_000;second.tick();assert.equal(fresh.calls.length,2);old.calls[0]!.finish(success());old.calls[1]!.finish(success());await delay(20);
-    for(const job of jobs.slice(0,2)) {const state=second.get(detail.revision.id,job.id,context);assert.equal(state.attempt,2);assert.equal(state.status,'running');assert.deepEqual(state.artifacts,[]);assert.equal(state.attempts[0]!.status,'failed');}
-    fresh.calls[0]!.finish(success());fresh.calls[1]!.finish(success());await until(()=>fresh.calls.length===3);fresh.calls[2]!.finish(success());await until(()=>jobs.every(job=>second.get(detail.revision.id,job.id,context).status==='succeeded'));
-    assert.equal(store.database.prepare('SELECT count(*) AS total FROM paper_build_artifacts').get()!.total,15,'only current fences publish');
+    const input={versionId:version.id,contentHash:version.contentHash,entrypoint:'main.tex',toolchainId:first.configuration.toolchainId!};const jobs=Array.from({length:concurrency+1},()=>store.transaction(()=>first.submit(detail.revision.id,input,context)));first.tick();second.tick();assert.equal(old.calls.length,concurrency);assert.equal(fresh.calls.length,0,'global limit applies across services');
+    now+=31_000;second.tick();assert.equal(fresh.calls.length,concurrency);for(const call of old.calls)call.finish(success());await delay(20);
+    for(const job of jobs.slice(0,concurrency)) {const state=second.get(detail.revision.id,job.id,context);assert.equal(state.attempt,2);assert.equal(state.status,'running');assert.deepEqual(state.artifacts,[]);assert.equal(state.attempts[0]!.status,'failed');}
+    for(const call of fresh.calls)call.finish(success());await until(()=>fresh.calls.length===concurrency+1);fresh.calls[concurrency]!.finish(success());await until(()=>jobs.every(job=>second.get(detail.revision.id,job.id,context).status==='succeeded'));
+    assert.equal(store.database.prepare('SELECT count(*) AS total FROM paper_build_artifacts').get()!.total,(concurrency+1)*5,'only current fences publish');
   }finally{for(const call of old.calls)call.finish(success());for(const call of fresh.calls)call.finish(success());await first.close();await second.close();secondStore.close();store.close();rmSync(directory,{recursive:true,force:true});}
 });
 

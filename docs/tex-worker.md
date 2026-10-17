@@ -25,9 +25,12 @@ Configure the application with the exact image ID printed above and the path to 
 PHABRICATOR_TEX_IMAGE=sha256:<64 lowercase hexadecimal characters>
 PHABRICATOR_TEX_DOCKER_SOCKET=/var/run/docker.sock
 PHABRICATOR_TEX_WORK_DIR=.data/tex-worker
+PHABRICATOR_TEX_CONCURRENCY=1
 ```
 
 The work directory must be visible at the same path to a local VM's Docker daemon. It must not contain symbolic links. Only a per-build source subdirectory is mounted into the container, read-only. Do not configure a remote daemon or expose its socket to the compiler. The application requires operator access to the daemon, which is a privileged interface; dedicate the runtime to this service or use an appropriately configured rootless daemon.
+
+Concurrency accepts exactly `1` or `2` and defaults to `2` when omitted. Use `1` on a small host to reserve memory for the application, database and repository operations while one compiler runs; later builds remain durably queued and begin after the active build settles. Each compiler can consume up to 768 MiB, so a 2 GiB host should use one worker. This setting changes scheduling, not the pinned compiler's toolchain identity or artifact output. All application processes sharing the database must use the same value. Restart the application to apply a change.
 
 ## Fixed execution policy
 

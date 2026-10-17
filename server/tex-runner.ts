@@ -67,16 +67,20 @@ export function createTexRunner(config: TexRunnerConfig): TexRunner {
       for (const file of input.files) {
         await mkdir(dirname(join(source, file.path)), { recursive: true, mode: 0o755 });
         await writeFile(join(source, file.path), file.content, { encoding: 'utf8', mode: 0o444, flag: 'wx' });
+        await chmod(join(source, file.path), 0o444);
         await utimes(join(source, file.path), 946684800, 946684800);
       }
       for (const asset of input.assets ?? []) {
         await mkdir(dirname(join(source, asset.path)), { recursive: true, mode: 0o755 });
         await writeFile(join(source, asset.path), asset.data, { mode: 0o444, flag: 'wx' });
+        await chmod(join(source, asset.path), 0o444);
         await utimes(join(source, asset.path), 946684800, 946684800);
       }
       const sourceDirectories = new Set([source]);
       for (const file of [...input.files, ...(input.assets ?? [])]) { let parent = dirname(join(source, file.path)); while (parent.startsWith(`${source}/`)) { sourceDirectories.add(parent); parent = dirname(parent); } }
-      for (const path of sourceDirectories) await utimes(path, 946684800, 946684800);
+      // A restrictive service umask must not prevent the container's unprivileged UID
+      // from reading its source mount. The enclosing work directory stays private.
+      for (const path of sourceDirectories) { await chmod(path, 0o755); await utimes(path, 946684800, 946684800); }
       // The mount is read-only in the container; the enclosing temporary directory remains private on the host.
       await chmod(directory, 0o755);
       output = await docker(['run', '--rm', '--pull=never', '--name', container, '--label', `org.phabricator.tex.version=${input.versionId}`, '--network=none', '--ipc=none', '--read-only',
