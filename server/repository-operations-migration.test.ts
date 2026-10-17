@@ -30,7 +30,7 @@ test('schema46 adds empty replication and receive storage while preserving every
   const directory = mkdtempSync(join(tmpdir(), 'repository-operations-migration-')), path = join(directory, 'workspace.sqlite'); let store = legacy(path);
   try {
     const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 47);
     const after = snapshot(store.database);
     for (const entry of before.schema) assert.deepEqual(after.schema.find(item => item.name === entry.name), entry, entry.name);
     for (const entry of before.tables) assert.deepEqual(after.tables.find(item => item.name === entry.name), entry, entry.name);
@@ -66,7 +66,7 @@ test('schema46 version-write failure rolls back all new objects and preserves a 
     try { assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 45); assert.deepEqual(snapshot(db), before); }
     finally { db.close(); }
     const repaired = new Store({ path });
-    try { assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 46); for (const table of before.tables) assert.deepEqual(snapshot(repaired.database).tables.find(item => item.name === table.name), table); }
+    try { assert.equal(repaired.database.prepare('PRAGMA user_version').get()!.user_version, 47); for (const table of before.tables) assert.deepEqual(snapshot(repaired.database).tables.find(item => item.name === table.name), table); }
     finally { repaired.close(); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -74,8 +74,8 @@ test('schema46 version-write failure rolls back all new objects and preserves a 
 test('schema46 runtime refuses a future database without rewriting any record', () => {
   const directory = mkdtempSync(join(tmpdir(), 'repository-operations-future-')), path = join(directory, 'workspace.sqlite'), db = new DatabaseSync(path);
   try {
-    db.exec("PRAGMA user_version=47; CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('Preserve future format')");
+    db.exec("PRAGMA user_version=48; CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('Preserve future format')");
     const before = snapshot(db); assert.throws(() => new Store({ path }), /newer|unsupported/i);
-    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 47); assert.deepEqual(snapshot(db), before);
+    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 48); assert.deepEqual(snapshot(db), before);
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
 });

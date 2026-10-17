@@ -22,6 +22,8 @@ D116 adds [device-local papers](device-papers.md) and bundled KaTeX live preview
 
 ## Baseline and completion rule
 
+D118 adds [revocable private paper links](paper-sharing.md) as a native extension. Explicit links expose one immutable text version through an isolated anonymous reader while normal paper IDs retain object permissions. New papers default to creator-only access in the UI. PDF-to-LaTeX ingestion and shared binary assets remain gaps.
+
 The active baseline is Phabricator `5720a38c` and Arcanist `e50d1bc4`, the latest default-branch heads verified on October 10, 2026. Source inventory: [`src/applications` at 5720a38c](https://github.com/phacility/phabricator/tree/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications). The active tree contains **76 directories**, including internal services and prototypes. The 2021 tree contained 78; Phragment and Releeph remain explicit historical carry-forward targets below. The [latest-source comparison and API inventory](latest-upstream.md) are part of this acceptance scope, including upstream authorization fixes and removal of unsafe obsolete APIs. The upstream [prototype guide](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/docs/user/userguide/prototypes.diviner) explicitly warns that prototypes may lack essential features. “Prototype” below means the application class returns `isPrototype() = true`, not a judgement about our implementation.
 
 For each application, parity requires:

@@ -85,8 +85,9 @@ navigation metadata and no Origin. This permits links from a portfolio or source
 repository. Cross-site API and subresource requests remain rejected. Static shell
 access does not authorize protected content reads.
 
-Preserve `Cache-Control: no-store` on authenticated responses; do not place an
-HTML/API response cache in front of the app. Allow the Files route's 24 MiB JSON
+Preserve `Cache-Control: no-store` on authenticated and paper-sharing responses; do not place an
+HTML/API response cache in front of the app. Do not log request bodies for
+`/api/paper-shares/read` or sharing-management routes: they carry secret links. Allow the Files route's 24 MiB JSON
 body. Choose proxy and service-manager deadlines that permit explicit AI requests
 up to 120 seconds and a graceful shutdown. The app independently bounds request
 bodies, headers, password work, DOCX workers and compiler jobs.

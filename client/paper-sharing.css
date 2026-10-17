@@ -1,0 +1,37 @@
+.paper-sharing-dialog { width: min(660px, calc(100vw - 24px)); }
+.paper-sharing-dialog .modal-body > p:first-child { margin-top: 0; }
+.paper-sharing-dialog .modal-body { display: grid; gap: 16px; }
+.paper-sharing-dialog p, .paper-sharing-dialog h3 { margin: 0; }
+.paper-sharing-actions, .shared-paper-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.paper-sharing-created { padding: 16px; border: 1px solid #c7d8e5; background: #f2f7fb; border-radius: 4px; display: grid; gap: 10px; }
+.paper-sharing-created input { min-width: 0; font-family: monospace; }
+.paper-sharing-created .button { justify-self: start; }
+.paper-sharing-created small { color: #536879; }
+.paper-sharing-list { list-style: none; padding: 0; margin: 10px 0; }
+.paper-sharing-list li { padding: 14px 0; border-bottom: 1px solid #dce3e9; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.paper-sharing-list li > div { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.paper-sharing-list small { color: #64748b; }
+.shared-paper-page { min-height: 100vh; background: #f2f4f6; color: #293746; padding: 0 12px 32px; }
+.shared-paper-brand { max-width: 1000px; margin: auto; min-height: 64px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; font-size: 20px; font-weight: 700; }
+.shared-paper-brand > span:first-child { color: #437a9d; font-weight: 400; }
+.shared-paper-badge { margin-left: auto; font-size: 13px; font-weight: 400; color: #536879; }
+.shared-paper-document, .shared-paper-status { margin: auto; max-width: 1000px; border: 1px solid #d4dce4; background: white; border-radius: 4px; overflow: hidden; }
+.shared-paper-heading, .shared-paper-status { padding: 20px; }
+.shared-paper-heading h1, .shared-paper-status h1 { font-size: clamp(23px, 5vw, 32px); margin: 0 0 10px; overflow-wrap: anywhere; line-height: 1.3; }
+.shared-paper-heading p { margin: 8px 0 0; line-height: 1.55; }
+.shared-paper-heading .muted { font-size: 14px; }
+.shared-paper-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 16px; padding: 16px 20px; border-top: 1px solid #e0e6eb; border-bottom: 1px solid #e0e6eb; background: #f7f9fa; }
+.shared-paper-toolbar .field { flex: 1 1 220px; min-width: 0; margin: 0; }
+.shared-paper-toolbar select { min-width: 0; width: 100%; }
+.shared-paper-actions .button[aria-pressed=true] { color: #174e75; background: #e3eff7; border-color: #7ba9c6; }
+.shared-paper-document .paper-math-preview { margin: 0; border: 0; padding: 20px; }
+.shared-paper-document .paper-math-content { border: 0; padding: 0; }
+.shared-paper-source { overflow: auto; margin: 0; padding: 20px; font-size: 14px; line-height: 1.65; tab-size: 2; }
+.shared-paper-page .button, .paper-sharing-dialog .button { min-height: 44px; }
+@media (max-width: 600px) {
+  .shared-paper-page { padding-inline: 8px; }
+  .shared-paper-heading, .shared-paper-toolbar, .shared-paper-status { padding: 16px; }
+  .shared-paper-document .paper-math-preview { padding: 16px; }
+  .shared-paper-actions { width: 100%; }
+  .paper-sharing-list .button { width: 100%; }
+}

@@ -40,6 +40,7 @@ import type { GitImportSnapshot } from '../shared/repositories.ts';
 import { choice, HttpError, integer, object, string } from './validation.ts';
 import { seedDemo } from './seed.ts';
 import { PolicyStore, registerFilePolicy } from './policy.ts';
+import { PaperShares } from './paper-shares.ts';
 import type { FileListQuery } from '../shared/files.ts';
 import { AccessLayer } from './access.ts';
 import { createGitObserver, type GitObserver } from './git.ts';
@@ -210,6 +211,7 @@ export function createApp(options: AppOptions = {}): App {
     (auth.mode === 'local' && id === `local:${auth.workspaceId}`) || Boolean(store.database.prepare('SELECT id FROM auth_accounts WHERE id = ?').get(id)),
   });
   const owners = new OwnersService(store, auth, policies);
+  const paperShares = new PaperShares(store, auth, policies);
   const suite = new SuiteService(store, auth, policies);
   const search = new SearchService(store, auth, policies, suite);
   const dashboards = new DashboardService(store, auth, policies);
@@ -977,7 +979,23 @@ export function createApp(options: AppOptions = {}): App {
         send(res, 200, result.session); return;
       }
       const docxDiscussionExport = req.method === 'POST' ? /^\/api\/revisions\/([DPL][1-9]\d{0,14})\/docx\/export-discussion$/.exec(path) : null;
+      if (path === '/api/paper-shares/read') {
+        res.setHeader('X-Robots-Tag', 'noindex, noarchive, nofollow');
+        if (req.method !== 'POST') throw new HttpError(404, 'Route not found.');
+        if (url.search) throw new HttpError(400, 'Paper sharing URLs may not contain query parameters.');
+        const input = await body(req, 512);
+        send(res, 200, paperShares.read(input)); return;
+      }
       const context = auth.authenticate(req, req.method === 'GET' || docxDiscussionExport || /^\/api\/revisions\/[DPL]\d+\/reviews$/.test(path) ? 'read' : 'write');
+      const paperShare = /^\/api\/revisions\/(P[1-9]\d{0,14})\/share-links(?:\/([^/]+)\/(revoke))?$/.exec(path);
+      if (paperShare) {
+        res.setHeader('X-Robots-Tag', 'noindex, noarchive, nofollow');
+        if (req.method === 'GET' && !paperShare[2]) { send(res, 200, paperShares.list(paperShare[1]!, context, url.searchParams)); return; }
+        if (req.method !== 'POST') throw new HttpError(404, 'Route not found.');
+        if (url.search) throw new HttpError(400, 'Paper sharing URLs may not contain query parameters.');
+        const result = paperShares.mutate(paperShare[1]!, paperShare[2] ?? null, await body(req, 4096), req.headers['idempotency-key'], context);
+        send(res, result.status, result.body); return;
+      }
       const repositoryOperations = /^\/api\/repositories\/(R[1-9]\d*)\/operations(\/sync)?$/.exec(path);
       if (repositoryOperations && (req.method === 'GET' && !repositoryOperations[2] || req.method === 'POST' && repositoryOperations[2])) {
         const id = repositoryOperations[1]!, write = req.method === 'POST';

@@ -26,7 +26,7 @@ test('schema45 adds empty Owners storage while preserving every prior row and de
     store.createRepository({ name: 'Preserve repository', remoteUrl: 'https://example.invalid/source.git' });
     store.database.exec("CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Exact independent data')");
     schema44(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 47);
     const after = snapshot(store.database);
     for (const row of before.schema) assert.deepEqual(after.schema.find(item => item.name === row.name), row, row.name);
     for (const row of before.tables) assert.deepEqual(after.tables.find(item => item.name === row.name), row, row.name);
@@ -50,8 +50,8 @@ for (const collision of ['owners_packages', 'owners_operations', 'owners_routing
 test('current runtime refuses future databases without mutating them', () => {
   const dir = mkdtempSync(join(tmpdir(), 'owners-future-')), path = join(dir, 'workspace.sqlite'), db = new DatabaseSync(path);
   try {
-    db.exec("PRAGMA user_version=47; CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('Keep me')");
+    db.exec("PRAGMA user_version=48; CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('Keep me')");
     const before = snapshot(db); assert.throws(() => new Store({ path }), /newer|unsupported/i);
-    assert.deepEqual(snapshot(db), before); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 47);
+    assert.deepEqual(snapshot(db), before); assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 48);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

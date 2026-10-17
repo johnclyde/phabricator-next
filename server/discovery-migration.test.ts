@@ -27,7 +27,7 @@ test('schema43 to44 preserves every prior row and definition, seeds default task
     store.createProject({ name: 'Preserved project' });
     store.database.exec("CREATE TABLE operator_notes(note TEXT); INSERT INTO operator_notes VALUES('Preserve exact data')");
     downgrade(store.database); const before = snapshot(store.database); store.close(); store = new Store({ path });
-    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 46);
+    assert.equal(store.database.prepare('PRAGMA user_version').get()!.user_version, 47);
     const after = snapshot(store.database);
     for (const row of before.schema) assert.deepEqual(after.schema.find(item => item.name === row.name), row, row.name);
     for (const table of before.tables) assert.deepEqual(after.tables.find(item => item.name === table.name), table, table.name);
