@@ -4,6 +4,8 @@ import { register } from 'node:module';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { renderPaperMath, PAPER_MATH_MARKUP_BUDGET } from '../client/paper-math-render';
+import { parsePaperPreview } from '../shared/paper-preview';
+import { comparePaperPreviews } from '../shared/paper-preview-comparison';
 
 // Browser stylesheet imports are irrelevant to SSR safety checks; Vite handles them in builds.
 register(`data:text/javascript,${encodeURIComponent('export async function load(url, context, nextLoad) { if (url.endsWith(".css")) return { format: "module", source: "export {};", shortCircuit: true }; return nextLoad(url, context); }')}`, import.meta.url);
@@ -31,6 +33,22 @@ test('unknown expressions and incomplete edits retain escaped original source', 
   assert.match(html, /\$\\unknown\{&lt;script&gt;alert\(1\)&lt;\/script&gt;\}\$/);
   assert.match(html, /\$unfinished/);
   assert.doesNotMatch(html, /<script\b/);
+});
+
+test('rendered highlights escape source text and preserve the whole unsupported equation fallback', () => {
+  const source = String.raw`<script>alert(1)</script> $\unknown{<img src=x>}$`;
+  const parsedPreview = parsePaperPreview(source);
+  const comparison = comparePaperPreviews(parsePaperPreview(''), parsedPreview);
+  assert.equal(comparison.status, 'ready');
+  if (comparison.status !== 'ready') return;
+  const html = renderToStaticMarkup(createElement(PaperMathPreview, {
+    source, parsedPreview, highlights: comparison.after, changeKind: 'added',
+  }));
+  assert.match(html, /<ins[^>]*data-change-kind="added"/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /<code[^>]*>\$\\unknown\{&lt;img src=x&gt;\}\$<\/code><\/ins>/);
+  assert.doesNotMatch(html, /<(?:script|img)\b/);
+  assert.equal(source, String.raw`<script>alert(1)</script> $\unknown{<img src=x>}$`);
 });
 
 test('untrusted math cannot create links, images, CSS, HTML attributes or remote fetches', () => {
