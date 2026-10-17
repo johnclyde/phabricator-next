@@ -8,7 +8,7 @@ export interface ComparisonSelection {
   target: VersionIdentity;
   filePath: string;
   mode: ComparisonMode;
-  view: 'changes' | 'source' | 'structure';
+  view: 'changes' | 'source' | 'structure' | 'preview';
   skipSpaceTabOnly?: boolean;
   paragraphAlignment?: boolean;
 }
@@ -20,13 +20,13 @@ export function defaultComparison(detail: RevisionDetail): ComparisonSelection |
   const target = detail.versions.find(version => version.number === detail.revision.currentVersion);
   if (!target) return null;
   const base = detail.versions.find(version => version.number === target.number - 1) || null;
-  return { revisionId: detail.revision.id, base: base ? versionIdentity(base) : null, target: versionIdentity(target), filePath: comparisonPaths(base, target)[0] || '', mode: detail.revision.kind === 'code' ? 'lines' : 'words', view: 'changes' };
+  return { revisionId: detail.revision.id, base: base ? versionIdentity(base) : null, target: versionIdentity(target), filePath: comparisonPaths(base, target)[0] || '', mode: detail.revision.kind === 'code' ? 'lines' : 'words', view: detail.revision.kind === 'paper' && target.number === 1 && !base ? 'preview' : 'changes' };
 }
 export function isComparisonSelection(value: unknown, revisionId: string): value is ComparisonSelection {
   if (!value || typeof value !== 'object') return false;
   const row = value as Record<string, unknown>;
   const identity = (item: unknown) => Boolean(item && typeof item === 'object' && typeof (item as VersionIdentity).id === 'string' && (item as VersionIdentity).id.length > 0 && typeof (item as VersionIdentity).contentHash === 'string' && (item as VersionIdentity).contentHash.length > 0);
-  return row.revisionId === revisionId && (row.base === null || identity(row.base)) && identity(row.target) && typeof row.filePath === 'string' && row.filePath.length > 0 && (row.mode === 'words' || row.mode === 'lines') && (row.view === 'changes' || row.view === 'source' || row.view === 'structure') && (row.skipSpaceTabOnly === undefined || typeof row.skipSpaceTabOnly === 'boolean') && (row.paragraphAlignment === undefined || typeof row.paragraphAlignment === 'boolean');
+  return row.revisionId === revisionId && (row.base === null || identity(row.base)) && identity(row.target) && typeof row.filePath === 'string' && row.filePath.length > 0 && (row.mode === 'words' || row.mode === 'lines') && (row.view === 'changes' || row.view === 'source' || row.view === 'structure' || row.view === 'preview') && (row.skipSpaceTabOnly === undefined || typeof row.skipSpaceTabOnly === 'boolean') && (row.paragraphAlignment === undefined || typeof row.paragraphAlignment === 'boolean');
 }
 export function resolveComparison(detail: RevisionDetail, selection: ComparisonSelection): { base: RevisionVersion | null; target: RevisionVersion } | { error: string } {
   const find = (identity: VersionIdentity) => detail.versions.find(version => version.revisionId === detail.revision.id && version.id === identity.id && version.contentHash === identity.contentHash);

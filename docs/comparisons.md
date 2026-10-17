@@ -12,13 +12,19 @@ D102b verification passed type checking, both production builds and the full sui
 
 ## Selecting what to inspect
 
-The initial view compares the current version with its immediate predecessor, or an empty base for the first version. It resolves that choice once. Thereafter the selection records the revision ID, both exact version IDs and content hashes, the file path, literal comparison mode and source/comparison view. Background refreshes and newly arriving versions do not silently replace the selected pair. Show Current is an explicit return to the latest pair.
+The initial selection pairs the current version with its immediate predecessor, or an empty base for the first version. A first-version paper opens in **Preview**, which reads the selected target file with local mathematics rendering. Later versions open in **Changes**. Existing saved view choices are retained. The initial choice is resolved once. Thereafter the selection records the revision ID, both exact version IDs and content hashes, the file path, literal comparison mode and selected view. Background refreshes and newly arriving versions do not silently replace the selected pair. Show Current is an explicit return to the latest pair.
 
 Either side can be any available version of the same revision. Equal and reverse comparisons are supported. Changing the inspected version preserves the chosen base; Swap reverses a nonempty pair. A missing version or mismatched content hash produces an unavailable-selection state rather than substituting another snapshot.
 
 The file chooser uses the union of the two snapshots' exact paths: target paths in snapshot order, followed by base-only paths in their snapshot order. Previous File and Next File traverse that same list without wrapping, changing the pair, or skipping unchanged, empty or deleted files. Added, deleted and existing empty files remain distinct. Selecting a deleted file shows its removed content; it does not fall back to a different current file. File renames are currently an addition and deletion, without inferred alignment.
 
 Selection metadata follows the existing workspace and account cache boundaries. Local mode can retain it with the visited revision for offline reopening. Password mode keeps it only in the verified session's memory. Object revocation clears the metadata along with cached source; logout/account changes cannot restore another account's selection. No extra source text or spoken excerpts are stored with the selection. If browser storage fails, the current view remains usable but cannot promise restoration after reload.
+
+## Paper reading preview
+
+**Preview** displays one explicitly selected immutable paper version and file, with title, prose, headings and mathematics. It uses the same local renderer as the paper editors. Source downloads retain the complete original LaTeX. Preview respects the target-only inline display budget; oversized files offer an exact download. A file absent from the selected target is identified as absent.
+
+Choose **Source** or **Changes** to anchor comments to exact original text. The general version comment remains available below the preview, and switching views retains unsent drafts. Preview has no diff cursor or diff narration; those return with the comparison controls in Source or Changes. Rendered mathematical differences between two versions remain future work.
 
 ## Literal changes and navigation
 
@@ -34,7 +40,7 @@ The pure shared comparison helper bounds combined source size, source lines, tok
 
 An exceeded limit produces an explicit unavailable comparison with the selected source/download alternatives. It never reports a truncated diff as “no changes.” Raw source remains the exact snapshot; a comparison fallback does not edit or shorten it.
 
-Source comments and the paper structure view have a separate target-only display budget of 120,000 UTF-16 units and 8,000 displayed lines. A small target remains available for source comments even when a large base prevents comparison. An oversized target remains readable as raw source or downloadable, with an explicit notice that inline comments and structure are unavailable for that file.
+Source comments, paper Preview and the paper structure view have a separate target-only display budget of 120,000 UTF-16 units and 8,000 displayed lines. A small target remains available for source comments even when a large base prevents comparison. An oversized target remains readable as raw source or downloadable, with an explicit notice that inline comments and structure are unavailable for that file.
 
 ## Aligning source paragraphs
 

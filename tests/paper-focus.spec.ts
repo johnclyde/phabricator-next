@@ -74,6 +74,16 @@ test('paper writing starts focused and secondary panels retain unsent drafts whe
   }
   await expect(page.locator('.revision-comparison-panel')).toBeVisible();
   await expect(page.getByLabel('Review comment', { exact: true })).toBeVisible();
+  const composer = page.getByRole('region', { name: 'Comment on a compared version', exact: true });
+  const panelBox = (await composer.boundingBox())!;
+  const inputBox = (await composer.getByLabel('Review comment', { exact: true }).boundingBox())!;
+  expect(inputBox.x - panelBox.x).toBeGreaterThanOrEqual(12);
+  expect(panelBox.x + panelBox.width - inputBox.x - inputBox.width).toBeGreaterThanOrEqual(12);
+  const privateButton = (await composer.getByRole('button', { name: 'Save Private Draft', exact: true }).boundingBox())!;
+  const addButton = (await composer.getByRole('button', { name: 'Add Comment', exact: true }).boundingBox())!;
+  expect(Math.abs(privateButton.y - addButton.y)).toBeLessThan(1);
+  expect(addButton.x - privateButton.x - privateButton.width).toBeLessThanOrEqual(12);
+  expect(Math.min(privateButton.height, addButton.height)).toBeGreaterThanOrEqual(44);
   await expect(page.getByRole('button', { name: 'Run Local Checks', exact: true })).toBeHidden();
   expect(await page.locator('.discussion').evaluate(element => {
     const details = [...document.querySelectorAll('summary')].find(node => node.textContent === 'Paper details')?.parentElement;
@@ -83,6 +93,7 @@ test('paper writing starts focused and secondary panels retain unsent drafts whe
   const folder = `.data/paper-focus-visual/${normalizeBasePath(process.env.APP_BASE_PATH) === '/' ? 'root' : 'mounted'}`;
   await mkdir(folder, { recursive: true });
   await page.screenshot({ path: `${folder}/${info.project.name}.png` });
+  await composer.screenshot({ path: info.outputPath('comment-composer.png') });
 
   const comment = page.getByLabel('Review comment', { exact: true });
   await comment.fill('An unsent comment remains on this exact version.');

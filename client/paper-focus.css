@@ -25,6 +25,15 @@
 .revision-comparison-panel > .paper-disclosure { border-width: 1px 0 0; border-radius: 0; }
 .paper-version-editor { scroll-margin-top: 70px; }
 .paper-version-editor:empty { display: none; }
+.paper-version-preview { padding: 16px; }
+.paper-version-preview > .paper-math-preview { margin: 0; }
+.paper-version-preview > .comparison-identity { margin: 0 0 12px; font-size: 12px; color: #617487; }
+.paper-preview-guidance { margin: 12px 0 0; line-height: 1.5; }
+.paper-focus .literal-diff { font: 13px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.paper-focus .literal-diff .active-change { outline: none; border-radius: 0; box-shadow: inset 0 -2px #496e8a; }
+@media (forced-colors: active) {
+  .paper-focus .literal-diff .active-change { border-bottom: 2px solid Highlight; }
+}
 @media (max-width: 760px) {
   .paper-focus .topbar { height: 52px; grid-template-rows: 44px; }
   .paper-focus .global-search { display: none; }
@@ -33,4 +42,5 @@
   .paper-focus .comparison-picker { display: block; }
   .paper-disclosure-content { padding: 10px; gap: 12px; }
   .paper-version-editor { scroll-margin-top: 62px; }
+  .paper-version-preview { padding: 12px; }
 }

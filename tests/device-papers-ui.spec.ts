@@ -1,4 +1,4 @@
-import { test, expect, chromium, type Page } from '@playwright/test';
+import { test, expect, chromium, type Locator, type Page } from '@playwright/test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +18,7 @@ For every $n \in \mathbb{N}$,
 \]
 \end{document}
 `;
-async function expectDocumentPreview(page: Page) {
+async function expectDocumentPreview(page: Page | Locator) {
   const preview = page.getByRole('region', { name: 'Paper reading preview', exact: true });
   await expect(preview.getByRole('heading', { name: 'Finite sums', exact: true })).toBeVisible();
   await expect(preview.getByText('A. Researcher', { exact: true })).toBeVisible();
@@ -155,7 +155,7 @@ test('explicit workspace copies retain exact source without changing the reviewe
   await page.goto(`./#${detail.revision.id}`);
   await page.getByRole('button', { name: 'Edit & add version', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'File content', exact: true })).toHaveValue(SOURCE);
-  await expectDocumentPreview(page);
+  await expectDocumentPreview(page.locator('.paper-version-editor'));
   const paperDetails = page.locator('summary').filter({ hasText: /^Paper details$/ });
   await paperDetails.click();
   await paperDetails.locator('..').getByRole('button', { name: 'Save a device copy', exact: true }).click();

@@ -67,6 +67,48 @@ test('revision comments and replies insert people by keyboard and render only sa
   } finally { await context.close(); }
 });
 
+test('searching for a mention by keyboard never submits the surrounding comment', async ({ browser }, info) => {
+  const { page, context } = await signIn(browser, info);
+  try {
+    const detail = await revision(page, 'Mention search keeps comments private'), id = detail.revision.id;
+    await page.goto(`./#${id}`);
+    const form = page.locator('.comment-form'), body = form.getByLabel('Review comment', { exact: true });
+    await form.evaluate(element => {
+      element.setAttribute('data-search-submits', '0'); element.setAttribute('data-search-invalid', '0');
+      element.addEventListener('submit', () => element.setAttribute('data-search-submits', String(Number(element.getAttribute('data-search-submits')) + 1)));
+      element.addEventListener('invalid', () => element.setAttribute('data-search-invalid', String(Number(element.getAttribute('data-search-invalid')) + 1)), true);
+    });
+    const picker = form.locator('.mention-picker');
+    await picker.locator('summary').click();
+    const search = picker.getByLabel('Find a person', { exact: true });
+    await search.fill('bob'); await search.press('Enter');
+    await expect(form).toHaveAttribute('data-search-submits', '0');
+    await expect(form).toHaveAttribute('data-search-invalid', '0');
+    await expect(form.getByRole('button', { name: 'Add Comment', exact: true })).toBeDisabled();
+
+    await body.fill('An unfinished private comment.');
+    const compositionCanceled = await search.evaluate(element => [
+      { key: 'Enter', isComposing: true }, { key: 'Enter', keyCode: 229 },
+    ].map(init => {
+      const event = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
+      element.dispatchEvent(event); return event.defaultPrevented;
+    }));
+    expect(compositionCanceled).toEqual([false, false]);
+    await search.fill('bob'); await search.press('Enter');
+    await expect(form).toHaveAttribute('data-search-submits', '0');
+    await expect(form).toHaveAttribute('data-search-invalid', '0');
+    await expect(body).toHaveValue('An unfinished private comment.');
+    expect((await api<RevisionDetail>(page, `/revisions/${id}`)).comments).toHaveLength(0);
+    await insert(form, body, 'bob');
+    await expect(body).toHaveValue('An unfinished private comment. @bob ');
+    await expect(form).toHaveAttribute('data-search-submits', '0');
+    await form.getByRole('button', { name: 'Add Comment', exact: true }).click();
+    await expect(page.locator('.review-thread .person-mention')).toHaveText('@bob');
+    const after = await api<RevisionDetail>(page, `/revisions/${id}`);
+    expect(after.comments).toHaveLength(1); expect(after.versions).toEqual(detail.versions);
+  } finally { await context.close(); }
+});
+
 test('Word passage mentions preserve package, quotation and original version', async ({ browser }, info) => {
   const { page, context } = await signIn(browser, info);
   try {

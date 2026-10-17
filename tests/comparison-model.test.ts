@@ -37,7 +37,9 @@ test('initial selection uses the stated head and immediate predecessor, with kin
     const initial = defaultComparison(detail([second, first], 2, kind));
     assert.deepEqual(initial, { ...selection(), mode: kind === 'code' ? 'lines' : 'words' });
   }
-  assert.deepEqual(defaultComparison(detail([first], 1)), { ...selection(), base: null, target: versionIdentity(first) });
+  assert.deepEqual(defaultComparison(detail([first], 1)), { ...selection(), base: null, target: versionIdentity(first), view: 'preview' });
+  for (const kind of ['document', 'code'] as const) assert.equal(defaultComparison(detail([first], 1, kind))?.view, 'changes');
+  assert.equal(defaultComparison(detail([second], 2))?.view, 'changes', 'a missing predecessor must not disguise a later version as an initial reading view');
   assert.equal(defaultComparison(detail([first], 2)), null, 'missing head must not silently use the last array entry');
 });
 
@@ -102,12 +104,13 @@ test('shape validation rejects malformed stored records instead of coercing enum
   assert.equal(isComparisonSelection(JSON.parse(JSON.stringify(saved)), 'P1'), true);
   assert.equal(isComparisonSelection({ ...saved, base: null, mode: 'lines', view: 'source' }, 'P1'), true);
   assert.equal(isComparisonSelection({ ...saved, view: 'structure' }, 'P1'), true);
+  assert.equal(isComparisonSelection({ ...saved, view: 'preview' }, 'P1'), true);
   const invalid: unknown[] = [null, undefined, false, 1, 'selection', [], {},
     { ...saved, revisionId: 'P2' }, { ...saved, base: undefined }, { ...saved, target: null },
     { ...saved, target: { id: second.id } }, { ...saved, target: { id: '', contentHash: second.contentHash } },
     { ...saved, target: { id: second.id, contentHash: '' } }, { ...saved, base: { id: first.id, contentHash: 1 } },
     { ...saved, filePath: null }, { ...saved, filePath: '' }, { ...saved, mode: 'semantic' },
-    { ...saved, mode: ['words'] }, { ...saved, view: ['changes'] }, { ...saved, view: 'preview' },
+    { ...saved, mode: ['words'] }, { ...saved, view: ['changes'] }, { ...saved, view: 'rendered-diff' },
   ];
   for (const value of invalid) assert.equal(isComparisonSelection(value, 'P1'), false, JSON.stringify(value));
 });
