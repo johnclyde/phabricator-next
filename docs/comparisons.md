@@ -18,13 +18,21 @@ Either side can be any available version of the same revision. Equal and reverse
 
 The file chooser uses the union of the two snapshots' exact paths: target paths in snapshot order, followed by base-only paths in their snapshot order. Previous File and Next File traverse that same list without wrapping, changing the pair, or skipping unchanged, empty or deleted files. Added, deleted and existing empty files remain distinct. Selecting a deleted file shows its removed content; it does not fall back to a different current file. File renames are currently an addition and deletion, without inferred alignment.
 
-Selection metadata follows the existing workspace and account cache boundaries. Local mode can retain it with the visited revision for offline reopening. Password mode keeps it only in the verified session's memory. Object revocation clears the metadata along with cached source; logout/account changes cannot restore another account's selection. No extra source text or spoken excerpts are stored with the selection. If browser storage fails, the current view remains usable but cannot promise restoration after reload.
+Selection metadata, including the optional inline/side-by-side layout, follows the existing workspace and account cache boundaries. Local mode can retain it with the visited revision for offline reopening. Password mode keeps it only in the verified session's memory. Object revocation clears the metadata along with cached source; logout/account changes cannot restore another account's selection. No extra source text or spoken excerpts are stored with the selection. If browser storage fails, the current view remains usable but cannot promise restoration after reload.
+
+## Paper comparison layouts
+
+Paper **Changes** and **Preview** have visible **Inline** and **Side by side** choices. Choose the version to compare against with **Compare against**, and the inspected version with **Viewing**. Arbitrary, equal and reversed pairs remain available through the version selectors; a refresh never silently advances an existing selection.
+
+Side-by-side Changes places the base source on the left and target source on the right, retaining word or line highlights, exact line endings and both versions' original comment anchors. Shared unchanged source boundaries align the columns; unequal changed blocks leave space on the shorter side rather than guessing which removed line corresponds to an added line. Source paragraph alignment remains literal; Inline retains its jump controls for matched reordered paragraphs. Phones scroll the comparison horizontally while each column stays readable.
 
 ## Paper reading preview
 
-**Preview** displays one explicitly selected immutable paper version and file, with title, prose, headings and mathematics. It uses the same local renderer as the paper editors. Source downloads retain the complete original LaTeX. Preview respects the target-only inline display budget; oversized files offer an exact download. A file absent from the selected target is identified as absent.
+**Inline Preview** displays one explicitly selected immutable paper version and file, with title, prose, headings and mathematics. It uses the same local renderer as the paper editors. Source downloads retain the complete original LaTeX. Preview respects the target-only inline display budget; oversized files offer an exact download. A file absent from the selected target is identified as absent.
 
-Choose **Source** or **Changes** to anchor comments to exact original text. The general version comment remains available below the preview, and switching views retains unsent drafts. Preview has no diff cursor or diff narration; those return with the comparison controls in Source or Changes. Rendered mathematical differences between two versions remain future work.
+Side-by-side Preview renders the explicitly selected base and target files independently on the device, with version labels and exact source downloads for both. Missing versions, absent files and existing empty files remain distinct. Each side independently respects the source display budget. No compiler or hosted provider is invoked.
+
+Choose **Source** or **Changes** to anchor comments to exact original text. The general version comment remains available below the preview, and switching views retains unsent drafts. Preview has no diff cursor or diff narration; those return with the comparison controls in Source or Changes. Highlighting changes within rendered mathematics and semantic alignment between rendered paragraphs remain future work.
 
 ## Literal changes and navigation
 

@@ -127,6 +127,20 @@ test('navigation preference is optional for old metadata and accepts only a bool
   for (const flag of [null, 0, 1, 'true', [], {}]) assert.equal(isComparisonSelection({ ...legacy, skipSpaceTabOnly: flag }, 'P1'), false);
 });
 
+test('split layout preserves exact pins, is optional for saved records, and retires the previous reading context', () => {
+  const legacy = selection();
+  assert.equal(comparisonIdentity(legacy), comparisonIdentity({ ...legacy, layout: 'inline' }));
+  assert.notEqual(comparisonIdentity(legacy), comparisonIdentity({ ...legacy, layout: 'split' }));
+  for (const layout of ['inline', 'split'] as const) {
+    const selected = { ...legacy, layout };
+    const restored = comparisonMetadata({ ...selected, source: 'Never stored' } as ComparisonSelection);
+    assert.deepEqual(restored, selected);
+    assert.equal(isComparisonSelection(restored, 'P1'), true);
+    assert.deepEqual(resolveComparison(detail(), restored), { base: first, target: second });
+  }
+  for (const layout of [null, true, 1, [], {}, 'sideways']) assert.equal(isComparisonSelection({ ...legacy, layout }, 'P1'), false);
+});
+
 test('paragraph alignment is an optional boolean whose saved record excludes computed matches and source', () => {
   const legacy = selection();
   assert.equal(Object.hasOwn(defaultComparison(detail())!, 'paragraphAlignment'), false, 'old and new default comparisons remain literal');

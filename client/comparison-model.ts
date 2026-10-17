@@ -9,6 +9,7 @@ export interface ComparisonSelection {
   filePath: string;
   mode: ComparisonMode;
   view: 'changes' | 'source' | 'structure' | 'preview';
+  layout?: 'inline' | 'split';
   skipSpaceTabOnly?: boolean;
   paragraphAlignment?: boolean;
 }
@@ -26,7 +27,7 @@ export function isComparisonSelection(value: unknown, revisionId: string): value
   if (!value || typeof value !== 'object') return false;
   const row = value as Record<string, unknown>;
   const identity = (item: unknown) => Boolean(item && typeof item === 'object' && typeof (item as VersionIdentity).id === 'string' && (item as VersionIdentity).id.length > 0 && typeof (item as VersionIdentity).contentHash === 'string' && (item as VersionIdentity).contentHash.length > 0);
-  return row.revisionId === revisionId && (row.base === null || identity(row.base)) && identity(row.target) && typeof row.filePath === 'string' && row.filePath.length > 0 && (row.mode === 'words' || row.mode === 'lines') && (row.view === 'changes' || row.view === 'source' || row.view === 'structure' || row.view === 'preview') && (row.skipSpaceTabOnly === undefined || typeof row.skipSpaceTabOnly === 'boolean') && (row.paragraphAlignment === undefined || typeof row.paragraphAlignment === 'boolean');
+  return row.revisionId === revisionId && (row.base === null || identity(row.base)) && identity(row.target) && typeof row.filePath === 'string' && row.filePath.length > 0 && (row.mode === 'words' || row.mode === 'lines') && (row.view === 'changes' || row.view === 'source' || row.view === 'structure' || row.view === 'preview') && (row.layout === undefined || row.layout === 'inline' || row.layout === 'split') && (row.skipSpaceTabOnly === undefined || typeof row.skipSpaceTabOnly === 'boolean') && (row.paragraphAlignment === undefined || typeof row.paragraphAlignment === 'boolean');
 }
 export function resolveComparison(detail: RevisionDetail, selection: ComparisonSelection): { base: RevisionVersion | null; target: RevisionVersion } | { error: string } {
   const find = (identity: VersionIdentity) => detail.versions.find(version => version.revisionId === detail.revision.id && version.id === identity.id && version.contentHash === identity.contentHash);
@@ -37,7 +38,7 @@ export function resolveComparison(detail: RevisionDetail, selection: ComparisonS
 }
 /** The persisted record contains identities and presentation preferences, never source. */
 export function comparisonMetadata(selection: ComparisonSelection): ComparisonSelection {
-  return { revisionId: selection.revisionId, base: selection.base && { id: selection.base.id, contentHash: selection.base.contentHash }, target: { id: selection.target.id, contentHash: selection.target.contentHash }, filePath: selection.filePath, mode: selection.mode, view: selection.view, ...(selection.skipSpaceTabOnly === undefined ? {} : { skipSpaceTabOnly: selection.skipSpaceTabOnly }), ...(selection.paragraphAlignment === undefined ? {} : { paragraphAlignment: selection.paragraphAlignment }) };
+  return { revisionId: selection.revisionId, base: selection.base && { id: selection.base.id, contentHash: selection.base.contentHash }, target: { id: selection.target.id, contentHash: selection.target.contentHash }, filePath: selection.filePath, mode: selection.mode, view: selection.view, ...(selection.layout === undefined ? {} : { layout: selection.layout }), ...(selection.skipSpaceTabOnly === undefined ? {} : { skipSpaceTabOnly: selection.skipSpaceTabOnly }), ...(selection.paragraphAlignment === undefined ? {} : { paragraphAlignment: selection.paragraphAlignment }) };
 }
 
-export function comparisonIdentity(selection: ComparisonSelection): string { return JSON.stringify([selection.revisionId, selection.base ? [selection.base.id, selection.base.contentHash] : null, [selection.target.id, selection.target.contentHash], selection.filePath, selection.mode, selection.view, Boolean(selection.skipSpaceTabOnly), Boolean(selection.paragraphAlignment)]); }
+export function comparisonIdentity(selection: ComparisonSelection): string { return JSON.stringify([selection.revisionId, selection.base ? [selection.base.id, selection.base.contentHash] : null, [selection.target.id, selection.target.contentHash], selection.filePath, selection.mode, selection.view, Boolean(selection.skipSpaceTabOnly), Boolean(selection.paragraphAlignment), selection.layout ?? 'inline']); }
