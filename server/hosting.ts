@@ -34,7 +34,10 @@ export function assertHostingRequest(req: IncomingMessage, configuredPort: numbe
   if (req.headers['sec-fetch-site'] === 'cross-site' && !origin) {
     const pathname = (req.url ?? '/').split('?')[0];
     const entry = pathname === basePath || pathname === `${basePath}index.html` || basePath !== '/' && pathname === basePath.slice(0, -1);
-    const navigation = hosting && entry && (req.method === 'GET' || req.method === 'HEAD') && req.headers['sec-fetch-mode'] === 'navigate' && req.headers['sec-fetch-dest'] === 'document';
-    if (!navigation) throw new HttpError(403, 'Cross-site requests are not allowed.');
+    // The entry serves only the public static shell, never workspace data.
+    // Link openers and previews may omit navigation metadata. API requests
+    // retain this gate, and frame/CORS restrictions remain on the response.
+    const publicEntry = hosting && entry && (req.method === 'GET' || req.method === 'HEAD');
+    if (!publicEntry) throw new HttpError(403, 'Cross-site requests are not allowed.');
   }
 }

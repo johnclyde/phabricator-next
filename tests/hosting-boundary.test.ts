@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request as requestHttp, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -70,7 +70,7 @@ test('hosted external entry navigation is narrowly allowed without relaxing API 
     const allowed = [base, `${base}index.html`, ...(base === '/' ? [] : [base.slice(0, -1)])];
     for (const url of allowed) for (const method of ['GET', 'HEAD']) assert.doesNotThrow(() => assertHostingRequest(request({ headers: navigation, method, url }), 4310, hosting, base));
     for (const url of [`${base}api/session`, `${base}api/health`, `${base}w/research/`, `${base}assets/app.js`, `${base}%69ndex.html`, '/outside']) assert.throws(() => assertHostingRequest(request({ headers: navigation, url }), 4310, hosting, base), denied);
-    for (const headers of [{ ...navigation, 'sec-fetch-mode': undefined }, { ...navigation, 'sec-fetch-mode': 'cors' }, { ...navigation, 'sec-fetch-dest': 'iframe' }, { ...navigation, 'sec-fetch-dest': undefined }]) assert.throws(() => assertHostingRequest(request({ headers, url: base }), 4310, hosting, base), denied);
+    for (const headers of [{ ...navigation, 'sec-fetch-mode': undefined }, { ...navigation, 'sec-fetch-mode': 'cors' }, { ...navigation, 'sec-fetch-dest': 'iframe' }, { ...navigation, 'sec-fetch-dest': undefined }]) assert.doesNotThrow(() => assertHostingRequest(request({ headers, url: base }), 4310, hosting, base));
     assert.throws(() => assertHostingRequest(request({ headers: navigation, method: 'POST', url: base }), 4310, hosting, base), denied);
     assert.throws(() => assertHostingRequest(request({ headers: { ...navigation, origin: 'https://attacker.example' }, url: base }), 4310, hosting, base), denied);
   }
@@ -82,7 +82,9 @@ test('real HTTP rejects duplicate or hostile authority before public, redirect a
   const store = createStore({ path: ':memory:' });
   const provisioner = createAuth({ database: store.database, mode: 'local', basePath: '/workspace/', provisioning: true });
   await provisioner.createAccount({ username: 'reader', displayName: 'Reader', password: 'A test-only hosted transport password' });
-  const app = createApp({ store, seed: false, basePath: '/workspace/', authMode: 'password', publicOrigin: origin });
+  const distPath = mkdtempSync(join(tmpdir(), 'phab-hosted-entry-'));
+  writeFileSync(join(distPath, 'index.html'), '<!doctype html><meta name="application-base" content="/workspace/"><div id="root"></div>');
+  const app = createApp({ store, seed: false, basePath: '/workspace/', authMode: 'password', publicOrigin: origin, distPath });
   const raw = (path: string, headers: string[], method = 'GET') => new Promise<number>((resolve, reject) => {
     const req = requestHttp({ hostname: '127.0.0.1', port: (app.server.address() as AddressInfo).port, method, path, setHost: false, headers: [...headers, 'Connection', 'close'] }, response => { response.resume(); response.on('end', () => resolve(response.statusCode!)); });
     req.on('error', reject); req.end();
@@ -90,6 +92,10 @@ test('real HTTP rejects duplicate or hostile authority before public, redirect a
   try {
     await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
     assert.equal(await raw('/workspace/api/health', ['Host', host]), 200);
+    for (const metadata of [[], ['Sec-Fetch-Mode', 'no-cors', 'Sec-Fetch-Dest', 'empty'], ['Sec-Fetch-Mode', 'navigate', 'Sec-Fetch-Dest', 'document']]) {
+      assert.equal(await raw('/workspace/', ['Host', host, 'Sec-Fetch-Site', 'cross-site', ...metadata]), 200);
+      assert.equal(await raw('/workspace/api/session', ['Host', host, 'Sec-Fetch-Site', 'cross-site', ...metadata]), 403);
+    }
     assert.equal(await raw('/workspace/api/state', ['Host', host]), 401);
     for (const path of ['/workspace', '/workspace/', '/workspace/w/research/', '/workspace/api/health', '/workspace/api/session', '/workspace/api/state', '/workspace/api/phriction.info']) {
       assert.equal(await raw(path, ['Host', host, 'Host', 'evil.example']), 403, path);
@@ -99,5 +105,5 @@ test('real HTTP rejects duplicate or hostile authority before public, redirect a
     assert.equal(await raw('/workspace/api/session', ['Host', host, 'Origin', origin, 'Origin', 'https://attacker.example']), 403);
     assert.equal(await raw('/workspace/api/health', ['Host', host, 'Origin', 'null'], 'OPTIONS'), 403);
     assert.equal(store.database.prepare('SELECT count(*) AS n FROM auth_challenges').get()!.n, 0, 'rejected requests never issue sign-in challenges');
-  } finally { await app.close(); store.close(); }
+  } finally { await app.close(); store.close(); rmSync(distPath, { recursive: true, force: true }); }
 });

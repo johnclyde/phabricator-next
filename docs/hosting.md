@@ -79,11 +79,13 @@ require the exact origin, CSRF token and session context. Bearer and Conduit
 clients may omit Origin; a supplied incorrect Origin is rejected before routing.
 Conduit-generated document links use the configured HTTPS origin.
 
-External top-level GET/HEAD navigation may enter only the application root,
-its slashless mount redirect or its `index.html`, with the browser's document
-navigation metadata and no Origin. This permits links from a portfolio or source
-repository. Cross-site API and subresource requests remain rejected. Static shell
-access does not authorize protected content reads.
+External GET/HEAD requests without Origin may enter only the application root,
+its slashless mount redirect or its `index.html`. Link openers and previews do
+not always supply complete document-navigation metadata, so the public static
+shell does not require those headers. Cross-site API and other subresource
+requests remain rejected, as do incorrect supplied origins. Frame restrictions
+and same-origin resource policy remain in place. Static shell access does not
+authorize protected content reads.
 
 Preserve `Cache-Control: no-store` on authenticated and paper-sharing responses; do not place an
 HTML/API response cache in front of the app. Do not log request bodies for
