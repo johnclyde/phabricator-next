@@ -37,14 +37,23 @@ export default function PaperMathPreview({ source, className = '', parsedPreview
     const delay = setTimeout(() => {
       try {
         worker = new Worker(new URL('./paper-math.worker.ts', import.meta.url), { type: 'module' });
-        deadline = setTimeout(() => fail('This preview took too long. Equations remain as source so you can keep writing.'), 2_000);
-        worker.onmessage = (event: MessageEvent<{ id: number; rendering: PaperMathRendering }>) => {
-          if (!active || event.data.id !== id) return;
+        // Loading the renderer may involve a cold cache or slow device. Keep the
+        // computation deadline separate from the bounded startup allowance.
+        const timeout = () => fail('This preview took too long. Equations remain as source so you can keep writing.');
+        deadline = setTimeout(timeout, 10_000);
+        worker.onmessage = (event: MessageEvent<{ ready: true } | { id: number; rendering: PaperMathRendering }>) => {
+          if (!active) return;
+          if ('ready' in event.data) {
+            clearTimeout(deadline);
+            deadline = setTimeout(timeout, 2_000);
+            worker?.postMessage({ id, requests: document.requests });
+            return;
+          }
+          if (event.data.id !== id) return;
           clearTimeout(deadline); worker?.terminate();
           setResult({ requests: document.requests, rendering: event.data.rendering });
         };
         worker.onerror = () => fail('Math preview is unavailable on this device. Your source is still available.');
-        worker.postMessage({ id, requests: document.requests });
       } catch { fail('Math preview is unavailable on this device. Your source is still available.'); }
     }, 120);
     return () => { active = false; clearTimeout(delay); clearTimeout(deadline); worker?.terminate(); };

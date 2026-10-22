@@ -122,3 +122,16 @@ Latest upstream treats its old `differential.whitespace-matters` setting as [obs
 The pinned [Differential Harbormaster field](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/differential/customfield/DifferentialHarbormasterField.php) loads messages for the selected diff's build targets, with a legacy-property fallback. Its [lint view](https://github.com/phacility/phabricator/blob/5720a38cfe95b00ca4be5016dd0d2f3195f4fa04/src/applications/harbormaster/view/HarbormasterLintPropertyView.php) sorts and optionally caps rows, then links mapped paths with a minimum line of one. Our native finding navigator instead preserves recorded order and requires a valid original line. O203a does not implement Harbormaster plans, build-target ingestion, upstream lint/unit protocols, byte-column ranges or automatic inline lint publication. Finding disputes, waivers, grounded claims/citations, automated suggested edits and evaluation fixtures remain separate work.
 
 D102 remains partial. Semantic move detection, structural/formatting-aware filters, rename alignment, rendered PDF comparison, inline-thread keyboard navigation and upstream interdiff/import compatibility remain open. D106b adds verified exact deleted-side discussion, and D106c adds bounded [multi-passage/file suggestions](suggested-edits.md) on one original text version. Arbitrary selection across mixed diff text and Word package proposals remain separate work. Version-pinned PDF viewing and SyncTeX source navigation are available through [paper builds](paper-builds.md); they do not yet compare rendered versions. The literal comparison does not claim to distinguish rewritten meaning, validate scientific or legal claims, or complete Differential parity.
+
+The local paper reader supports abstract and proof boundaries, independent-counter
+`newtheorem` environments, and references to their labels and numbered `equation`
+environments. Simple zero-argument `newcommand`, `providecommand`, and
+`DeclareMathOperator` declarations in the preamble supply local math notation.
+Declarations remain subject to the existing input, expansion, time, and markup
+limits; they never load packages or execute TeX. Renderer loading gets a bounded
+10-second startup allowance before the existing 2-second computation deadline. Changes to notation participate
+in rendered equation comparisons. Prose line wrapping follows the reading width
+rather than literal source newlines. Exact source and downloads remain unchanged.
+Shared or section-relative theorem counters, macro arguments, arbitrary TeX
+execution, bibliography resolution, and full document compilation remain outside
+this reading projection; unsupported content retains the source fallback.

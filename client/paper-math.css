@@ -3,7 +3,7 @@
 .paper-math-content { background: var(--panel, #fff); border: 1px solid var(--border, #d7dce2); border-radius: 3px; min-width: 0; padding: 24px; font: 17px/1.65 Georgia, 'Times New Roman', serif; overflow-wrap: anywhere; }
 .paper-math-content > :first-child { margin-top: 0; }
 .paper-math-content > :last-child { margin-bottom: 0; }
-.paper-math-content p { white-space: pre-wrap; margin: 0 0 1em; }
+.paper-math-content p { white-space: normal; margin: 0 0 1em; }
 .paper-math-content h2, .paper-math-content h3, .paper-math-content h4, .paper-math-content h5 { font-family: inherit; line-height: 1.35; margin: 1.4em 0 .65em; }
 .paper-math-content h2 { font-size: 1.6em; }
 .paper-math-content h3 { font-size: 1.35em; }

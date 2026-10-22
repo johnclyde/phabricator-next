@@ -29,6 +29,9 @@ interface PaperDocument {
   date?: string;
   titleCommands: Map<number, number>;
   metadataCommands: Map<number, number>;
+  mathCommands?: string;
+  environments?: Map<string, string>;
+  references?: Map<string, string>;
 }
 
 function group(source: string, start: number, open = '{', close = '}'): { text: string; end: number } | null {
@@ -169,6 +172,8 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
   const blocks: PaperPreviewBlock[] = [];
   let inline: PaperPreviewInline[] = [];
   let titleRendered = false;
+  const environmentCounts = new Map<string, number>();
+  let equationNumber = 0;
   const flush = () => { if (inline.some(node => node.kind !== 'text' || node.text.trim())) blocks.push({ kind: 'paragraph', children: inline }); inline = []; };
   const text = (value: string, kind: 'text' | 'literal' | 'code' = 'text') => {
     if (!value) return;
@@ -176,7 +181,7 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
     if (last?.kind === kind && 'text' in last) last.text += value;
     else { inline.push({ kind, text: value }); budget.nodes++; }
   };
-  const children = (value: string): PaperPreviewInline[] => parse(value, budget, depth + 1, false).flatMap(block => block.kind === 'paragraph' ? block.children : []);
+  const children = (value: string): PaperPreviewInline[] => parse(value, budget, depth + 1, false, document ? { ...document, titleCommands: new Map(), metadataCommands: new Map() } : undefined).flatMap(block => block.kind === 'paragraph' ? block.children : []);
   const math = (expression: string, original: string, display: boolean) => {
     if (expression.length > PAPER_PREVIEW_MAX_MATH_CHARACTERS || ++budget.math > MAX_MATH) {
       budget.limited = true;
@@ -184,6 +189,9 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
       else text(original, 'literal');
       return;
     }
+    const declarations = document?.mathCommands ?? '';
+    const commands = new Set(expression.match(/\\[a-zA-Z]+/g) ?? []);
+    if ([...declarations.matchAll(/\\providecommand\{(\\[a-zA-Z]+)\}/g)].some(match => commands.has(match[1]!))) expression = declarations + expression;
     budget.nodes++;
     if (display && blocksAllowed) { flush(); blocks.push({ kind: 'math', expression, source: original }); }
     else inline.push({ kind: 'math', expression, source: original });
@@ -218,6 +226,20 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
       if (blank) { flush(); index += blank[0].length; continue; }
     }
     const environment = character === '\\' ? /^\\begin\{([a-zA-Z*]+)\}/.exec(source.slice(index)) : null;
+    const boundary = character === '\\' ? /^\\(begin|end)\{([a-zA-Z*]+)\}/.exec(source.slice(index)) : null;
+    if (boundary && blocksAllowed && (['abstract', 'proof'].includes(boundary[2]!) || document?.environments?.has(boundary[2]!))) {
+      flush();
+      const name = boundary[2]!;
+      if (boundary[1] === 'begin') {
+        const count = (environmentCounts.get(name) ?? 0) + 1;
+        environmentCounts.set(name, count);
+        const title = name === 'abstract' ? 'Abstract' : name === 'proof' ? 'Proof.' : `${document!.environments!.get(name)} ${count}.`;
+        inline.push({ kind: 'strong', children: [{ kind: 'text', text: title }] }); budget.nodes++;
+        flush();
+      } else if (name === 'proof') { text('□'); flush(); }
+      index += boundary[0].length;
+      continue;
+    }
     if (environment && (mathEnvironments.has(environment[1]!) || verbatimEnvironments.has(environment[1]!))) {
       const name = environment[1]!, endMarker = `\\end{${name}}`, start = index + environment[0].length;
       const verbatim = verbatimEnvironments.has(name);
@@ -227,7 +249,12 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
       if (verbatim) {
         if (blocksAllowed) { flush(); blocks.push({ kind: 'source', source: original }); budget.nodes++; }
         else text(original, 'code');
-      } else math(name === 'displaymath' || name === 'math' ? source.slice(start, end) : original, original, name !== 'math');
+      } else {
+        let expression = source.slice(start, end).replace(/\\label\{[^{}]*\}/g, '');
+        if (name === 'equation') expression += `\\tag{${++equationNumber}}`;
+        else if (!['equation*', 'displaymath', 'math'].includes(name)) expression = `\\begin{${name}}${expression}\\end{${name}}`;
+        math(expression, original, name !== 'math');
+      }
       index = end + endMarker.length;
       continue;
     }
@@ -255,10 +282,16 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
       const command = /^\\([a-zA-Z]+)\*?/.exec(source.slice(index));
       if (command) {
         const name = command[1]!;
+        if (name === 'appendix' && blocksAllowed) { flush(); index += command[0].length; continue; }
         let argumentStart = index + command[0].length;
         while (source[argumentStart] === ' ' || source[argumentStart] === '\t') argumentStart++;
         if (source[argumentStart] === '[') { const optional = group(source, argumentStart, '[', ']'); if (optional) argumentStart = optional.end; }
         const argument = group(source, argumentStart);
+        if (argument && name === 'label' && document) { index = argument.end; continue; }
+        if (argument && (name === 'ref' || name === 'eqref') && document?.references?.has(argument.text)) {
+          const value = document.references.get(argument.text)!;
+          text(name === 'eqref' ? `(${value})` : value); index = argument.end; continue;
+        }
         if (argument && Object.hasOwn(headingLevels, name) && blocksAllowed) {
           flush(); blocks.push({ kind: 'heading', level: headingLevels[name]!, children: children(argument.text) }); budget.nodes++;
           index = argument.end; continue;
@@ -280,9 +313,72 @@ function parse(source: string, budget: Budget, depth: number, blocksAllowed: boo
   return blocks;
 }
 
+function withoutComments(source: string): string {
+  let result = '';
+  for (let index = 0; index < source.length; index++) {
+    if (source[index] === '\\') { result += source.slice(index, index + 2); index++; }
+    else if (source[index] === '%') {
+      const newline = source.indexOf('\n', index);
+      if (newline < 0) break;
+      index = newline; result += '\n';
+    } else result += source[index];
+  }
+  return result;
+}
+
+/** Read only simple, zero-argument math declarations; never execute TeX or load packages. */
+function readingContext(preamble: string, body: string): Pick<PaperDocument, 'mathCommands' | 'environments' | 'references'> {
+  const environments = new Map<string, string>();
+  let mathCommands = '';
+  for (let index = 0; index < preamble.length;) {
+    index = skipSpaceAndComments(preamble, index);
+    const verb = /^\\verb\*?([^a-zA-Z\s])/.exec(preamble.slice(index));
+    if (verb) {
+      const end = preamble.indexOf(verb[1]!, index + verb[0].length);
+      index = end < 0 ? preamble.length : end + 1;
+      continue;
+    }
+    const command = /^\\(newcommand|providecommand|DeclareMathOperator|newtheorem)\b/.exec(preamble.slice(index));
+    if (!command) {
+      if (preamble[index] === '{') { const argument = group(preamble, index); if (argument) { index = argument.end; continue; } }
+      index++; continue;
+    }
+    const first = group(preamble, skipSpaceAndComments(preamble, index + command[0].length));
+    const second = first && group(preamble, skipSpaceAndComments(preamble, first.end));
+    if (!first || !second) { index += command[0].length; continue; }
+    if (preamble[skipSpaceAndComments(preamble, second.end)] === '[') { index = second.end; continue; }
+    if (command[1] === 'newtheorem' && /^[a-zA-Z]+$/.test(first.text) && /^[a-zA-Z ]{1,80}$/.test(second.text) && environments.size < 32) environments.set(first.text, second.text);
+    else if (/^\\[a-zA-Z]+$/.test(first.text) && mathCommands.length + second.text.length < 4000) {
+      const value = command[1] === 'DeclareMathOperator' ? `\\operatorname{${second.text}}` : second.text;
+      const declaration = `\\providecommand{${first.text}}{${value}}`;
+      if (mathCommands.length + declaration.length <= 4000) mathCommands += declaration;
+    }
+    index = second.end;
+  }
+  const references = new Map<string, string>(), counts = new Map<string, number>();
+  // Reuse the parser to keep literal and verbatim examples out of reference discovery.
+  const preview = parse(body, { nodes: 0, math: 0, limited: false }, 0, true);
+  let current: string | undefined;
+  for (const block of preview) {
+    if (block.kind === 'heading') current = undefined;
+    const values = block.kind === 'paragraph' ? block.children.filter(node => node.kind === 'literal').map(node => 'text' in node ? node.text : '') : block.kind === 'math' ? [block.source] : [];
+    for (const value of values) {
+      for (const match of withoutComments(value).matchAll(/\\begin\{([a-zA-Z*]+)\}|\\label\{([^{}]+)\}/g)) {
+        if (match[1] && (environments.has(match[1]) || match[1] === 'equation')) { const count = (counts.get(match[1]) ?? 0) + 1; counts.set(match[1], count); current = String(count); }
+        if (match[2] && current) references.set(match[2], current);
+      }
+    }
+  }
+  return { mathCommands, environments, references };
+}
+
 export function parsePaperPreview(source: string): PaperPreview {
   if (source.length > PAPER_PREVIEW_MAX_CHARACTERS) return { blocks: [{ kind: 'source', source }], limited: true };
   const budget: Budget = { nodes: 0, math: 0, limited: false };
   const document = paperDocument(source);
+  if (document) {
+    const context = readingContext(source.slice(0, document.start), source.slice(document.start, document.end));
+    Object.assign(document, context);
+  }
   return { blocks: parse(document ? source.slice(document.start, document.end) : source, budget, 0, true, document), limited: budget.limited };
 }

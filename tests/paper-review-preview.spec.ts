@@ -106,3 +106,40 @@ test('an explicit initial Changes selection is restored and source line comments
   expect(after.comments[0]).toMatchObject({ versionId: detail.versions[0]!.id, filePath: 'main.tex', line: 8, body: 'Check this exact source equation.' });
   expect(after.versions).toEqual(detail.versions);
 });
+
+test('structured paper reading renders theorem environments, custom notation and labeled equations', async ({ page, request }) => {
+  // A cold renderer must get its startup allowance before the computation clock.
+  await page.route('**/client/paper-math.worker.ts*', async route => {
+    await new Promise(resolve => setTimeout(resolve, 2_500));
+    await route.continue();
+  });
+  const source = String.raw`\documentclass{article}
+\newtheorem{proposition}{Proposition}
+\newcommand{\leftdiv}{\mathrel{\mid_L}}
+\title{Permutation cancellation}
+\begin{document}\maketitle
+\begin{abstract}A readable manuscript.\end{abstract}
+\begin{proposition}\label{prop:cancel}Suppose $a\leftdiv mn$.\end{proposition}
+\begin{proof}Use Proposition~\ref{prop:cancel}.
+\begin{equation}\label{eq:cancel}a\leftdiv n\end{equation}
+Equation~\eqref{eq:cancel} is the conclusion.\end{proof}
+\end{document}`;
+  const response = await request.post('api/revisions', { headers: { 'Idempotency-Key': randomUUID() }, data: {
+    kind: 'paper', title: 'Structured manuscript', summary: '',
+    testPlan: 'Check reading layout and original source.', files: [{ path: 'main.tex', content: source }],
+  } });
+  expect(response.ok()).toBe(true);
+  const detail = await response.json() as RevisionDetail;
+  await page.goto(`./#${detail.revision.id}`);
+  const reading = preview(page);
+  await expect(reading.locator('.katex')).toHaveCount(2, { timeout: 15_000 });
+  await expect(reading.locator('.paper-math-fallback, .paper-math-command')).toHaveCount(0);
+  await expect(reading).toContainText('Proposition 1.');
+  await expect(reading).toContainText('Use Proposition 1.');
+  await expect(reading).toContainText('Equation (1) is the conclusion.');
+  await expect(reading).toContainText('Abstract');
+  await expect(reading).toContainText('Proof.');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await choose(page, 'Source');
+  await expect(panel(page)).toContainText('\\newcommand{\\leftdiv}');
+});
