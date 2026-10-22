@@ -6,3 +6,6 @@ self.onmessage = (event: MessageEvent<{ id: number; requests: PaperMathRequest[]
     || requests.some(request => typeof request?.expression !== 'string' || typeof request.displayMode !== 'boolean')) return;
   self.postMessage({ id, rendering: renderPaperMath(requests) });
 };
+
+// Signal after the math module has loaded, before starting any requested work.
+self.postMessage({ ready: true });
